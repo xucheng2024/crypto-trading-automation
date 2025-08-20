@@ -70,7 +70,7 @@ export class OKXClient {
 
   constructor(config: OKXConfig) {
     this.config = config;
-    this.baseUrl = 'https://us.okx.com';  // ✅ 使用正确的 US 区域 URL
+    this.baseUrl = 'https://www.okx.com';  // ✅ 使用全球通用 URL
     
     axiosRetry(axios, { 
       retries: config.maxRetries || this.defaultMaxRetries,
@@ -139,6 +139,11 @@ export class OKXClient {
           throw new Error('Request timeout - OKX API is not responding');
         }
         if (error.response) {
+          // Try to get detailed error from OKX API response
+          const responseData = error.response.data;
+          if (responseData && responseData.code && responseData.msg) {
+            throw new Error(`OKX API Error ${responseData.code}: ${responseData.msg}`);
+          }
           throw new Error(`HTTP ${error.response.status}: ${error.response.statusText}`);
         }
         if (error.request) {
@@ -287,7 +292,7 @@ export class OKXClient {
   // Get account balance
   async getBalance(ccy?: string): Promise<any[]> {
     try {
-      let endpoint = '/asset/balances';
+      let endpoint = '/account/balance';
       if (ccy) endpoint += `?ccy=${ccy}`;
       
       const response = await this.makeRequest(endpoint);
@@ -344,6 +349,7 @@ export class OKXClient {
   // Test connection
   async testConnection(): Promise<boolean> {
     try {
+      // Use a simple endpoint that requires authentication to test connection
       const response = await this.makeRequest('/account/balance');
       return response.code === '0';
     } catch (error) {
