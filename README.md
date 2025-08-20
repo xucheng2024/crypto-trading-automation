@@ -27,8 +27,8 @@ npm run dev
 
 ### Core Libraries
 - **`lib/okx.ts`** - OKX API client with enterprise-grade stability features
-- **`lib/algo-buy.ts`** - Algorithmic buying logic and strategy execution
-- **`lib/trading-strategy.ts`** - Trading strategy service (DCA, grid trading)
+- **`services/trading/algo-buy.service.ts`** - Algorithmic buying logic and strategy execution
+- **`services/trading/trading-strategy.service.ts`** - Trading strategy service (DCA, grid trading)
 - **`lib/supabase.ts`** - Supabase database client
 
 ### Automation

@@ -1,4 +1,4 @@
-import { OKXClient } from './okx';
+import { OKXClient } from '../../lib/okx';
 
 export interface CryptoConfig {
   limit: string;

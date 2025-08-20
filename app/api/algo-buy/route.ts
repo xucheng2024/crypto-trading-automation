@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { OKXClient } from '@/lib/okx';
-import { AlgoTradingService } from '@/lib/algo-buy';
+import { AlgoTradingService } from '@/services/trading/algo-buy.service';
 import fs from 'fs';
 import path from 'path';
 
