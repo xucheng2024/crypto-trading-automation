@@ -34,7 +34,7 @@ jobs:
         echo "Testing OKX API connection..."
         # This would test the connection before proceeding
         
-    - name: Execute Trading Strategy
+    - name: Execute Algorithmic Trading
       env:
         OKX_API_KEY: ${{ secrets.OKX_API_KEY }}
         OKX_SECRET_KEY: ${{ secrets.OKX_SECRET_KEY }}
@@ -44,43 +44,49 @@ jobs:
         SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
         SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
       run: |
-        echo "Running trading strategy at $(date)"
+        echo "🚀 Executing Algorithmic Trading Strategy at $(date)"
+        echo "📊 Will place trigger orders for ALL cryptocurrencies in config"
+        echo "💰 Each order uses FULL available balance"
         
-        # Example: Execute DCA strategy for BTC
-        curl -X POST ${{ secrets.API_ENDPOINT }}/api/strategy \
+        # Execute the algorithmic trading strategy
+        response=$(curl -s -X POST ${{ secrets.API_ENDPOINT }}/api/algo-trading \
           -H "Content-Type: application/json" \
           -H "x-api-key: ${{ secrets.STRATEGY_API_KEY }}" \
-          -d '{
-            "action": "run_dca_strategy",
-            "config": {
-              "symbol": "BTC",
-              "amount": 0.001,
-              "priceThreshold": 45000
-            }
-          }'
+          -w "\n%{http_code}")
         
-        # Example: Check market conditions
-        curl -X POST ${{ secrets.API_ENDPOINT }}/api/strategy \
-          -H "Content-Type: application/json" \
-          -H "x-api-key: ${{ secrets.STRATEGY_API_KEY }}" \
-          -d '{
-            "action": "check_conditions",
-            "conditions": [
-              {
-                "symbol": "BTC",
-                "condition": "price_below",
-                "value": 45000,
-                "action": "buy",
-                "amount": 0.001,
-                "orderType": "market"
-              }
-            ]
-          }'
+        # Extract response body and status code
+        http_code=$(echo "$response" | tail -n1)
+        response_body=$(echo "$response" | head -n -1)
         
-        echo "Trading strategy execution completed"
+        echo "📡 API Response Status: $http_code"
+        echo "📄 Response Body: $response_body"
+        
+        if [ "$http_code" = "200" ]; then
+          echo "✅ Algorithmic trading executed successfully!"
+          
+          # Parse and display results
+          total_orders=$(echo "$response_body" | jq -r '.summary.totalOrders // "N/A"')
+          successful_orders=$(echo "$response_body" | jq -r '.summary.successfulOrders // "N/A"')
+          failed_orders=$(echo "$response_body" | jq -r '.summary.failedOrders // "N/A"')
+          total_value=$(echo "$response_body" | jq -r '.summary.totalValue // "N/A"')
+          
+          echo "📊 Execution Summary:"
+          echo "   Total Orders: $total_orders"
+          echo "   Successful: $successful_orders"
+          echo "   Failed: $failed_orders"
+          echo "   Total Value: $total_value"
+          
+        else
+          echo "❌ Algorithmic trading failed with status: $http_code"
+          echo "Error details: $response_body"
+          exit 1
+        fi
+        
+        echo "🎯 Algorithmic trading execution completed"
         
     - name: Log results
       run: |
-        echo "Trading job completed at $(date)"
-        echo "Check Supabase for updated records"
-        echo "Check OKX account for executed trades"
+        echo "🎯 Algorithmic trading job completed at $(date)"
+        echo "📊 Check OKX account for trigger orders placed"
+        echo "💰 Orders will execute when prices reach trigger levels"
+        echo "📈 Monitor market conditions for order execution"
