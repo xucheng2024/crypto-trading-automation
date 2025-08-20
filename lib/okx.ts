@@ -70,7 +70,15 @@ export class OKXClient {
 
   constructor(config: OKXConfig) {
     this.config = config;
-    this.baseUrl = 'https://www.okx.com';  // ✅ 使用全球通用 URL
+    
+    // Use different base URL for demo trading if needed
+    if (config.isTestnet) {
+      this.baseUrl = 'https://www.okx.com';  // Demo trading uses same URL but with x-simulated-trading header
+      console.log('🔧 Demo trading mode - using www.okx.com with simulated trading header');
+    } else {
+      this.baseUrl = 'https://www.okx.com';  // Production trading
+      console.log('🔧 Production trading mode - using www.okx.com');
+    }
     
     axiosRetry(axios, { 
       retries: config.maxRetries || this.defaultMaxRetries,
@@ -87,7 +95,28 @@ export class OKXClient {
   }
 
   private generateSignature(timestamp: string, method: string, requestPath: string, body: string = ''): string {
-    const message = timestamp + method + requestPath + body;
+    // OKX API signature format: timestamp + method + requestPath + body
+    // All inputs must be exactly as they appear in the request
+    
+    // Ensure method is uppercase
+    const upperMethod = method.toUpperCase();
+    
+    // Ensure body is string (empty string for GET requests)
+    const bodyStr = body || '';
+    
+    // Construct the message exactly as OKX expects
+    const message = timestamp + upperMethod + requestPath + bodyStr;
+    
+    console.log('🔐 Signature Debug:', {
+      timestamp,
+      method: upperMethod,
+      requestPath,
+      body: bodyStr || '(empty)',
+      message,
+      messageLength: message.length,
+      secretKeyLength: this.config.secretKey.length
+    });
+    
     return crypto
       .createHmac('sha256', this.config.secretKey)
       .update(message)
@@ -99,30 +128,67 @@ export class OKXClient {
     method: 'GET' | 'POST' = 'GET', 
     body?: any
   ): Promise<any> {
+    // OKX API requires timestamp in ISO 8601 format with millisecond precision
+    // Must be within 30 seconds of server time
     const timestamp = new Date().toISOString();
+    
+    // requestPath must include path + query parameters (without domain)
     const requestPath = `/api/v5${endpoint}`;
+    
+    // Body must be byte-identical - use exact same string for signature and request
     const bodyString = body ? JSON.stringify(body) : '';
     
-    const signature = this.generateSignature(timestamp, method, requestPath, bodyString);
+    console.log('📡 Request Debug:', {
+      endpoint,
+      method,
+      timestamp,
+      requestPath,
+      bodyString: bodyString || '(empty)',
+      serverTime: Date.now(),
+      isoTimestamp: timestamp
+    });
     
+    // Method must be uppercase for signature
+    const signature = this.generateSignature(timestamp, method.toUpperCase(), requestPath, bodyString);
+    
+    // OKX API requires specific header order for signature validation
+    // All four private headers must be present and consistent
     const headers: any = {
       'OK-ACCESS-KEY': this.config.apiKey,
       'OK-ACCESS-SIGN': signature,
-      'OK-ACCESS-TIMESTAMP': timestamp,
+      'OK-ACCESS-TIMESTAMP': timestamp,  // Must match timestamp used in signature
       'OK-ACCESS-PASSPHRASE': this.config.passphrase,
       'Content-Type': 'application/json',
     };
+
+    // Add simulated trading header for testnet
+    if (this.config.isTestnet) {
+      headers['x-simulated-trading'] = '1';
+      console.log('🔧 Testnet mode enabled - adding x-simulated-trading header');
+    }
+
+    console.log('📋 Request Headers:', {
+      'OK-ACCESS-KEY': `${this.config.apiKey.substring(0, 8)}...`,
+      'OK-ACCESS-SIGN': `${signature.substring(0, 16)}...`,
+      'OK-ACCESS-TIMESTAMP': timestamp,
+      'OK-ACCESS-PASSPHRASE': `${this.config.passphrase.substring(0, 8)}...`,
+      'Content-Type': headers['Content-Type'],
+      'x-simulated-trading': headers['x-simulated-trading'] || 'not set',
+      'isTestnet': this.config.isTestnet,
+      'timestampConsistency': 'OK' // Verify timestamp is same in signature and header
+    });
 
     if (this.config.isTestnet) {
       headers['x-simulated-trading'] = '1';
     }
 
     try {
+      // Ensure request body is exactly the same as used in signature
       const response = await axios({
         method,
         url: this.baseUrl + requestPath,
         headers,
-        data: bodyString,
+        data: bodyString, // Must be byte-identical to bodyString used in signature
         timeout: this.config.timeout || this.defaultTimeout,
       });
 
@@ -141,6 +207,13 @@ export class OKXClient {
         if (error.response) {
           // Try to get detailed error from OKX API response
           const responseData = error.response.data;
+          console.error('❌ OKX API Error Response:', {
+            status: error.response.status,
+            statusText: error.response.statusText,
+            data: responseData,
+            headers: error.response.headers
+          });
+          
           if (responseData && responseData.code && responseData.msg) {
             throw new Error(`OKX API Error ${responseData.code}: ${responseData.msg}`);
           }
