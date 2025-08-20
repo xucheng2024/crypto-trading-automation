@@ -44,8 +44,21 @@ export class AlgoTradingService {
       const balances = await this.okxClient.getBalance();
       console.log('💰 Account balances retrieved:', balances);
       
-      // Find USDT balance for buying
-      const usdtBalance = balances.find(b => b.ccy === 'USDT');
+      // Find USDT balance for buying - handle nested structure from OKX API
+      let usdtBalance: any = null;
+      if (balances && balances.length > 0) {
+        // OKX API returns nested structure, USDT balance is in details array
+        for (const balance of balances) {
+          if (balance.details && Array.isArray(balance.details)) {
+            const usdtDetail = balance.details.find((d: any) => d.ccy === 'USDT');
+            if (usdtDetail) {
+              usdtBalance = usdtDetail;
+              break;
+            }
+          }
+        }
+      }
+      
       if (!usdtBalance || parseFloat(usdtBalance.availBal) <= 0) {
         throw new Error('No USDT balance available for trading');
       }
@@ -118,25 +131,26 @@ export class AlgoTradingService {
       // Calculate amount to buy (in crypto units)
       const cryptoAmount = balanceAmount / triggerPrice;
       
-      // Place the trigger order
-      const orderParams = {
+      // Place the REAL trigger order
+      const triggerParams = {
         instId: this.formatTradingPair(symbol),
         tdMode: 'cash' as const,
         side: 'buy' as const,
-        ordType: 'limit' as const,
-        sz: cryptoAmount.toFixed(8), // Crypto amount with 8 decimal precision
-        px: triggerPrice.toFixed(4), // Trigger price
-        clOrdId: `algo_buy_${symbol}_${Date.now()}`,
+        ordType: 'trigger' as const,      // Use trigger order type
+        sz: cryptoAmount.toFixed(8),      // Crypto amount with 8 decimal precision
+        px: triggerPrice.toFixed(4),      // Execution price when triggered
+        triggerPx: triggerPrice.toFixed(4), // Trigger price (required for trigger orders)
+        clOrdId: `algo_trigger_${symbol}_${Date.now()}`,
       };
       
-      console.log(`📝 Placing order for ${symbol}:`, orderParams);
+      console.log(`📝 Placing TRIGGER order for ${symbol}:`, triggerParams);
       
-      const response = await this.okxClient.placeOrder(orderParams);
+      const response = await this.okxClient.placeTriggerOrder(triggerParams);
       
       if (response.data && response.data.length > 0) {
         const orderData = response.data[0];
         
-        console.log(`✅ Trigger order placed for ${symbol}: Order ID ${orderData.ordId}`);
+        console.log(`✅ Limit order placed for ${symbol}: Order ID ${orderData.ordId}`);
         
         return {
           symbol,
@@ -144,7 +158,7 @@ export class AlgoTradingService {
           orderId: orderData.ordId,
           triggerPrice,
           amount: cryptoAmount,
-          message: `Trigger order placed successfully at $${triggerPrice.toFixed(4)}`,
+          message: `Limit order placed successfully at $${triggerPrice.toFixed(4)} - will execute when price reaches this level`,
           timestamp: new Date().toISOString(),
         };
       } else {

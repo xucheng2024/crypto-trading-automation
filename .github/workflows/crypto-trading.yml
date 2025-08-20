@@ -1,92 +1,111 @@
-name: Crypto Trading Automation
+name: Crypto Trading Daily Automation
 
 on:
   schedule:
-    # Run every 15 minutes during market hours (UTC)
-    - cron: '*/15 13-23 * * 1-5'  # Monday-Friday 1PM-11PM UTC
-    - cron: '*/15 0-11 * * 1-5'   # Monday-Friday 12AM-11AM UTC
-  workflow_dispatch: # Allow manual trigger
+    # 每天早上 0:03 执行买入策略（设置 trigger 订单）
+    - cron: '3 0 * * *'
+    # 每天晚上 23:57 取消未成交的 trigger 订单
+    - cron: '57 23 * * *'
+    # 每5分钟执行卖出策略
+    - cron: '*/5 * * * *'
+  workflow_dispatch: # 允许手动触发
 
 jobs:
   trading-bot:
     runs-on: ubuntu-latest
     
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-      
-    - name: Setup Node.js
-      uses: actions/setup-node@v4
-      with:
-        node-version: '18'
-        cache: 'npm'
-        
-    - name: Install dependencies
-      run: npm ci
-      
-    - name: Test OKX Connection
-      env:
-        OKX_API_KEY: ${{ secrets.OKX_API_KEY }}
-        OKX_SECRET_KEY: ${{ secrets.OKX_SECRET_KEY }}
-        OKX_PASSPHRASE: ${{ secrets.OKX_PASSPHRASE }}
-        OKX_TESTNET: ${{ secrets.OKX_TESTNET }}
+    - name: Determine Action Type
+      id: action-type
       run: |
-        echo "Testing OKX API connection..."
-        # This would test the connection before proceeding
+        # 根据当前时间确定要执行的操作
+        current_hour=$(date -u +%H)
+        current_minute=$(date -u +%M)
         
-    - name: Execute Algorithmic Trading
-      env:
-        OKX_API_KEY: ${{ secrets.OKX_API_KEY }}
-        OKX_SECRET_KEY: ${{ secrets.OKX_SECRET_KEY }}
-        OKX_PASSPHRASE: ${{ secrets.OKX_PASSPHRASE }}
-        OKX_TESTNET: ${{ secrets.OKX_TESTNET }}
-        STRATEGY_API_KEY: ${{ secrets.STRATEGY_API_KEY }}
-        SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-        SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+        if [ "$current_hour" = "00" ] && [ "$current_minute" = "03" ]; then
+          echo "action=buy" >> $GITHUB_OUTPUT
+          echo "🟢 Executing BUY strategy (setting trigger orders)"
+        elif [ "$current_hour" = "23" ] && [ "$current_minute" = "57" ]; then
+          echo "action=cancel" >> $GITHUB_OUTPUT
+          echo "🔴 Executing CANCEL strategy (canceling unfilled trigger orders)"
+        else
+          echo "action=sell" >> $GITHUB_OUTPUT
+          echo "🟡 Executing SELL strategy (checking and selling if needed)"
+        fi
+    
+    - name: Execute Buy Strategy
+      if: steps.action-type.outputs.action == 'buy'
       run: |
-        echo "🚀 Executing Algorithmic Trading Strategy at $(date)"
-        echo "📊 Will place trigger orders for ALL cryptocurrencies in config"
-        echo "💰 Each order uses FULL available balance"
+        echo "🚀 Executing BUY strategy at $(date)"
+        echo "📊 Setting trigger orders for cryptocurrencies..."
         
-        # Execute the algorithmic trading strategy
-        response=$(curl -s -X POST ${{ secrets.API_ENDPOINT }}/api/algo-trading \
+        response=$(curl -s -X POST ${{ secrets.VERCEL_API_ENDPOINT }}/api/algo-buy \
           -H "Content-Type: application/json" \
           -H "x-api-key: ${{ secrets.STRATEGY_API_KEY }}" \
           -w "\n%{http_code}")
         
-        # Extract response body and status code
         http_code=$(echo "$response" | tail -n1)
         response_body=$(echo "$response" | head -n -1)
         
-        echo "📡 API Response Status: $http_code"
-        echo "📄 Response Body: $response_body"
+        echo "📡 Buy API Response: $http_code"
+        echo "📄 Response: $response_body"
         
         if [ "$http_code" = "200" ]; then
-          echo "✅ Algorithmic trading executed successfully!"
-          
-          # Parse and display results
-          total_orders=$(echo "$response_body" | jq -r '.summary.totalOrders // "N/A"')
-          successful_orders=$(echo "$response_body" | jq -r '.summary.successfulOrders // "N/A"')
-          failed_orders=$(echo "$response_body" | jq -r '.summary.failedOrders // "N/A"')
-          total_value=$(echo "$response_body" | jq -r '.summary.totalValue // "N/A"')
-          
-          echo "📊 Execution Summary:"
-          echo "   Total Orders: $total_orders"
-          echo "   Successful: $successful_orders"
-          echo "   Failed: $failed_orders"
-          echo "   Total Value: $total_value"
-          
+          echo "✅ Buy strategy executed successfully!"
         else
-          echo "❌ Algorithmic trading failed with status: $http_code"
-          echo "Error details: $response_body"
+          echo "❌ Buy strategy failed: $http_code"
           exit 1
         fi
-        
-        echo "🎯 Algorithmic trading execution completed"
-        
-    - name: Log results
+    
+    - name: Execute Cancel Strategy
+      if: steps.action-type.outputs.action == 'cancel'
       run: |
-        echo "🎯 Algorithmic trading job completed at $(date)"
-        echo "📊 Check OKX account for trigger orders placed"
-        echo "💰 Orders will execute when prices reach trigger levels"
-        echo "📈 Monitor market conditions for order execution"
+        echo "🚀 Executing CANCEL strategy at $(date)"
+        echo "📊 Canceling unfilled trigger orders..."
+        
+        response=$(curl -s -X POST ${{ secrets.VERCEL_API_ENDPOINT }}/api/cancel-orders \
+          -H "Content-Type: application/json" \
+          -H "x-api-key: ${{ secrets.STRATEGY_API_KEY }}" \
+          -w "\n%{http_code}")
+        
+        http_code=$(echo "$response" | tail -n1)
+        response_body=$(echo "$response" | head -n -1)
+        
+        echo "📡 Cancel API Response: $http_code"
+        echo "📄 Response: $response_body"
+        
+        if [ "$http_code" = "200" ]; then
+          echo "✅ Cancel strategy executed successfully!"
+        else
+          echo "❌ Cancel strategy failed: $http_code"
+          exit 1
+        fi
+    
+    - name: Execute Sell Strategy
+      if: steps.action-type.outputs.action == 'sell'
+      run: |
+        echo "🚀 Executing SELL strategy at $(date)"
+        echo "📊 Checking if selling is needed..."
+        
+        response=$(curl -s -X POST ${{ secrets.VERCEL_API_ENDPOINT }}/api/market-sell \
+          -H "Content-Type: application/json" \
+          -H "x-api-key: ${{ secrets.STRATEGY_API_KEY }}" \
+          -w "\n%{http_code}")
+        
+        http_code=$(echo "$response" | tail -n1)
+        response_body=$(echo "$response" | head -n -1)
+        
+        echo "📡 Sell API Response: $http_code"
+        echo "📄 Response: $response_body"
+        
+        if [ "$http_code" = "200" ]; then
+          echo "✅ Sell strategy executed successfully!"
+        else
+          echo "❌ Sell strategy failed: $http_code"
+          exit 1
+        fi
+    
+    - name: Log Completion
+      run: |
+        echo "🎯 Trading automation completed at $(date)"
+        echo "📊 Action executed: ${{ steps.action-type.outputs.action }}"

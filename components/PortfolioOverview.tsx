@@ -1,16 +1,14 @@
 'use client';
 
 import { PortfolioData } from '@/types/trading';
-import { TrendingUp, TrendingDown, DollarSign } from 'lucide-react';
+import { DollarSign } from 'lucide-react';
 
 interface PortfolioOverviewProps {
   portfolio: PortfolioData | null;
-  onUpdate: () => void;
 }
 
 export default function PortfolioOverview({
   portfolio,
-  onUpdate,
 }: PortfolioOverviewProps) {
   if (!portfolio) {
     return (

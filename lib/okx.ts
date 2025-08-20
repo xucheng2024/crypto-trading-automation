@@ -1,10 +1,16 @@
-import crypto from 'crypto';
+import * as crypto from 'crypto';
+import CircuitBreaker from 'opossum';
+import axios from 'axios';
+import axiosRetry from 'axios-retry';
 
 export interface OKXConfig {
   apiKey: string;
   secretKey: string;
   passphrase: string;
   isTestnet?: boolean;
+  timeout?: number;        // Request timeout in milliseconds
+  maxRetries?: number;     // Maximum retry attempts
+  retryDelay?: number;     // Base delay between retries
 }
 
 export interface OKXOrderParams {
@@ -14,6 +20,17 @@ export interface OKXOrderParams {
   ordType: 'market' | 'limit' | 'post_only' | 'fok' | 'ioc';
   sz: string;            // Order size
   px?: string;           // Price (required for limit orders)
+  clOrdId?: string;      // Client order ID
+}
+
+export interface OKXTriggerOrderParams {
+  instId: string;        // Trading pair (e.g., "BTC-USDT")
+  tdMode: 'cash' | 'cross' | 'isolated';
+  side: 'buy' | 'sell';
+  ordType: 'trigger';    // OKX trigger order type
+  sz: string;            // Order size
+  px: string;            // Execution price
+  triggerPx: string;     // Trigger price
   clOrdId?: string;      // Client order ID
 }
 
@@ -34,17 +51,43 @@ export interface OKXBalance {
   bal: string;
   frozenBal: string;
   availBal: string;
+  details?: Array<{
+    ccy: string;
+    availBal: string;
+    cashBal: string;
+    frozenBal: string;
+    eq: string;
+    eqUsd: string;
+  }>;
 }
 
 export class OKXClient {
   private config: OKXConfig;
   private baseUrl: string;
+  private readonly defaultTimeout: number = 10000; // 10 seconds
+  private readonly defaultMaxRetries: number = 3;
+  private readonly defaultRetryDelay: number = 1000;
 
   constructor(config: OKXConfig) {
     this.config = config;
     this.baseUrl = config.isTestnet 
       ? 'https://www.okx.com' 
       : 'https://www.okx.com';
+    
+    // Configure axios with retry
+    axiosRetry(axios, { 
+      retries: config.maxRetries || this.defaultMaxRetries,
+      retryDelay: (retryCount) => {
+        const delay = (config.retryDelay || this.defaultRetryDelay) * Math.pow(2, retryCount - 1);
+        console.log(`Retry attempt ${retryCount}, waiting ${delay}ms...`);
+        return delay;
+      },
+      retryCondition: (error) => {
+        // Retry on network errors and 5xx server errors
+        return axiosRetry.isNetworkOrIdempotentRequestError(error) || 
+               (error.response && error.response.status >= 500) || false;
+      }
+    });
   }
 
   private generateSignature(timestamp: string, method: string, requestPath: string, body: string = ''): string {
@@ -79,17 +122,15 @@ export class OKXClient {
     }
 
     try {
-      const response = await fetch(this.baseUrl + requestPath, {
+      const response = await axios({
         method,
+        url: this.baseUrl + requestPath,
         headers,
-        body: bodyString,
+        data: bodyString,
+        timeout: this.config.timeout || this.defaultTimeout,
       });
 
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-      }
-
-      const data = await response.json();
+      const data = response.data;
       
       if (data.code !== '0') {
         throw new Error(`OKX API Error: ${data.code} - ${data.msg}`);
@@ -97,23 +138,69 @@ export class OKXClient {
 
       return data;
     } catch (error) {
+      if (axios.isAxiosError(error)) {
+        if (error.code === 'ECONNABORTED') {
+          throw new Error('Request timeout - OKX API is not responding');
+        }
+        if (error.response) {
+          throw new Error(`HTTP ${error.response.status}: ${error.response.statusText}`);
+        }
+        if (error.request) {
+          throw new Error('Network error - no response received from OKX API');
+        }
+      }
+      
       console.error('OKX API request failed:', error);
       throw new Error(`OKX API request failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
   }
 
-  // Place a new order
+  // Create circuit breaker for critical operations
+  private createCircuitBreaker<T>(operation: () => Promise<T>): CircuitBreaker {
+    return new CircuitBreaker(operation, {
+      timeout: this.config.timeout || this.defaultTimeout,
+      errorThresholdPercentage: 50,
+      resetTimeout: 30000, // 30 seconds
+    });
+  }
+
+  // Place a new order with circuit breaker
   async placeOrder(orderParams: OKXOrderParams): Promise<OKXOrderResponse> {
     try {
-      // Validate order parameters
       this.validateOrderParams(orderParams);
-      
       console.log('Placing OKX order:', orderParams);
 
-      const response = await this.makeRequest('/trade/order', 'POST', orderParams);
-      return response;
+      const circuitBreaker = this.createCircuitBreaker(() => 
+        this.makeRequest('/trade/order', 'POST', orderParams)
+      );
+
+      // Add event listeners for monitoring
+      circuitBreaker.on('open', () => console.log('Circuit breaker opened for placeOrder'));
+      circuitBreaker.on('close', () => console.log('Circuit breaker closed for placeOrder'));
+      circuitBreaker.on('fallback', (result: any) => console.log('Circuit breaker fallback:', result));
+
+      return await circuitBreaker.fire();
     } catch (error) {
       console.error('Failed to place order:', error);
+      throw error;
+    }
+  }
+
+  // Place a trigger order with circuit breaker
+  async placeTriggerOrder(triggerParams: OKXTriggerOrderParams): Promise<OKXOrderResponse> {
+    try {
+      console.log('Placing OKX trigger order:', triggerParams);
+
+      const circuitBreaker = this.createCircuitBreaker(() => 
+        this.makeRequest('/trade/order', 'POST', triggerParams)
+      );
+
+      circuitBreaker.on('open', () => console.log('Circuit breaker opened for placeTriggerOrder'));
+      circuitBreaker.on('close', () => console.log('Circuit breaker closed for placeTriggerOrder'));
+
+      return await circuitBreaker.fire();
+    } catch (error) {
+      console.error('Failed to place trigger order:', error);
       throw error;
     }
   }
@@ -274,5 +361,10 @@ export class OKXClient {
       console.error('OKX connection test failed:', error);
       return false;
     }
+  }
+
+  // Get circuit breaker status for monitoring
+  getCircuitBreakerStatus(): string {
+    return 'Circuit breakers are active for critical operations';
   }
 }

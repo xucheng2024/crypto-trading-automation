@@ -1,12 +1,12 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { OKXClient, OKXOrderParams } from '@/lib/okx';
+import { OKXClient } from '@/lib/okx';
 import { supabase } from '@/lib/supabase';
 
-// Initialize OKX client
+// Initialize OKX client with demo credentials
 const okxClient = new OKXClient({
-  apiKey: process.env.OKX_API_KEY!,
-  secretKey: process.env.OKX_SECRET_KEY!,
-  passphrase: process.env.OKX_PASSPHRASE!,
+  apiKey: process.env.DEMO_OKX_API_KEY || process.env.OKX_API_KEY!,
+  secretKey: process.env.DEMO_OKX_SECRET_KEY || process.env.OKX_SECRET_KEY!,
+  passphrase: process.env.DEMO_OKX_PASSPHRASE || process.env.OKX_PASSPHRASE!,
   isTestnet: process.env.OKX_TESTNET === 'true',
 });
 
@@ -18,9 +18,6 @@ export async function POST(request: NextRequest) {
     console.log('OKX Trading API called:', { action, params });
 
     switch (action) {
-      case 'place_order':
-        return await handlePlaceOrder(params);
-      
       case 'cancel_order':
         return await handleCancelOrder(params);
       
@@ -33,11 +30,11 @@ export async function POST(request: NextRequest) {
       case 'get_positions':
         return await handleGetPositions(params);
       
-      case 'market_buy':
-        return await handleMarketBuy(params);
-      
       case 'market_sell':
         return await handleMarketSell(params);
+      
+      case 'get_market_price':
+        return await handleGetMarketPrice(params);
       
       default:
         return NextResponse.json(
@@ -57,76 +54,7 @@ export async function POST(request: NextRequest) {
   }
 }
 
-async function handlePlaceOrder(params: any) {
-  try {
-    const { symbol, amount, price, side, orderType = 'limit' } = params;
-    
-    // Validate required parameters
-    if (!symbol || !amount || !side) {
-      return NextResponse.json(
-        { error: 'Missing required parameters: symbol, amount, side' },
-        { status: 400 }
-      );
-    }
 
-    // Format trading pair for OKX
-    const instId = symbol.includes('-') ? symbol : `${symbol}-USDT`;
-    
-    const orderParams: OKXOrderParams = {
-      instId,
-      tdMode: 'cash',
-      side: side.toLowerCase(),
-      ordType: orderType.toLowerCase(),
-      sz: amount.toString(),
-      px: orderType === 'limit' ? price?.toString() : undefined,
-      clOrdId: `manual_${Date.now()}`,
-    };
-
-    console.log('Placing OKX order:', orderParams);
-
-    const response = await okxClient.placeOrder(orderParams);
-    
-    if (response.data && response.data.length > 0) {
-      const orderData = response.data[0];
-      
-      // Record the order in Supabase
-      const { data: dbOrder, error: dbError } = await supabase
-        .from('trades')
-        .insert({
-          symbol: symbol.toUpperCase(),
-          side: side.toLowerCase(),
-          amount: parseFloat(amount),
-          price: price ? parseFloat(price) : 0,
-          status: 'pending',
-        })
-        .select()
-        .single();
-
-      if (dbError) {
-        console.error('Failed to save order to database:', dbError);
-      }
-
-      return NextResponse.json({
-        success: true,
-        okxOrderId: orderData.ordId,
-        clientOrderId: orderData.clOrdId,
-        databaseOrder: dbOrder,
-        message: 'Order placed successfully',
-      });
-    } else {
-      throw new Error('No order data received from OKX');
-    }
-  } catch (error) {
-    console.error('Failed to place order:', error);
-    return NextResponse.json(
-      { 
-        error: 'Failed to place order',
-        details: error instanceof Error ? error.message : 'Unknown error'
-      },
-      { status: 500 }
-    );
-  }
-}
 
 async function handleCancelOrder(params: any) {
   try {
@@ -170,78 +98,7 @@ async function handleCancelOrder(params: any) {
   }
 }
 
-async function handleMarketBuy(params: any) {
-  try {
-    const { symbol, amount } = params;
-    
-    if (!symbol || !amount) {
-      return NextResponse.json(
-        { error: 'Missing required parameters: symbol, amount' },
-        { status: 400 }
-      );
-    }
 
-    // Get current market price
-    const instId = symbol.includes('-') ? symbol : `${symbol}-USDT`;
-    const marketPrice = await okxClient.getMarketPrice(instId);
-    
-    console.log('Market buy:', { symbol, amount, marketPrice });
-
-    const orderParams: OKXOrderParams = {
-      instId,
-      tdMode: 'cash',
-      side: 'buy',
-      ordType: 'market',
-      sz: amount.toString(),
-      clOrdId: `market_buy_${Date.now()}`,
-    };
-
-    const response = await okxClient.placeOrder(orderParams);
-    
-    if (response.data && response.data.length > 0) {
-      const orderData = response.data[0];
-      
-      // Record the market buy in database
-      const { data: dbOrder, error: dbError } = await supabase
-        .from('trades')
-        .insert({
-          symbol: symbol.toUpperCase(),
-          side: 'buy',
-          amount: parseFloat(amount),
-          price: marketPrice,
-          status: 'filled',
-        })
-        .select()
-        .single();
-
-      if (dbError) {
-        console.error('Failed to save market buy to database:', dbError);
-      }
-
-      // Update portfolio
-      await updatePortfolioAfterTrade(symbol.toUpperCase(), parseFloat(amount), marketPrice, 'buy');
-
-      return NextResponse.json({
-        success: true,
-        okxOrderId: orderData.ordId,
-        marketPrice,
-        databaseOrder: dbOrder,
-        message: 'Market buy executed successfully',
-      });
-    } else {
-      throw new Error('No order data received from OKX');
-    }
-  } catch (error) {
-    console.error('Failed to execute market buy:', error);
-    return NextResponse.json(
-      { 
-        error: 'Failed to execute market buy',
-        details: error instanceof Error ? error.message : 'Unknown error'
-      },
-      { status: 500 }
-    );
-  }
-}
 
 async function handleMarketSell(params: any) {
   try {
@@ -274,7 +131,7 @@ async function handleMarketSell(params: any) {
     
     console.log('Market sell:', { symbol, amount, marketPrice });
 
-    const orderParams: OKXOrderParams = {
+    const orderParams: any = {
       instId,
       tdMode: 'cash',
       side: 'sell',
@@ -396,6 +253,35 @@ async function handleGetPositions(params: any) {
     return NextResponse.json(
       { 
         error: 'Failed to get positions',
+        details: error instanceof Error ? error.message : 'Unknown error'
+      },
+      { status: 500 }
+    );
+  }
+}
+
+async function handleGetMarketPrice(params: any) {
+  try {
+    const { symbol } = params;
+    if (!symbol) {
+      return NextResponse.json(
+        { error: 'Missing required parameter: symbol' },
+        { status: 400 }
+      );
+    }
+
+    const instId = symbol.includes('-') ? symbol : `${symbol}-USDT`;
+    const marketPrice = await okxClient.getMarketPrice(instId);
+
+    return NextResponse.json({
+      success: true,
+      marketPrice,
+    });
+  } catch (error) {
+    console.error('Failed to get market price:', error);
+    return NextResponse.json(
+      { 
+        error: 'Failed to get market price',
         details: error instanceof Error ? error.message : 'Unknown error'
       },
       { status: 500 }
