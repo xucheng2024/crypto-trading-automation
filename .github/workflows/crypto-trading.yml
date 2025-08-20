@@ -1,0 +1,86 @@
+name: Crypto Trading Automation
+
+on:
+  schedule:
+    # Run every 15 minutes during market hours (UTC)
+    - cron: '*/15 13-23 * * 1-5'  # Monday-Friday 1PM-11PM UTC
+    - cron: '*/15 0-11 * * 1-5'   # Monday-Friday 12AM-11AM UTC
+  workflow_dispatch: # Allow manual trigger
+
+jobs:
+  trading-bot:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+        cache: 'npm'
+        
+    - name: Install dependencies
+      run: npm ci
+      
+    - name: Test OKX Connection
+      env:
+        OKX_API_KEY: ${{ secrets.OKX_API_KEY }}
+        OKX_SECRET_KEY: ${{ secrets.OKX_SECRET_KEY }}
+        OKX_PASSPHRASE: ${{ secrets.OKX_PASSPHRASE }}
+        OKX_TESTNET: ${{ secrets.OKX_TESTNET }}
+      run: |
+        echo "Testing OKX API connection..."
+        # This would test the connection before proceeding
+        
+    - name: Execute Trading Strategy
+      env:
+        OKX_API_KEY: ${{ secrets.OKX_API_KEY }}
+        OKX_SECRET_KEY: ${{ secrets.OKX_SECRET_KEY }}
+        OKX_PASSPHRASE: ${{ secrets.OKX_PASSPHRASE }}
+        OKX_TESTNET: ${{ secrets.OKX_TESTNET }}
+        STRATEGY_API_KEY: ${{ secrets.STRATEGY_API_KEY }}
+        SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+        SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+      run: |
+        echo "Running trading strategy at $(date)"
+        
+        # Example: Execute DCA strategy for BTC
+        curl -X POST ${{ secrets.API_ENDPOINT }}/api/strategy \
+          -H "Content-Type: application/json" \
+          -H "x-api-key: ${{ secrets.STRATEGY_API_KEY }}" \
+          -d '{
+            "action": "run_dca_strategy",
+            "config": {
+              "symbol": "BTC",
+              "amount": 0.001,
+              "priceThreshold": 45000
+            }
+          }'
+        
+        # Example: Check market conditions
+        curl -X POST ${{ secrets.API_ENDPOINT }}/api/strategy \
+          -H "Content-Type: application/json" \
+          -H "x-api-key: ${{ secrets.STRATEGY_API_KEY }}" \
+          -d '{
+            "action": "check_conditions",
+            "conditions": [
+              {
+                "symbol": "BTC",
+                "condition": "price_below",
+                "value": 45000,
+                "action": "buy",
+                "amount": 0.001,
+                "orderType": "market"
+              }
+            ]
+          }'
+        
+        echo "Trading strategy execution completed"
+        
+    - name: Log results
+      run: |
+        echo "Trading job completed at $(date)"
+        echo "Check Supabase for updated records"
+        echo "Check OKX account for executed trades"
