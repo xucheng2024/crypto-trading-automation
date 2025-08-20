@@ -1,144 +1,135 @@
 # Crypto Trading Automation
 
-A Next.js application for automated crypto trading with OKX exchange integration, featuring algorithmic trading strategies and GitHub Actions automation.
+A Next.js + Flask Python application for automated crypto trading with OKX exchange integration, featuring algorithmic trading strategies and modern API architecture.
 
 ## 🚀 Quick Start
 
 ```bash
+# Install Node.js dependencies
 npm install
+
+# Install Python dependencies
+pip install -r requirements.txt
+
+# Setup environment variables
 cp env.example .env.local
-# Fill in your environment variables
+# Fill in your OKX API credentials
+
+# Run development server
 npm run dev
 ```
 
-## 📁 Project Structure
+## 🏗️ Architecture
 
-### Core Application
-- **`app/page.tsx`** - Main dashboard page
+### Frontend (Next.js)
+- **`app/page.tsx`** - Main dashboard with OKX API testing interface
 - **`components/Dashboard.tsx`** - Main dashboard component
 - **`components/PortfolioOverview.tsx`** - Portfolio display
 - **`components/TradingInterface.tsx`** - Trading interface
 - **`components/TradeHistory.tsx`** - Trade history display
 
-### API Endpoints
-- **`app/api/algo-buy/route.ts`** - Algorithmic buying strategy (sets trigger orders)
-- **`app/api/cancel-orders/route.ts`** - Cancels unfilled trigger orders
-- **`app/api/market-sell/route.ts`** - Automated selling strategy (checks and sells when needed)
+### Backend (Flask Python)
+- **`api/okx_flask.py`** - Flask application with OKX trading API endpoints
+- **`requirements.txt`** - Python dependencies
 
-### Core Libraries
-- **`lib/okx.ts`** - OKX API client with enterprise-grade stability features
-- **`services/trading/algo-buy.service.ts`** - Algorithmic buying logic and strategy execution
-- **`services/trading/trading-strategy.service.ts`** - Trading strategy service (DCA, grid trading)
-- **`lib/supabase.ts`** - Supabase database client
-
-### Automation
-- **`.github/workflows/crypto-trading.yml`** - GitHub Actions workflow for automated trading
-- **`trading_config.json`** - Trading strategy configuration
-
-### Types
-- **`types/trading.ts`** - TypeScript interfaces for trading data
-- **`types/opossum.d.ts`** - Type definitions for circuit breaker library
+### Core API Endpoints
+- **`/api/okx/place-order`** - Place trading orders (POST)
+- **`/api/okx/cancel-order`** - Cancel existing orders (POST)
+- **`/api/okx/sell`** - Execute sell orders (POST)
+- **`/api/okx/health`** - API health check (GET)
 
 ## 🔧 Environment Variables
 
 ```env
-# OKX API (Production)
-OKX_API_KEY=your_okx_api_key
-OKX_SECRET_KEY=your_okx_secret_key
-OKX_PASSPHRASE=your_okx_passphrase
-OKX_TESTNET=false
+# OKX Demo Trading API (for testing)
+DEMO_OKX_API_KEY=your_demo_api_key
+DEMO_OKX_SECRET_KEY=your_demo_secret_key
+DEMO_OKX_PASSPHRASE=your_demo_passphrase
 
-# Strategy API Key (for GitHub Actions)
-STRATEGY_API_KEY=your_strategy_api_key
-
-# Vercel API Endpoint (for GitHub Actions)
-VERCEL_API_ENDPOINT=https://your-app.vercel.app
-
-# Supabase (if using database features)
-NEXT_PUBLIC_SUPABASE_URL=your_supabase_project_url
-NEXT_PUBLIC_SUPABASE_ANON_KEY=your_supabase_anon_key
+# OKX Production API (for live trading)
+OKX_API_KEY=your_production_api_key
+OKX_SECRET_KEY=your_production_secret_key
+OKX_PASSPHRASE=your_production_passphrase
 ```
 
-## 🤖 Automated Trading Strategy
+## 🤖 Trading Strategy
 
-### Daily Schedule
-- **🟢 0:03 UTC** - Execute buy strategy (sets trigger orders)
-- **🔴 23:57 UTC** - Cancel unfilled trigger orders
-- **🟡 Every 5 minutes** - Check and execute sell strategy
+### Core Functions
+1. **Place Order** - Execute buy/sell orders with OKX
+2. **Cancel Order** - Cancel unfilled or pending orders
+3. **Sell Strategy** - Automated selling based on conditions
 
-### Strategy Logic
-1. **Buy Strategy** - Places trigger orders for cryptocurrencies based on configuration
-2. **Cancel Strategy** - Removes unfilled orders to free up capital
-3. **Sell Strategy** - Monitors positions and sells based on profit/loss thresholds
+### API Usage Examples
 
-## 🛡️ Stability Features
+#### Place Order
+```bash
+curl -X POST /api/okx/place-order \
+  -H "Content-Type: application/json" \
+  -d '{
+    "instId": "BTC-USDT",
+    "tdMode": "cash",
+    "side": "buy",
+    "ordType": "market",
+    "sz": "0.001"
+  }'
+```
 
-### Circuit Breaker Pattern
-- Automatic failure detection and recovery
-- Prevents system overload during API failures
-- Configurable thresholds and timeouts
+#### Cancel Order
+```bash
+curl -X POST /api/okx/cancel-order \
+  -H "Content-Type: application/json" \
+  -d '{
+    "instId": "BTC-USDT",
+    "ordId": "order_id_here"
+  }'
+```
 
-### Retry Mechanism
-- Exponential backoff retry strategy
-- Smart retry conditions (network errors + 5xx responses)
-- Configurable retry attempts and delays
-
-### Error Handling
-- Comprehensive error classification
-- Detailed logging and monitoring
-- Graceful degradation
-
-## 📊 Trading Configuration
-
-The `trading_config.json` file contains:
-- Cryptocurrency symbols and limits
-- Expected return percentages
-- Trading frequency settings
-- Strategy parameters
+#### Sell
+```bash
+curl -X POST /api/okx/sell \
+  -H "Content-Type: application/json" \
+  -d '{
+    "instId": "BTC-USDT",
+    "tdMode": "cash",
+    "sz": "0.001"
+  }'
+```
 
 ## 🚀 Deployment
 
 ### Vercel Deployment
 ```bash
+# Build and deploy
 npm run build
 vercel --prod
 ```
 
-### GitHub Actions Setup
-1. Add repository secrets:
-   - `OKX_API_KEY`
-   - `OKX_SECRET_KEY` 
-   - `OKX_PASSPHRASE`
-   - `STRATEGY_API_KEY`
-   - `VERCEL_API_ENDPOINT`
-
-2. Workflow automatically runs:
-   - Daily at 0:03 UTC (buy strategy)
-   - Daily at 23:57 UTC (cancel orders)
-   - Every 5 minutes (sell strategy)
+### Vercel Configuration
+The `vercel.json` file automatically configures:
+- Python 3.9 runtime for Flask API
+- API routing for `/api/okx/*` endpoints
+- Next.js frontend deployment
 
 ## 🔒 Security Features
 
-- API key authentication for all endpoints
-- HMAC-SHA256 signature for OKX API calls
+- OKX API authentication with HMAC-SHA256 signatures
 - Environment variable protection
-- Rate limiting and timeout controls
-
-## 📈 Monitoring
-
-- Comprehensive logging for all operations
-- Circuit breaker status monitoring
-- Performance metrics and error tracking
-- GitHub Actions execution logs
+- Demo trading mode support (`x-simulated-trading` header)
+- Input validation and error handling
 
 ## 🛠️ Development
 
 ```bash
 # Install dependencies
 npm install
+pip install -r requirements.txt
 
 # Run development server
 npm run dev
+
+# Test Flask API locally
+cd api
+python okx_flask.py
 
 # Type checking
 npm run type-check
@@ -146,6 +137,35 @@ npm run type-check
 # Build for production
 npm run build
 ```
+
+## 📊 Project Structure
+
+```
+crypto/
+├── app/                    # Next.js frontend
+│   ├── page.tsx           # Main page with API testing
+│   ├── layout.tsx         # App layout
+│   └── globals.css        # Global styles
+├── components/             # React components
+│   ├── Dashboard.tsx      # Dashboard component
+│   ├── TradingInterface.tsx # Trading interface
+│   └── TradeHistory.tsx   # Trade history
+├── api/                    # Flask Python API
+│   └── okx_flask.py       # OKX trading API
+├── requirements.txt        # Python dependencies
+├── vercel.json            # Vercel configuration
+└── package.json           # Node.js dependencies
+```
+
+## 🔄 Migration Notes
+
+This project has been migrated from a pure TypeScript/Next.js architecture to a hybrid Next.js + Flask Python approach:
+
+- **Removed**: TypeScript OKX client (`lib/okx.ts`)
+- **Removed**: Next.js API routes (`app/api/*`)
+- **Added**: Flask Python API (`api/okx_flask.py`)
+- **Added**: Python dependencies (`requirements.txt`)
+- **Updated**: Vercel configuration for Python support
 
 ## 📝 License
 
