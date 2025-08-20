@@ -1,8 +1,8 @@
-# Crypto Trading Dashboard
+# Crypto Trading Automation
 
-A Next.js application for crypto trading with OKX exchange integration, portfolio management, and automated trading strategies.
+A Next.js application for automated crypto trading with OKX exchange integration, featuring algorithmic trading strategies and GitHub Actions automation.
 
-## Quick Start
+## 🚀 Quick Start
 
 ```bash
 npm install
@@ -11,120 +11,142 @@ cp env.example .env.local
 npm run dev
 ```
 
-## Project Structure
+## 📁 Project Structure
 
-### Core Files
+### Core Application
 - **`app/page.tsx`** - Main dashboard page
-- **`components/Dashboard.tsx`** - Main dashboard component with portfolio, trading interface, and trade history
-- **`components/PortfolioOverview.tsx`** - Portfolio display and management
-- **`components/TradingInterface.tsx`** - Buy/sell order interface
+- **`components/Dashboard.tsx`** - Main dashboard component
+- **`components/PortfolioOverview.tsx`** - Portfolio display
+- **`components/TradingInterface.tsx`** - Trading interface
 - **`components/TradeHistory.tsx`** - Trade history display
 
-### API Routes
-- **`app/api/okx-trading/route.ts`** - OKX trading operations (place/cancel orders, get balance, market data)
-- **`app/api/portfolio/route.ts`** - Portfolio data management
-- **`app/api/trading/route.ts`** - Trade history and management
-- **`app/api/strategy/route.ts`** - Automated trading strategy execution
-- **`app/api/algo-buy/route.ts`** - Algorithmic buying endpoints
+### API Endpoints
+- **`app/api/algo-buy/route.ts`** - Algorithmic buying strategy (sets trigger orders)
+- **`app/api/cancel-orders/route.ts`** - Cancels unfilled trigger orders
+- **`app/api/market-sell/route.ts`** - Automated selling strategy (checks and sells when needed)
 
 ### Core Libraries
-- **`lib/okx.ts`** - OKX API client with HMAC-SHA256 authentication
+- **`lib/okx.ts`** - OKX API client with enterprise-grade stability features
+- **`lib/algo-buy.ts`** - Algorithmic buying logic and strategy execution
 - **`lib/trading-strategy.ts`** - Trading strategy service (DCA, grid trading)
-- **`lib/algo-buy.ts`** - Algorithmic buying logic
 - **`lib/supabase.ts`** - Supabase database client
 
+### Automation
+- **`.github/workflows/crypto-trading.yml`** - GitHub Actions workflow for automated trading
+- **`trading_config.json`** - Trading strategy configuration
+
 ### Types
-- **`types/trading.ts`** - TypeScript interfaces for trades, portfolio, and trading data
+- **`types/trading.ts`** - TypeScript interfaces for trading data
+- **`types/opossum.d.ts`** - Type definitions for circuit breaker library
 
-### Testing
-- **`scripts/test-okx.js`** - Test OKX API connection and functionality
-- **`scripts/test-okx-connection.js`** - Basic OKX connection test
-
-## Environment Variables
+## 🔧 Environment Variables
 
 ```env
-# Supabase
-NEXT_PUBLIC_SUPABASE_URL=your_supabase_project_url
-NEXT_PUBLIC_SUPABASE_ANON_KEY=your_supabase_anon_key
-
 # OKX API (Production)
 OKX_API_KEY=your_okx_api_key
 OKX_SECRET_KEY=your_okx_secret_key
 OKX_PASSPHRASE=your_okx_passphrase
 OKX_TESTNET=false
 
-# OKX API (Demo Environment)
-DEMO_OKX_API_KEY=your_demo_okx_api_key
-DEMO_OKX_SECRET_KEY=your_demo_okx_secret_key
-DEMO_OKX_PASSPHRASE=your_demo_okx_passphrase
-OKX_TESTNET=true
-
-# Strategy API
+# Strategy API Key (for GitHub Actions)
 STRATEGY_API_KEY=your_strategy_api_key
 
-# Optional: Vercel Analytics
-NEXT_PUBLIC_VERCEL_ANALYTICS_ID=your_vercel_analytics_id
+# Vercel API Endpoint (for GitHub Actions)
+VERCEL_API_ENDPOINT=https://your-app.vercel.app
+
+# Supabase (if using database features)
+NEXT_PUBLIC_SUPABASE_URL=your_supabase_project_url
+NEXT_PUBLIC_SUPABASE_ANON_KEY=your_supabase_anon_key
 ```
 
-**Note**: The app automatically uses demo credentials when `DEMO_OKX_*` variables are set, falling back to production credentials if demo variables are not available.
+## 🤖 Automated Trading Strategy
 
-## Database Schema
+### Daily Schedule
+- **🟢 0:03 UTC** - Execute buy strategy (sets trigger orders)
+- **🔴 23:57 UTC** - Cancel unfilled trigger orders
+- **🟡 Every 5 minutes** - Check and execute sell strategy
 
-### Trades Table
-```sql
-CREATE TABLE trades (
-  id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
-  symbol TEXT NOT NULL,
-  side TEXT NOT NULL CHECK (side IN ('buy', 'sell')),
-  amount DECIMAL NOT NULL,
-  price DECIMAL NOT NULL,
-  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'filled', 'cancelled')),
-  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-  updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-);
+### Strategy Logic
+1. **Buy Strategy** - Places trigger orders for cryptocurrencies based on configuration
+2. **Cancel Strategy** - Removes unfilled orders to free up capital
+3. **Sell Strategy** - Monitors positions and sells based on profit/loss thresholds
+
+## 🛡️ Stability Features
+
+### Circuit Breaker Pattern
+- Automatic failure detection and recovery
+- Prevents system overload during API failures
+- Configurable thresholds and timeouts
+
+### Retry Mechanism
+- Exponential backoff retry strategy
+- Smart retry conditions (network errors + 5xx responses)
+- Configurable retry attempts and delays
+
+### Error Handling
+- Comprehensive error classification
+- Detailed logging and monitoring
+- Graceful degradation
+
+## 📊 Trading Configuration
+
+The `trading_config.json` file contains:
+- Cryptocurrency symbols and limits
+- Expected return percentages
+- Trading frequency settings
+- Strategy parameters
+
+## 🚀 Deployment
+
+### Vercel Deployment
+```bash
+npm run build
+vercel --prod
 ```
 
-### Portfolio Table
-```sql
-CREATE TABLE portfolio (
-  id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
-  symbol TEXT NOT NULL UNIQUE,
-  amount DECIMAL NOT NULL,
-  avg_price DECIMAL NOT NULL,
-  updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-);
+### GitHub Actions Setup
+1. Add repository secrets:
+   - `OKX_API_KEY`
+   - `OKX_SECRET_KEY` 
+   - `OKX_PASSPHRASE`
+   - `STRATEGY_API_KEY`
+   - `VERCEL_API_ENDPOINT`
+
+2. Workflow automatically runs:
+   - Daily at 0:03 UTC (buy strategy)
+   - Daily at 23:57 UTC (cancel orders)
+   - Every 5 minutes (sell strategy)
+
+## 🔒 Security Features
+
+- API key authentication for all endpoints
+- HMAC-SHA256 signature for OKX API calls
+- Environment variable protection
+- Rate limiting and timeout controls
+
+## 📈 Monitoring
+
+- Comprehensive logging for all operations
+- Circuit breaker status monitoring
+- Performance metrics and error tracking
+- GitHub Actions execution logs
+
+## 🛠️ Development
+
+```bash
+# Install dependencies
+npm install
+
+# Run development server
+npm run dev
+
+# Type checking
+npm run type-check
+
+# Build for production
+npm run build
 ```
 
-## Key Features
+## 📝 License
 
-- **Portfolio Management** - Real-time holdings and value tracking
-- **Trading Interface** - Buy/sell orders with validation
-- **OKX Integration** - Direct API access with secure authentication
-- **Automated Strategies** - DCA and grid trading strategies
-- **Real-time Updates** - Live portfolio and trade data
-
-## Available Scripts
-
-- `npm run dev` - Development server
-- `npm run build` - Production build
-- `npm run start` - Production server
-- `npm run test:okx` - Test OKX API integration
-- `npm run type-check` - TypeScript type checking
-
-## Development Workflow
-
-1. **Setup** - Install dependencies and configure environment variables
-2. **Database** - Create required tables in Supabase
-3. **OKX API** - Generate API keys and test connection
-4. **Development** - Use `npm run dev` for local development
-5. **Testing** - Test OKX integration with `npm run test:okx`
-
-## Tech Stack
-
-- **Frontend**: Next.js 15.5.0, React 18.3.0, TypeScript
-- **Styling**: Tailwind CSS
-- **Database**: Supabase (PostgreSQL)
-- **Exchange**: OKX API (custom implementation)
-- **State**: Zustand, SWR
-- **Forms**: React Hook Form + Zod
-- **Charts**: Recharts
+This project is for educational and personal use. Please ensure compliance with OKX API terms and local trading regulations.
