@@ -138,27 +138,27 @@ export class AlgoTradingService {
         side: 'buy' as const,
         ordType: 'trigger' as const,      // Use trigger order type
         sz: cryptoAmount.toFixed(8),      // Crypto amount with 8 decimal precision
-        px: triggerPrice.toFixed(4),      // Execution price when triggered
+        orderPx: triggerPrice.toFixed(4), // Execution price when triggered
         triggerPx: triggerPrice.toFixed(4), // Trigger price (required for trigger orders)
-        clOrdId: `algo_trigger_${symbol}_${Date.now()}`,
+        algoClOrdId: `algo_trigger_${symbol}_${Date.now()}`,
       };
       
       console.log(`📝 Placing TRIGGER order for ${symbol}:`, triggerParams);
       
-      const response = await this.okxClient.placeTriggerOrder(triggerParams);
+      const response = await this.okxClient.placeAlgoOrder(triggerParams);
       
       if (response.data && response.data.length > 0) {
         const orderData = response.data[0];
         
-        console.log(`✅ Limit order placed for ${symbol}: Order ID ${orderData.ordId}`);
+        console.log(`✅ Trigger order placed for ${symbol}: Algo ID ${orderData.algoId}`);
         
         return {
           symbol,
           success: true,
-          orderId: orderData.ordId,
+          orderId: orderData.algoId,      // Use algoId instead of ordId
           triggerPrice,
           amount: cryptoAmount,
-          message: `Limit order placed successfully at $${triggerPrice.toFixed(4)} - will execute when price reaches this level`,
+          message: `Trigger order placed successfully at $${triggerPrice.toFixed(4)} - will execute when price reaches this level`,
           timestamp: new Date().toISOString(),
         };
       } else {
@@ -178,22 +178,22 @@ export class AlgoTradingService {
     const openPrices: Record<string, number> = {};
     
     try {
-      // For now, we'll use current market price as day's open
-      // In production, you might want to get actual day's open from OKX API
+      // Get actual day's open prices from OKX API
       for (const symbol of Object.keys(this.tradingConfig.cryptocurrencies)) {
         try {
           const instId = this.formatTradingPair(symbol);
-          const currentPrice = await this.okxClient.getMarketPrice(instId);
-          openPrices[symbol] = currentPrice;
+          const candles = await this.okxClient.getCandlesticks(instId, '1D', 1);
+          const dayOpenPrice = parseFloat(candles[0][1]); // Index 1 is open price
+          openPrices[symbol] = dayOpenPrice;
           
-          console.log(`📊 ${symbol} current price: $${currentPrice}`);
+          console.log(`📊 ${symbol} day open price: $${dayOpenPrice}`);
           
           // Add small delay to avoid rate limiting
           await this.delay(200);
           
         } catch (error) {
-          console.error(`❌ Failed to get price for ${symbol}:`, error);
-          // Use a fallback price or skip this crypto
+          console.error(`❌ Failed to get day open price for ${symbol}:`, error);
+          // Skip this crypto if day open price is not available
           openPrices[symbol] = 0;
         }
       }

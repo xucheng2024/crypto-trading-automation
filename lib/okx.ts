@@ -8,73 +8,70 @@ export interface OKXConfig {
   secretKey: string;
   passphrase: string;
   isTestnet?: boolean;
-  timeout?: number;        // Request timeout in milliseconds
-  maxRetries?: number;     // Maximum retry attempts
-  retryDelay?: number;     // Base delay between retries
+  timeout?: number;
+  maxRetries?: number;
+  retryDelay?: number;
 }
 
-export interface OKXOrderParams {
-  instId: string;        // Trading pair (e.g., "BTC-USDT")
-  tdMode: 'cash' | 'cross' | 'isolated';
-  side: 'buy' | 'sell';
-  ordType: 'market' | 'limit' | 'post_only' | 'fok' | 'ioc';
-  sz: string;            // Order size
-  px?: string;           // Price (required for limit orders)
-  clOrdId?: string;      // Client order ID
+export interface OKXMarketOrderParams {
+  instId: string;                    // Instrument ID, e.g. BTC-USDT
+  tdMode: 'cash'; // Trade mode
+  side: 'sell';             // Order side
+  ordType: 'market'; // Order type
+  sz: string;                       // eg.sell 0.1 BTC
+  px?: string;                      // Order price (required for limit orders)
+  clOrdId?: string;                 // Client Order ID
 }
 
 export interface OKXTriggerOrderParams {
-  instId: string;        // Trading pair (e.g., "BTC-USDT")
-  tdMode: 'cash' | 'cross' | 'isolated';
-  side: 'buy' | 'sell';
-  ordType: 'trigger';    // OKX trigger order type
-  sz: string;            // Order size
-  px: string;            // Execution price
-  triggerPx: string;     // Trigger price
-  clOrdId?: string;      // Client order ID
+  instId: string;
+  tdMode: 'cash';
+  side: 'buy';
+  ordType: 'trigger';
+  sz: string;                      // eg.buy 1000 USDT
+  triggerPx: string;
+  orderPx: string;
 }
 
-export interface OKXOrderResponse {
+export interface OKXAlgoOrderResponse {
   code: string;
   msg: string;
   data: Array<{
-    clOrdId: string;
-    ordId: string;
-    tag: string;
-    sCode: string;
-    sMsg: string;
+    algoClOrdId: string;  // Client-supplied Algo ID
+    algoId: string;       // Algo ID
+    clOrdId?: string;     // Client Order ID (Deprecated)
+    sCode: string;        // Event execution result code, 0 means success
+    sMsg: string;         // Rejection message if unsuccessful
+    tag?: string;         // Order tag (optional)
   }>;
 }
 
-export interface OKXBalance {
-  ccy: string;
-  bal: string;
-  frozenBal: string;
-  availBal: string;
-  details?: Array<{
-    ccy: string;
-    availBal: string;
-    cashBal: string;
-    frozenBal: string;
-    eq: string;
-    eqUsd: string;
+export interface OKXMarketOrderResponse {
+  code: string;
+  msg: string;
+  data: Array<{
+    ordId: string;      // Order ID
+    clOrdId: string;    // Client Order ID as assigned by the client
+    tag: string;        // Order tag
+    ts: string;         // Timestamp when order processing finished (milliseconds)
+    sCode: string;      // Event execution result code, 0 means success
+    sMsg: string;       // Rejection or success message
   }>;
+  inTime?: string;      // Timestamp when request received (microseconds)
+  outTime?: string;     // Timestamp when response sent (microseconds)
 }
 
 export class OKXClient {
   private config: OKXConfig;
   private baseUrl: string;
-  private readonly defaultTimeout: number = 10000; // 10 seconds
+  private readonly defaultTimeout: number = 10000;
   private readonly defaultMaxRetries: number = 3;
   private readonly defaultRetryDelay: number = 1000;
 
   constructor(config: OKXConfig) {
     this.config = config;
-    this.baseUrl = config.isTestnet 
-      ? 'https://www.okx.com' 
-      : 'https://www.okx.com';
+    this.baseUrl = 'https://us.okx.com';  // ✅ 使用正确的 US 区域 URL
     
-    // Configure axios with retry
     axiosRetry(axios, { 
       retries: config.maxRetries || this.defaultMaxRetries,
       retryDelay: (retryCount) => {
@@ -83,7 +80,6 @@ export class OKXClient {
         return delay;
       },
       retryCondition: (error) => {
-        // Retry on network errors and 5xx server errors
         return axiosRetry.isNetworkOrIdempotentRequestError(error) || 
                (error.response && error.response.status >= 500) || false;
       }
@@ -155,29 +151,128 @@ export class OKXClient {
     }
   }
 
-  // Create circuit breaker for critical operations
   private createCircuitBreaker<T>(operation: () => Promise<T>): CircuitBreaker {
     return new CircuitBreaker(operation, {
       timeout: this.config.timeout || this.defaultTimeout,
       errorThresholdPercentage: 50,
-      resetTimeout: 30000, // 30 seconds
+      resetTimeout: 30000,
     });
   }
 
-  // Place a new order with circuit breaker
-  async placeOrder(orderParams: OKXOrderParams): Promise<OKXOrderResponse> {
+
+
+  // Place algo order (trigger, conditional, oco, trailing)
+  async placeAlgoOrder(algoParams: OKXTriggerOrderParams): Promise<OKXAlgoOrderResponse> {
     try {
-      this.validateOrderParams(orderParams);
+      console.log('Placing OKX algo order:', algoParams);
+
+      const circuitBreaker = this.createCircuitBreaker(() => 
+        this.makeRequest('/trade/order-algo', 'POST', algoParams)
+      );
+
+      circuitBreaker.on('open', () => console.log('Circuit breaker opened for placeAlgoOrder'));
+      circuitBreaker.on('close', () => console.log('Circuit breaker closed for placeAlgoOrder'));
+
+      return await circuitBreaker.fire();
+    } catch (error) {
+      console.error('Failed to place algo order:', error);
+      throw error;
+    }
+  }
+
+  // Cancel algo trigger order
+  async cancelAlgoTriggerOrder(instId: string, algoId: string, algoClOrdId?: string): Promise<any> {
+    try {
+      const params: any = { instId, algoId };
+      if (algoClOrdId) params.algoClOrdId = algoClOrdId;
+      
+      console.log('Cancelling OKX algo trigger order:', { instId, algoId, algoClOrdId });
+
+      const circuitBreaker = this.createCircuitBreaker(() => 
+        this.makeRequest('/trade/cancel-algos', 'POST', params)
+      );
+
+      circuitBreaker.on('open', () => console.log('Circuit breaker opened for cancelAlgoTriggerOrder'));
+      circuitBreaker.on('close', () => console.log('Circuit breaker closed for cancelAlgoTriggerOrder'));
+
+      return await circuitBreaker.fire();
+    } catch (error) {
+      console.error('Failed to cancel algo trigger order:', error);
+      throw error;
+    }
+  }
+
+  // Get algo orders list
+  async getAlgoOrdersList(instId?: string): Promise<any> {
+    try {
+      let endpoint = '/trade/orders-algo-pending';
+      if (instId) endpoint += `?instId=${instId}`;
+      
+      const response = await this.makeRequest(endpoint);
+      return response.data;
+    } catch (error) {
+      console.error('Failed to get algo orders list:', error);
+      throw error;
+    }
+  }
+
+  // Get algo order details
+  async getAlgoOrderDetail(instId: string, algoId: string): Promise<any> {
+    try {
+      const endpoint = `/trade/order-algo?instId=${instId}&algoId=${algoId}`;
+      
+      const response = await this.makeRequest(endpoint);
+      return response.data;
+    } catch (error) {
+      console.error('Failed to get algo order detail:', error);
+      throw error;
+    }
+  }
+
+  // Get pending orders (regular orders)
+  async getPendingOrders(): Promise<any> {
+    try {
+      const response = await this.makeRequest('/trade/orders-pending');
+      return response.data;
+    } catch (error) {
+      console.error('Failed to get pending orders:', error);
+      throw error;
+    }
+  }
+
+  // Cancel a regular order
+  async cancelOrder(instId: string, ordId: string, clOrdId?: string): Promise<any> {
+    try {
+      const params: any = { instId, ordId };
+      if (clOrdId) params.clOrdId = clOrdId;
+      
+      console.log('Cancelling OKX order:', { instId, ordId, clOrdId });
+
+      const circuitBreaker = this.createCircuitBreaker(() => 
+        this.makeRequest('/trade/cancel-order', 'POST', params)
+      );
+
+      circuitBreaker.on('open', () => console.log('Circuit breaker opened for cancelOrder'));
+      circuitBreaker.on('close', () => console.log('Circuit breaker closed for cancelOrder'));
+
+      return await circuitBreaker.fire();
+    } catch (error) {
+      console.error('Failed to cancel order:', error);
+      throw error;
+    }
+  }
+
+  // Place a regular order (market, limit, etc.)
+  async placeOrder(orderParams: OKXMarketOrderParams): Promise<OKXMarketOrderResponse> {
+    try {
       console.log('Placing OKX order:', orderParams);
 
       const circuitBreaker = this.createCircuitBreaker(() => 
         this.makeRequest('/trade/order', 'POST', orderParams)
       );
 
-      // Add event listeners for monitoring
       circuitBreaker.on('open', () => console.log('Circuit breaker opened for placeOrder'));
       circuitBreaker.on('close', () => console.log('Circuit breaker closed for placeOrder'));
-      circuitBreaker.on('fallback', (result: any) => console.log('Circuit breaker fallback:', result));
 
       return await circuitBreaker.fire();
     } catch (error) {
@@ -186,60 +281,13 @@ export class OKXClient {
     }
   }
 
-  // Place a trigger order with circuit breaker
-  async placeTriggerOrder(triggerParams: OKXTriggerOrderParams): Promise<OKXOrderResponse> {
-    try {
-      console.log('Placing OKX trigger order:', triggerParams);
 
-      const circuitBreaker = this.createCircuitBreaker(() => 
-        this.makeRequest('/trade/order', 'POST', triggerParams)
-      );
 
-      circuitBreaker.on('open', () => console.log('Circuit breaker opened for placeTriggerOrder'));
-      circuitBreaker.on('close', () => console.log('Circuit breaker closed for placeTriggerOrder'));
-
-      return await circuitBreaker.fire();
-    } catch (error) {
-      console.error('Failed to place trigger order:', error);
-      throw error;
-    }
-  }
-
-  // Cancel an existing order
-  async cancelOrder(instId: string, ordId: string, clOrdId?: string): Promise<any> {
-    try {
-      const params: any = { instId, ordId };
-      if (clOrdId) params.clOrdId = clOrdId;
-      
-      console.log('Cancelling OKX order:', { instId, ordId, clOrdId });
-
-      const response = await this.makeRequest('/trade/cancel-order', 'POST', params);
-      return response;
-    } catch (error) {
-      console.error('Failed to cancel order:', error);
-      throw error;
-    }
-  }
-
-  // Get order details
-  async getOrder(instId: string, ordId: string, clOrdId?: string): Promise<any> {
-    try {
-      let endpoint = `/trade/order?instId=${instId}`;
-      if (ordId) endpoint += `&ordId=${ordId}`;
-      if (clOrdId) endpoint += `&clOrdId=${clOrdId}`;
-      
-      const response = await this.makeRequest(endpoint);
-      return response;
-    } catch (error) {
-      console.error('Failed to get order:', error);
-      throw error;
-    }
-  }
 
   // Get account balance
-  async getBalance(ccy?: string): Promise<OKXBalance[]> {
+  async getBalance(ccy?: string): Promise<any[]> {
     try {
-      let endpoint = '/account/balance';
+      let endpoint = '/asset/balances';
       if (ccy) endpoint += `?ccy=${ccy}`;
       
       const response = await this.makeRequest(endpoint);
@@ -250,109 +298,50 @@ export class OKXClient {
     }
   }
 
-  // Get trading account positions
-  async getPositions(instId?: string): Promise<any> {
+  // Get candlestick data (no authentication required)
+  async getCandlesticks(instId: string, bar: string = '1D', limit: number = 100): Promise<any[]> {
     try {
-      let endpoint = '/account/positions';
-      if (instId) endpoint += `?instId=${instId}`;
-      
-      const response = await this.makeRequest(endpoint);
-      return response.data;
+      const response = await this.makeRequest(`/market/candles?instId=${instId}&bar=${bar}&limit=${limit}`);
+      if (response.data && response.data.length > 0) {
+        return response.data;
+      }
+      throw new Error('No candlestick data available');
     } catch (error) {
-      console.error('Failed to get positions:', error);
+      console.error('Failed to get candlestick data:', error);
       throw error;
     }
   }
 
-  // Get market price for a trading pair
-  async getMarketPrice(instId: string): Promise<number> {
+  // Get all market tickers (no authentication required)
+  async getAllMarketTickers(instType?: 'SPOT' | 'SWAP' | 'FUTURES' | 'OPTION'): Promise<any[]> {
+    try {
+      let endpoint = '/market/tickers';
+      if (instType) endpoint += `?instType=${instType}`;
+      
+      const response = await this.makeRequest(endpoint);
+      return response.data;
+    } catch (error) {
+      console.error('Failed to get all market tickers:', error);
+      throw error;
+    }
+  }
+
+  // Get market ticker for a trading pair (no authentication required)
+  async getMarketTicker(instId: string): Promise<any> {
     try {
       const response = await this.makeRequest(`/market/ticker?instId=${instId}`);
       if (response.data && response.data.length > 0) {
-        return parseFloat(response.data[0].last);
+        return response.data[0];
       }
       throw new Error('No market data available');
     } catch (error) {
-      console.error('Failed to get market price:', error);
+      console.error('Failed to get market ticker:', error);
       throw error;
     }
   }
 
-  // Get order book for a trading pair
-  async getOrderBook(instId: string, sz: number = 20): Promise<any> {
-    try {
-      const response = await this.makeRequest(`/market/books?instId=${instId}&sz=${sz}`);
-      return response.data;
-    } catch (error) {
-      console.error('Failed to get order book:', error);
-      throw error;
-    }
-  }
 
-  // Get recent trades
-  async getRecentTrades(instId: string, limit: number = 100): Promise<any> {
-    try {
-      const response = await this.makeRequest(`/market/trades?instId=${instId}&limit=${limit}`);
-      return response.data;
-    } catch (error) {
-      console.error('Failed to get recent trades:', error);
-      throw error;
-    }
-  }
-
-  // Get account configuration
-  async getAccountConfig(): Promise<any> {
-    try {
-      const response = await this.makeRequest('/account/config');
-      return response.data;
-    } catch (error) {
-      console.error('Failed to get account config:', error);
-      throw error;
-    }
-  }
-
-  // Get pending orders
-  async getPendingOrders(instId?: string): Promise<any> {
-    try {
-      let endpoint = '/trade/orders-pending';
-      if (instId) endpoint += `?instId=${instId}`;
-      
-      const response = await this.makeRequest(endpoint);
-      return response.data;
-    } catch (error) {
-      console.error('Failed to get pending orders:', error);
-      throw error;
-    }
-  }
-
-  // Validate order parameters
-  private validateOrderParams(params: OKXOrderParams): void {
-    if (!params.instId) throw new Error('instId is required');
-    if (!params.tdMode) throw new Error('tdMode is required');
-    if (!params.side) throw new Error('side is required');
-    if (!params.ordType) throw new Error('ordType is required');
-    if (!params.sz) throw new Error('sz is required');
-    
-    if (params.ordType === 'limit' && !params.px) {
-      throw new Error('Price is required for limit orders');
-    }
-    
-    if (parseFloat(params.sz) <= 0) {
-      throw new Error('Order size must be positive');
-    }
-  }
-
-  // Helper method to format trading pair
-  static formatTradingPair(base: string, quote: string): string {
-    return `${base.toUpperCase()}-${quote.toUpperCase()}`;
-  }
-
-  // Helper method to calculate order value
-  static calculateOrderValue(size: number, price: number): number {
-    return size * price;
-  }
-
-  // Helper method to check if the client is properly configured
+  // Test connection
   async testConnection(): Promise<boolean> {
     try {
       const response = await this.makeRequest('/account/balance');
@@ -361,10 +350,5 @@ export class OKXClient {
       console.error('OKX connection test failed:', error);
       return false;
     }
-  }
-
-  // Get circuit breaker status for monitoring
-  getCircuitBreakerStatus(): string {
-    return 'Circuit breakers are active for critical operations';
   }
 }

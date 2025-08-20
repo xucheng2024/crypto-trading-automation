@@ -39,53 +39,52 @@ export async function POST(request: NextRequest) {
     
     console.log('✅ OKX connection established');
 
-    // Get current positions
-    console.log('📊 Getting current positions...');
-    const positions = await okxClient.getPositions();
+    // Get current balances
+    console.log('📊 Getting current balances...');
+    const balances = await okxClient.getBalance();
     
-    if (!positions || positions.length === 0) {
-      console.log('ℹ️ No positions found');
+    if (!balances || balances.length === 0) {
+      console.log('ℹ️ No balances found');
       return NextResponse.json({
         success: true,
-        message: 'No positions to sell',
+        message: 'No assets to sell',
         soldAmount: 0,
         summary: {
-          totalPositions: 0,
-          soldPositions: 0,
+          totalAssets: 0,
+          soldAssets: 0,
           failedSales: 0,
           totalValue: 0,
         }
       });
     }
 
-    console.log(`📈 Found ${positions.length} positions`);
+    console.log(`📈 Found ${balances.length} assets`);
 
-    // Check which positions need to be sold based on strategy
+    // Check which assets need to be sold based on strategy
     const sellResults = [];
     let soldCount = 0;
     let failedCount = 0;
     let totalSoldValue = 0;
 
-    for (const position of positions) {
+    for (const balance of balances) {
       try {
-        // Skip positions with zero or negative size
-        if (!position.pos || parseFloat(position.pos) <= 0) {
+        // Skip assets with zero or negative balance
+        if (!balance.bal || parseFloat(balance.bal) <= 0) {
           continue;
         }
 
-        const symbol = position.instId;
-        const positionSize = parseFloat(position.pos);
-        const avgPrice = parseFloat(position.avgPx);
-        const currentPrice = await okxClient.getMarketPrice(symbol);
+        const symbol = balance.ccy + '-USDT'; // Convert currency to trading pair
+        const assetSize = parseFloat(balance.bal);
+        const ticker = await okxClient.getMarketTicker(symbol);
+        const currentPrice = parseFloat(ticker.last);
         
-        console.log(`📊 Analyzing ${symbol}: Size=${positionSize}, Avg=${avgPrice}, Current=${currentPrice}`);
+        console.log(`📊 Analyzing ${symbol}: Size=${assetSize}, Current=${currentPrice}`);
 
-        // Simple sell strategy: sell if profit > 5% or loss > -10%
-        const profitPercentage = ((currentPrice - avgPrice) / avgPrice) * 100;
-        const shouldSell = profitPercentage >= 5 || profitPercentage <= -10;
+        // Simple sell strategy: sell all available assets
+        const shouldSell = assetSize > 0;
 
         if (shouldSell) {
-          console.log(`💰 Selling ${symbol}: Profit=${profitPercentage.toFixed(2)}%`);
+          console.log(`💰 Selling ${symbol}: Size=${assetSize}`);
           
           // Place market sell order
           const sellOrder = await okxClient.placeOrder({
@@ -93,23 +92,21 @@ export async function POST(request: NextRequest) {
             tdMode: 'cash',
             side: 'sell',
             ordType: 'market',
-            sz: positionSize.toString(),
+            sz: assetSize.toString(),
           });
 
           if (sellOrder.data && sellOrder.data.length > 0) {
             soldCount++;
-            const soldValue = positionSize * currentPrice;
+            const soldValue = assetSize * currentPrice;
             totalSoldValue += soldValue;
             
             sellResults.push({
               symbol,
-              size: positionSize,
-              avgPrice,
+              size: assetSize,
               sellPrice: currentPrice,
-              profitPercentage: profitPercentage.toFixed(2),
               orderId: sellOrder.data[0].ordId,
               success: true,
-              message: 'Position sold successfully'
+              message: 'Asset sold successfully'
             });
             
             console.log(`✅ Sold ${symbol} for $${soldValue.toFixed(2)}`);
@@ -117,17 +114,15 @@ export async function POST(request: NextRequest) {
             failedCount++;
             sellResults.push({
               symbol,
-              size: positionSize,
-              avgPrice,
+              size: assetSize,
               sellPrice: currentPrice,
-              profitPercentage: profitPercentage.toFixed(2),
               success: false,
               message: 'Failed to place sell order'
             });
             console.log(`❌ Failed to sell ${symbol}`);
           }
         } else {
-          console.log(`⏳ Holding ${symbol}: Profit=${profitPercentage.toFixed(2)}% (within thresholds)`);
+          console.log(`⏳ Holding ${symbol}: Size=${assetSize}`);
         }
 
         // Add delay to avoid rate limiting
@@ -136,17 +131,17 @@ export async function POST(request: NextRequest) {
       } catch (error) {
         failedCount++;
         sellResults.push({
-          symbol: position.instId,
+          symbol: balance.ccy + '-USDT',
           success: false,
           message: error instanceof Error ? error.message : 'Unknown error'
         });
-        console.error(`❌ Error processing position ${position.instId}:`, error);
+        console.error(`❌ Error processing asset ${balance.ccy}:`, error);
       }
     }
 
     const summary = {
-      totalPositions: positions.length,
-      soldPositions: soldCount,
+      totalAssets: balances.length,
+      soldAssets: soldCount,
       failedSales: failedCount,
       totalValue: totalSoldValue,
     };
