@@ -241,10 +241,14 @@ This project has been migrated from a pure TypeScript/Next.js architecture to a 
 
 - **Removed**: TypeScript OKX client (`lib/okx.ts`)
 - **Removed**: Next.js API routes (`app/api/*`)
+- **Removed**: Supabase integration (`lib/supabase.ts`)
+- **Removed**: Vercel deployment configuration
 - **Added**: Flask Python API (`api/okx_flask.py`) with full OKX integration
 - **Added**: Python dependencies (`requirements.txt`)
 - **Added**: Announcements monitoring with private endpoint authentication
-- **Updated**: Vercel configuration for Python support
+- **Added**: ⭐ Complete monitoring and automation system
+- **Added**: SQLite database for local data storage
+- **Simplified**: Local development and deployment only
 
 ## 📝 License
 
