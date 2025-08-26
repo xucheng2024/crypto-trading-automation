@@ -1,6 +1,6 @@
 # Crypto Trading Automation
 
-A Next.js + Flask Python application for automated crypto trading with OKX exchange integration, featuring algorithmic trading strategies and modern API architecture.
+A Next.js + Flask Python application for automated crypto trading with OKX exchange integration, featuring algorithmic trading strategies, announcements monitoring, and modern API architecture.
 
 ## 🚀 Quick Start
 
@@ -15,7 +15,10 @@ pip install -r requirements.txt
 cp env.example .env.local
 # Fill in your OKX API credentials
 
-# Run development server
+# Start Flask API server
+cd api && python okx_flask.py
+
+# Run Next.js development server (in another terminal)
 npm run dev
 ```
 
@@ -29,27 +32,40 @@ npm run dev
 - **`components/TradeHistory.tsx`** - Trade history display
 
 ### Backend (Flask Python)
-- **`api/okx_flask.py`** - Flask application with OKX trading API endpoints
+- **`api/okx_flask.py`** - Flask application with OKX trading API and announcements endpoints
 - **`requirements.txt`** - Python dependencies
 
 ### Core API Endpoints
+
+#### Trading Operations
 - **`/api/okx/place-order`** - Place trading orders (POST)
 - **`/api/okx/cancel-order`** - Cancel existing orders (POST)
 - **`/api/okx/sell`** - Execute sell orders (POST)
 - **`/api/okx/health`** - API health check (GET)
 
+#### Announcements & Market Data ⭐
+- **`/api/okx/announcements`** - Get OKX announcements with private endpoint authentication (GET)
+  - **Parameters:**
+    - `annType` - Announcement type (e.g., `announcements-delistings`, `announcements-latest-announcements`)
+    - `page` - Page number for pagination (default: 1)
+  - **Features:**
+    - Full private endpoint authentication using OKX SDK
+    - HMAC-SHA256 signature generation
+    - Support for all announcement types
+    - Real-time market updates and delistings
+
 ## 🔧 Environment Variables
 
 ```env
-# OKX Demo Trading API (for testing)
-DEMO_OKX_API_KEY=your_demo_api_key
-DEMO_OKX_SECRET_KEY=your_demo_secret_key
-DEMO_OKX_PASSPHRASE=your_demo_passphrase
-
-# OKX Production API (for live trading)
+# OKX Production API (required for private endpoints)
 OKX_API_KEY=your_production_api_key
 OKX_SECRET_KEY=your_production_secret_key
 OKX_PASSPHRASE=your_production_passphrase
+
+# OKX Demo Trading API (optional, for testing)
+DEMO_OKX_API_KEY=your_demo_api_key
+DEMO_OKX_SECRET_KEY=your_demo_secret_key
+DEMO_OKX_PASSPHRASE=your_demo_passphrase
 ```
 
 ## 🤖 Trading Strategy
@@ -63,7 +79,7 @@ OKX_PASSPHRASE=your_production_passphrase
 
 #### Place Order
 ```bash
-curl -X POST /api/okx/place-order \
+curl -X POST http://localhost:5000/api/okx/place-order \
   -H "Content-Type: application/json" \
   -d '{
     "instId": "BTC-USDT",
@@ -76,7 +92,7 @@ curl -X POST /api/okx/place-order \
 
 #### Cancel Order
 ```bash
-curl -X POST /api/okx/cancel-order \
+curl -X POST http://localhost:5000/api/okx/cancel-order \
   -H "Content-Type: application/json" \
   -d '{
     "instId": "BTC-USDT",
@@ -86,16 +102,72 @@ curl -X POST /api/okx/cancel-order \
 
 #### Sell
 ```bash
-curl -X POST /api/okx/sell \
+curl -X POST http://localhost:5000/api/okx/sell \
   -H "Content-Type: application/json" \
   -d '{
     "instId": "BTC-USDT",
-    "tdMode": "cash",
-    "sz": "0.001"
+    "amount": "0.001"
   }'
 ```
 
+#### Get Announcements ⭐
+```bash
+# Get latest announcements
+curl "http://localhost:5000/api/okx/announcements?page=1"
+
+# Get delist announcements
+curl "http://localhost:5000/api/okx/announcements?annType=announcements-delistings&page=1"
+
+# Get trading updates
+curl "http://localhost:5000/api/okx/announcements?annType=announcements-trading-updates&page=1"
+```
+
+## 📢 Announcements Features
+
+### Supported Announcement Types
+- **`announcements-delistings`** - Token/coin delistings
+- **`announcements-latest-announcements`** - General updates
+- **`announcements-trading-updates`** - Trading rule changes
+- **`announcements-web3`** - Web3 ecosystem updates
+- **`announcements-new-listings`** - New token listings
+
+### Authentication & Security
+- **Private Endpoint Access** - Full OKX API authentication
+- **HMAC-SHA256 Signatures** - Secure request signing
+- **ISO 8601 Timestamps** - Precise time synchronization
+- **Rate Limiting** - Respects OKX API limits (5 requests/2 seconds)
+
+### Data Format
+```json
+{
+  "success": true,
+  "data": {
+    "code": "0",
+    "data": [{
+      "details": [
+        {
+          "annType": "announcements-delistings",
+          "pTime": "1756119600000",
+          "title": "OKX to delist perpetual futures for JST crypto",
+          "url": "https://www.okx.com/help/..."
+        }
+      ],
+      "totalPage": "90"
+    }]
+  }
+}
+```
+
 ## 🚀 Deployment
+
+### Local Development
+```bash
+# Terminal 1: Start Flask API
+cd api && python okx_flask.py
+
+# Terminal 2: Start Next.js frontend
+npm run dev
+```
 
 ### Vercel Deployment
 ```bash
@@ -114,8 +186,9 @@ The `vercel.json` file automatically configures:
 
 - OKX API authentication with HMAC-SHA256 signatures
 - Environment variable protection
-- Demo trading mode support (`x-simulated-trading` header)
-- Input validation and error handling
+- Private endpoint authentication for sensitive data
+- Input validation and comprehensive error handling
+- Secure timestamp generation and signature verification
 
 ## 🛠️ Development
 
@@ -124,12 +197,15 @@ The `vercel.json` file automatically configures:
 npm install
 pip install -r requirements.txt
 
-# Run development server
-npm run dev
+# Start Flask API server
+cd api && python okx_flask.py
 
-# Test Flask API locally
-cd api
-python okx_flask.py
+# Test API endpoints
+curl "http://localhost:5000/api/okx/health"
+curl "http://localhost:5000/api/okx/announcements?page=1"
+
+# Run Next.js development server (in another terminal)
+npm run dev
 
 # Type checking
 npm run type-check
@@ -151,7 +227,9 @@ crypto/
 │   ├── TradingInterface.tsx # Trading interface
 │   └── TradeHistory.tsx   # Trade history
 ├── api/                    # Flask Python API
-│   └── okx_flask.py       # OKX trading API
+│   └── okx_flask.py       # OKX trading & announcements API
+├── lib/                    # Utility libraries
+│   └── supabase.ts        # Database integration
 ├── requirements.txt        # Python dependencies
 ├── vercel.json            # Vercel configuration
 └── package.json           # Node.js dependencies
@@ -163,8 +241,9 @@ This project has been migrated from a pure TypeScript/Next.js architecture to a 
 
 - **Removed**: TypeScript OKX client (`lib/okx.ts`)
 - **Removed**: Next.js API routes (`app/api/*`)
-- **Added**: Flask Python API (`api/okx_flask.py`)
+- **Added**: Flask Python API (`api/okx_flask.py`) with full OKX integration
 - **Added**: Python dependencies (`requirements.txt`)
+- **Added**: Announcements monitoring with private endpoint authentication
 - **Updated**: Vercel configuration for Python support
 
 ## 📝 License
