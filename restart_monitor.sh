@@ -43,7 +43,7 @@ if [ -n "$PIDS" ]; then
 else
     echo "$(date '+%Y-%m-%d %H:%M:%S') - 未找到运行中的监控进程" >> "$LOG_FILE"
 fi
-
+start
 # 2. 启动新的监控服务
 echo "$(date '+%Y-%m-%d %H:%M:%S') - 启动新的监控服务..." >> "$LOG_FILE"
 
