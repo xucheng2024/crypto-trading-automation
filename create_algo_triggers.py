@@ -9,6 +9,7 @@ import os
 import sys
 import logging
 from datetime import datetime, timezone
+from decimal import Decimal, getcontext
 try:
     from dotenv import load_dotenv
     load_dotenv()
@@ -22,6 +23,9 @@ import traceback
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 from okx.api import Market
 from okx import Trade
+
+# Set Decimal precision to handle very small prices
+getcontext().prec = 28
 
 
 
@@ -73,7 +77,7 @@ class OKXAlgoTrigger:
             sys.exit(1)
         
         # Initialize OKX SDK clients
-        self.market_client = Market(
+        self.market_api = Market(
             key=self.api_key,
             secret=self.secret_key,
             passphrase=self.passphrase,
@@ -101,7 +105,7 @@ class OKXAlgoTrigger:
         """Get today's open price for a trading pair using OKX SDK with retry mechanism"""
         try:
             # Get daily candlestick data (much simpler than 1m intervals)
-            result = self.market_client.get_candles(
+            result = self.market_api.get_candles(
                 instId=inst_id,
                 bar="1D",
                 limit="1"  # Just get today's daily candle
@@ -110,8 +114,13 @@ class OKXAlgoTrigger:
             if result.get('code') == '0' and result.get('data'):
                 data = result['data']
                 if data:
-                    open_price = float(data[0][1])  # Open price is at index 1
-                    logger.info(f"📊 {inst_id} daily open price: {open_price}")
+                    # Get raw open price string to preserve precision
+                    raw_open_price = data[0][1]  # Open price is at index 1
+                    
+                    # Use Decimal for high precision, especially for very small prices
+                    open_price = Decimal(raw_open_price)
+                    logger.info(f"📊 {inst_id} daily open price: {open_price} (Decimal precision)")
+                    
                     return open_price
             
             error_msg = result.get('msg', 'Unknown error')
@@ -129,54 +138,98 @@ class OKXAlgoTrigger:
         retry=retry_if_exception_type((Exception,))
     )
     def create_algo_trigger_order(self, inst_id, limit_coefficient, open_price):
-        """Create algo trigger order using OKX SDK with retry mechanism"""
+        """Create multiple trigger points to increase trigger probability"""
         try:
-            # Calculate trigger price
-            trigger_price = open_price * limit_coefficient / 100
+            # Calculate base trigger price using Decimal for precision
+            if isinstance(open_price, str):
+                open_price_decimal = Decimal(open_price)
+            else:
+                open_price_decimal = open_price
             
-            # Use trigger price directly without precision adjustment
-            trigger_price_str = str(trigger_price)
-                
-            logger.info(f"🎯 {inst_id} trigger price: {trigger_price} (limit: {limit_coefficient}%)")
+            base_trigger_price = open_price_decimal * Decimal(str(limit_coefficient)) / Decimal('100')
             
-            # Calculate token quantity based on USDT amount
-            usdt_amount = float(self.order_size)
-            token_quantity = usdt_amount / float(trigger_price)
+            # Calculate precision based on Decimal price value
+            # For very small prices, use higher precision
+            if base_trigger_price < Decimal('0.00001'):
+                precision = 9  # Use 9 decimal places for PEPE, SHIB, etc.
+            elif base_trigger_price < Decimal('0.01'):
+                precision = 6  # Use 6 decimal places for small prices
+            else:
+                precision = 4  # Default precision for normal prices
+            
+            logger.debug(f"🔧 {inst_id} using precision: {precision}")
+            
+            # Calculate trigger prices with proper precision using Decimal
+            from decimal import ROUND_HALF_UP
+            
+            # Create precision context for rounding
+            precision_context = Decimal('0.' + '0' * (precision - 1) + '1') if precision > 0 else Decimal('1')
+            
+            trigger_prices = [
+                (base_trigger_price * Decimal('0.999')).quantize(precision_context, rounding=ROUND_HALF_UP),  # Slightly below target
+                base_trigger_price.quantize(precision_context, rounding=ROUND_HALF_UP),                        # Target price
+                (base_trigger_price * Decimal('1.001')).quantize(precision_context, rounding=ROUND_HALF_UP)   # Slightly above target
+            ]
+            
+            logger.info(f"🎯 {inst_id} base trigger price: {base_trigger_price} (limit: {limit_coefficient}%)")
+            logger.info(f"🔍 {inst_id} multiple trigger points: {[str(p) for p in trigger_prices]}")
+            
+            # Calculate token quantity based on base price using Decimal
+            usdt_amount = Decimal(self.order_size)
+            token_quantity = usdt_amount / base_trigger_price
             
             # Format token quantity with appropriate precision
-            if token_quantity < 0.0001:
+            if token_quantity < Decimal('0.0001'):
                 adjusted_order_size = f"{token_quantity:.8f}"
-            elif token_quantity < 0.01:
+            elif token_quantity < Decimal('0.01'):
                 adjusted_order_size = f"{token_quantity:.6f}"
             else:
                 adjusted_order_size = f"{token_quantity:.4f}"
             
             logger.info(f"📊 {inst_id} order size: {adjusted_order_size} tokens")
             
-            # Create trigger order using OKX TradeAPI
-            result = self.trade_api.place_algo_order(
-                instId=inst_id,
-                tdMode="cash",
-                side="buy",
-                ordType="trigger",
-                sz=adjusted_order_size,
-                triggerPx=trigger_price_str,
-                orderPx=trigger_price_str
-            )
+            # Create trigger orders for each price point
+            success_count = 0
+            total_count = len(trigger_prices)
             
-            if result.get('code') == '0':
-                order_id = result.get('data', [{}])[0].get('ordId', 'N/A')
-                logger.info(f"✅ Successfully created algo trigger order for {inst_id}")
-                logger.info(f"   Order ID: {order_id}")
+            for i, trigger_price in enumerate(trigger_prices):
+                try:
+                    # Create trigger order using OKX TradeAPI
+                    result = self.trade_api.place_algo_order(
+                        instId=inst_id,
+                        tdMode="cash",
+                        side="buy",
+                        ordType="trigger",
+                        sz=adjusted_order_size,
+                        triggerPx=str(trigger_price),      # Trigger price
+                        orderPx=str(base_trigger_price)    # Execution price uses base_price
+                    )
+                    
+                    if result.get('code') == '0':
+                        order_id = result.get('data', [{}])[0].get('ordId', 'N/A')
+                        logger.info(f"✅ Trigger point {i+1}: {trigger_price:.6f} - Order ID: {order_id}")
+                        success_count += 1
+                    else:
+                        error_msg = result.get('msg', 'Unknown error')
+                        logger.error(f"❌ Trigger point {i+1}: {trigger_price:.6f} - Failed: {error_msg}")
+                    
+                    # Rate limiting: OKX allows 5 requests per 2 seconds
+                    time.sleep(0.5)
+                    
+                except Exception as e:
+                    logger.error(f"❌ Trigger point {i+1}: {trigger_price:.6f} - Exception: {e}")
+                    continue
+            
+            # Summary
+            if success_count > 0:
+                logger.info(f"🎉 {inst_id} successfully created {success_count}/{total_count} trigger orders")
                 return True
             else:
-                error_msg = result.get('msg', 'Unknown error')
-                logger.error(f"❌ Failed to create order for {inst_id}: {error_msg}")
-                logger.debug(f"   Full response: {result}")
+                logger.error(f"❌ {inst_id} all trigger orders failed to create")
                 return False
                 
         except Exception as e:
-            logger.error(f"❌ Error creating algo trigger order for {inst_id}: {e}")
+            logger.error(f"❌ Error creating multiple trigger orders for {inst_id}: {e}")
             logger.debug(f"Traceback: {traceback.format_exc()}")
             raise  # Re-raise for retry mechanism
     

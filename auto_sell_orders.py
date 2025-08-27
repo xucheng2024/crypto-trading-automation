@@ -11,15 +11,25 @@ import logging
 import sqlite3
 import time
 from datetime import datetime, timedelta
+from decimal import Decimal, getcontext
 from tenacity import retry, stop_after_attempt, wait_exponential
 from okx import Trade
+
+# Set Decimal precision for consistency with create_algo_triggers.py
+getcontext().prec = 28
 
 # Load environment variables from .env file
 try:
     from dotenv import load_dotenv
     load_dotenv()
 except ImportError:
-    pass  # dotenv not available
+    # If dotenv is not available, try to load from environment directly
+    def load_dotenv():
+        pass
+    load_dotenv()
+
+# Load environment variables
+load_dotenv()
 
 def setup_logging():
     """Setup logging with file rotation"""
@@ -65,6 +75,15 @@ class AutoSellOrders:
         self.init_database()
         
         self.logger.info(f"🚀 Auto Sell Orders initialized - {'Demo' if self.testnet else 'Live'} mode")
+
+    def format_price(self, price_str):
+        """Format price string using Decimal for consistency"""
+        try:
+            if price_str:
+                return str(Decimal(str(price_str)))
+            return price_str
+        except:
+            return price_str
 
     def init_database(self):
         """Initialize database connection and ensure required columns exist"""
@@ -184,7 +203,8 @@ class AutoSellOrders:
             inst_id, ord_id, fill_sz, side, ts, sell_time, fill_px = order
             
             try:
-                self.logger.info(f"🔄 Processing sell order: {inst_id} - {ord_id}")
+                formatted_price = self.format_price(fill_px)
+                self.logger.info(f"🔄 Processing sell order: {inst_id} - {ord_id} (Price: {formatted_price})")
                 
                 if self.place_market_sell_order(inst_id, fill_sz, ord_id):
                     if self.mark_order_as_sold(ord_id):
