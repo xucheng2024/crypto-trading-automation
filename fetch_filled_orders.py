@@ -53,7 +53,7 @@ class OKXFilledOrdersFetcher:
             self.api_key = os.getenv('OKX_API_KEY')
             self.secret_key = os.getenv('OKX_SECRET_KEY')
             self.passphrase = os.getenv('OKX_PASSPHRASE')
-            self.testnet = os.getenv('OKX_TESTNET', '1').lower() == 'true'
+            self.testnet = os.getenv('OKX_TESTNET', 'false').lower() == 'true'
             
             # Validate environment variables
             missing_vars = []
