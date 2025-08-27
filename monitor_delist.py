@@ -10,6 +10,7 @@ import time
 import os
 import sys
 import logging
+import logging.handlers
 import hmac
 import hashlib
 import base64
@@ -63,17 +64,32 @@ class OKXDelistMonitor:
         log_filename = f"monitor_delist_{datetime.now().strftime('%Y%m%d')}.log"
         log_path = os.path.join('logs', log_filename)
         
-        # 配置日志
-        logging.basicConfig(
-            level=logging.INFO,
-            format='%(asctime)s - %(levelname)s - %(message)s',
-            handlers=[
-                logging.FileHandler(log_path, encoding='utf-8'),
-                logging.StreamHandler()
-            ]
-        )
-        
+        # 配置日志 (带轮转)
         self.logger = logging.getLogger(__name__)
+        self.logger.setLevel(logging.INFO)
+        
+        # 清除现有handlers
+        self.logger.handlers.clear()
+        
+        # 创建formatter
+        formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+        
+        # 文件handler (带轮转，最大10MB，保留5个备份)
+        file_handler = logging.handlers.RotatingFileHandler(
+            log_path, 
+            maxBytes=10*1024*1024,  # 10MB
+            backupCount=5,
+            encoding='utf-8'
+        )
+        file_handler.setFormatter(formatter)
+        
+        # 控制台handler
+        console_handler = logging.StreamHandler()
+        console_handler.setFormatter(formatter)
+        
+        # 添加handlers
+        self.logger.addHandler(file_handler)
+        self.logger.addHandler(console_handler)
     
     def generate_signature(self, timestamp: str, method: str, request_path: str, body: str = '') -> str:
         """生成OKX API签名"""

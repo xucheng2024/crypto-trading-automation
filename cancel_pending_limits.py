@@ -7,6 +7,7 @@ Cancels all pending limit orders under the current account
 import os
 import sys
 import logging
+import logging.handlers
 import traceback
 import time
 from datetime import datetime
@@ -33,17 +34,34 @@ def setup_logging():
     os.makedirs('logs', exist_ok=True)
     log_path = os.path.join('logs', log_filename)
     
-    # Configure logging
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s - %(levelname)s - %(message)s',
-        handlers=[
-            logging.FileHandler(log_path, encoding='utf-8'),
-            logging.StreamHandler(sys.stdout)
-        ]
-    )
+    # Create logger
+    logger = logging.getLogger(__name__)
+    logger.setLevel(logging.INFO)
     
-    return logging.getLogger(__name__)
+    # Clear existing handlers
+    logger.handlers.clear()
+    
+    # Create formatter
+    formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+    
+    # File handler with rotation (max 10MB, keep 5 backups)
+    file_handler = logging.handlers.RotatingFileHandler(
+        log_path, 
+        maxBytes=10*1024*1024,  # 10MB
+        backupCount=5,
+        encoding='utf-8'
+    )
+    file_handler.setFormatter(formatter)
+    
+    # Console handler
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setFormatter(formatter)
+    
+    # Add handlers
+    logger.addHandler(file_handler)
+    logger.addHandler(console_handler)
+    
+    return logger
 
 logger = setup_logging()
 
