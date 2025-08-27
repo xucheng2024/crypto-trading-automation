@@ -1,0 +1,19 @@
+# 最终的cron配置 - 所有脚本都默认一次性运行，避免进程累积
+
+# 每5分钟检查一次delisting保护 (一次性运行)
+*/5 * * * * cd /Users/mac/Downloads/projects/crypto && /Users/mac/miniconda3/bin/python monitor_delist.py >> /Users/mac/Downloads/projects/crypto/cron_monitor.log 2>&1
+
+# 每天23:55取消pending trigger orders (一次性运行)
+55 23 * * * cd /Users/mac/Downloads/projects/crypto && /Users/mac/miniconda3/bin/python cancel_pending_triggers.py >> /Users/mac/Downloads/projects/crypto/cron_cancel.log 2>&1
+
+# 每天00:05创建新的algo triggers (一次性运行)
+5 0 * * * cd /Users/mac/Downloads/projects/crypto && /Users/mac/miniconda3/bin/python create_algo_triggers.py >> /Users/mac/Downloads/projects/crypto/cron_create.log 2>&1
+
+# 每5分钟取消pending buy limit orders (一次性运行)
+*/5 * * * * cd /Users/mac/Downloads/projects/crypto && /Users/mac/miniconda3/bin/python cancel_pending_limits.py --side buy >> /Users/mac/Downloads/projects/crypto/cron_cancel_limits.log 2>&1
+
+# 每15分钟获取filled orders (一次性运行)
+*/15 * * * * cd /Users/mac/Downloads/projects/crypto && /Users/mac/miniconda3/bin/python fetch_filled_orders.py >> /Users/mac/Downloads/projects/crypto/cron_fetch_orders.log 2>&1
+
+# 每5分钟检查auto sell orders (一次性运行)
+*/5 * * * * cd /Users/mac/Downloads/projects/crypto && /Users/mac/miniconda3/bin/python auto_sell_orders.py >> /Users/mac/Downloads/projects/crypto/cron_auto_sell.log 2>&1

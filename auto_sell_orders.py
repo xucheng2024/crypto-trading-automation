@@ -262,14 +262,14 @@ def main():
     """Main function with argument parsing"""
     import argparse
     parser = argparse.ArgumentParser(description='Auto sell orders when sell_time is reached')
-    parser.add_argument('--once', action='store_true', help='Run once and exit (default: continuous monitoring)')
+    parser.add_argument('--continuous', action='store_true', help='Run continuously (default: run once and exit)')
     parser.add_argument('--interval', type=int, default=15, help='Monitoring interval in minutes (default: 15)')
     args = parser.parse_args()
     
     start_time = datetime.now()
     logger = setup_logging()
     
-    logger.info(f"🚀 Starting OKX Auto Sell Orders ({'once' if args.once else 'continuous'})")
+    logger.info(f"🚀 Starting OKX Auto Sell Orders ({'continuous' if args.continuous else 'once'})")
     logger.info(f"⏰ Start time: {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
     
     auto_seller = None
@@ -278,11 +278,11 @@ def main():
     try:
         auto_seller = AutoSellOrders()
         
-        if args.once:
+        if args.continuous:
+            auto_seller.run_continuous_monitoring(interval_minutes=args.interval)
+        else:
             auto_seller.process_sell_orders()
             logger.info("🎯 Single run completed")
-        else:
-            auto_seller.run_continuous_monitoring(interval_minutes=args.interval)
         
         logger.info("🎉 Process completed successfully")
         
