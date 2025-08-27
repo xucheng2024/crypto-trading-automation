@@ -93,7 +93,7 @@ python monitor_delist.py
 #### `create_algo_triggers.py` ⭐
 - **Purpose**: Create automated trigger orders for trading strategies
 - **Features**:
-  - **Multiple Trigger Points**: Creates 3 trigger orders per crypto pair (99.9%, 100%, 100.1% of base price)
+  - **Multiple Trigger Points**: Creates 2 trigger orders per crypto pair (99.9%, 100.1% of base price)
   - **High-Precision Arithmetic**: Uses Python Decimal type for accurate price calculations
   - **Dynamic Precision**: Automatically determines price precision based on coin value
   - **Grid-based Strategy**: Configurable parameters via `limits.json`

@@ -8,6 +8,7 @@ OKX Delist Spot 监控脚本 (重构版)
 import requests
 import time
 import os
+import sys
 import logging
 import hmac
 import hashlib
@@ -40,7 +41,7 @@ class OKXDelistMonitor:
         self.base_url = "https://www.okx.com/api/v5/support/announcements"
         
         # 监控配置
-        self.check_interval = 300  # 5分钟 = 300秒
+        self.check_interval = 600  # 10分钟 = 600秒 (match crontab)
         self.known_announcements = set()  # 记录已知的公告ID
         
         # 设置日志
@@ -96,35 +97,55 @@ class OKXDelistMonitor:
     
     def fetch_delist_announcements(self, page: int = 1) -> List[Dict[str, Any]]:
         """获取delist公告"""
-        try:
-            # 构建请求路径
-            request_path = f'/api/v5/support/announcements?annType=announcements-delistings&page={page}'
-            
-            # 生成时间戳和签名
-            timestamp = datetime.utcnow().isoformat("T", "milliseconds") + 'Z'
-            signature = self.generate_signature(timestamp, 'GET', request_path)
-            headers = self.get_headers(timestamp, signature)
-            
-            # 发送请求
-            response = requests.get(self.base_url, params={
-                'annType': 'announcements-delistings',
-                'page': page
-            }, headers=headers, timeout=10)
-            
-            if response.status_code == 200:
-                data = response.json()
-                if data.get('code') == '0':
-                    return data['data'][0]['details']
-                else:
-                    self.logger.error(f"❌ OKX API错误: {data}")
-                    return []
-            else:
-                self.logger.error(f"❌ 请求失败: {response.status_code}")
-                return []
+        max_retries = 3
+        base_delay = 60  # 1 minute base delay
+        
+        for attempt in range(max_retries):
+            try:
+                # 构建请求路径
+                request_path = f'/api/v5/support/announcements?annType=announcements-delistings&page={page}'
                 
-        except Exception as e:
-            self.logger.error(f"❌ 获取公告失败: {e}")
-            return []
+                # 生成时间戳和签名
+                timestamp = datetime.utcnow().isoformat("T", "milliseconds") + 'Z'
+                signature = self.generate_signature(timestamp, 'GET', request_path)
+                headers = self.get_headers(timestamp, signature)
+                
+                # 发送请求
+                response = requests.get(self.base_url, params={
+                    'annType': 'announcements-delistings',
+                    'page': page
+                }, headers=headers, timeout=10)
+                
+                if response.status_code == 200:
+                    data = response.json()
+                    if data.get('code') == '0':
+                        return data['data'][0]['details']
+                    else:
+                        self.logger.error(f"❌ OKX API错误: {data}")
+                        return []
+                elif response.status_code == 429:
+                    # Rate limit hit - exponential backoff
+                    delay = base_delay * (2 ** attempt)
+                    self.logger.warning(f"⚠️ Rate limit hit (429), attempt {attempt + 1}/{max_retries}. Waiting {delay} seconds...")
+                    if attempt < max_retries - 1:
+                        time.sleep(delay)
+                        continue
+                    else:
+                        self.logger.error(f"❌ Rate limit exceeded after {max_retries} attempts")
+                        return []
+                else:
+                    self.logger.error(f"❌ 请求失败: {response.status_code}")
+                    return []
+                    
+            except Exception as e:
+                self.logger.error(f"❌ 获取公告失败 (attempt {attempt + 1}): {e}")
+                if attempt < max_retries - 1:
+                    time.sleep(base_delay)
+                    continue
+                else:
+                    return []
+        
+        return []
     
     def is_today_announcement(self, announcement: Dict[str, Any]) -> bool:
         """检查是否是今天的公告"""
@@ -263,9 +284,9 @@ class OKXDelistMonitor:
             self.logger.error(f"❌ 检查过程中出错: {e}")
     
     def run_monitor(self):
-        """运行监控"""
-        self.logger.info("🚀 OKX Delist Spot 监控启动")
-        self.logger.info(f"⏰ 检查间隔: {self.check_interval}秒 ({self.check_interval/60:.1f}分钟)")
+        """运行监控（持续运行模式）"""
+        self.logger.info("🚀 OKX Delist Spot 监控启动 (持续运行模式)")
+        self.logger.info(f"⏰ 检查间隔: {self.check_interval}秒 ({self.check_interval/60:.0f}分钟)")
         self.logger.info(f"🔑 API密钥: {'✅ 已配置' if self.api_key else '❌ 未配置'}")
         self.logger.info(f"🔑 密钥: {'✅ 已配置' if self.secret_key else '❌ 未配置'}")
         self.logger.info(f"🔑 密码: {'✅ 已配置' if self.passphrase else '❌ 未配置'}")
@@ -290,13 +311,40 @@ class OKXDelistMonitor:
             self.logger.info("\n🛑 监控已停止")
         except Exception as e:
             self.logger.error(f"\n❌ 监控运行出错: {e}")
+    
+    def run_once(self):
+        """运行一次检查（适用于crontab）"""
+        self.logger.info("🚀 OKX Delist Spot 监控启动 (单次运行模式)")
+        self.logger.info(f"🔑 API密钥: {'✅ 已配置' if self.api_key else '❌ 未配置'}")
+        self.logger.info(f"🔑 密钥: {'✅ 已配置' if self.secret_key else '❌ 未配置'}")
+        self.logger.info(f"🔑 密码: {'✅ 已配置' if self.passphrase else '❌ 未配置'}")
+        
+        if not all([self.api_key, self.secret_key, self.passphrase]):
+            self.logger.error("❌ 环境变量配置不完整，请检查.env文件")
+            return
+        
+        # 显示配置统计
+        stats = self.config_manager.get_config_stats()
+        self.logger.info(f"📋 监控 {stats.get('total_cryptos', 0)} 个配置的加密货币")
+        
+        # 执行一次检查
+        self.check_for_new_announcements()
+        self.logger.info("✅ 单次检查完成，程序退出")
 
 
 def main():
     """主函数"""
     try:
         monitor = OKXDelistMonitor()
-        monitor.run_monitor()
+        
+        # 检查是否有命令行参数来切换模式
+        if len(sys.argv) > 1 and sys.argv[1] == "--continuous":
+            # 持续运行模式（手动启动时使用）
+            monitor.run_monitor()
+        else:
+            # 单次运行模式（默认，适用于crontab）
+            monitor.run_once()
+            
     except Exception as e:
         print(f"❌ 程序启动失败: {e}")
 

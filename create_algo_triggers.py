@@ -80,14 +80,6 @@ class OKXAlgoTrigger:
         # Convert to OKX flag: true -> "1" (demo), false -> "0" (live)
         okx_flag = "1" if testnet.lower() == "true" else "0"
         
-        # Initialize OKX SDK clients
-        self.market_api = Market(
-            key=self.api_key,
-            secret=self.secret_key,
-            passphrase=self.passphrase,
-            flag=okx_flag  # Use environment variable setting
-        )
-        
         # Initialize OKX Client
         self.okx_client = OKXClient()
         self.trade_api = self.okx_client.get_trade_api()
@@ -102,7 +94,7 @@ class OKXAlgoTrigger:
         """Get today's open price for a trading pair using OKX SDK with retry mechanism"""
         try:
             # Get daily candlestick data (much simpler than 1m intervals)
-            result = self.market_api.get_candles(
+            result = self.market_api.get_candlesticks(
                 instId=inst_id,
                 bar="1D",
                 limit="1"  # Just get today's daily candle
@@ -164,7 +156,6 @@ class OKXAlgoTrigger:
             
             trigger_prices = [
                 (base_trigger_price * Decimal('0.999')).quantize(precision_context, rounding=ROUND_HALF_UP),  # Slightly below target
-                base_trigger_price.quantize(precision_context, rounding=ROUND_HALF_UP),                        # Target price
                 (base_trigger_price * Decimal('1.001')).quantize(precision_context, rounding=ROUND_HALF_UP)   # Slightly above target
             ]
             

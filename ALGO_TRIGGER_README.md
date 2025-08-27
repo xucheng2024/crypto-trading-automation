@@ -1,6 +1,6 @@
 # OKX Algo Trigger Order Creator
 
-这个脚本会读取 `limits.json` 文件，获取所有加密货币对和它们的最佳限制系数，然后创建 OKX 的 algo trigger 订单。
+这个脚本会读取 `limits.json` 文件，获取所有加密货币对和它们的最佳限制系数，然后创建 OKX 的 algo trigger 订单（每个币种2个触发点）。
 
 ## 功能
 

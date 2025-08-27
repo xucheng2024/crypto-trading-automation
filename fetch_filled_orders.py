@@ -194,7 +194,7 @@ class OKXFilledOrdersFetcher:
         try:
             logger.debug("🔍 Fetching filled limit orders...")
             
-            # Prepare parameters
+            # Prepare parameters for get_orders_history
             params = {
                 'instType': 'SPOT',
                 'ordType': 'limit',
@@ -202,17 +202,20 @@ class OKXFilledOrdersFetcher:
                 'limit': str(limit)
             }
             
-            # Add time filters if provided (using correct parameter names)
+            # Add time filters if provided (using begin/end for orders_history)
             if begin_time:
-                params['after'] = str(int(begin_time.timestamp() * 1000))
+                params['begin'] = str(int(begin_time.timestamp() * 1000))
             if end_time:
-                params['before'] = str(int(end_time.timestamp() * 1000))
+                params['end'] = str(int(end_time.timestamp() * 1000))
             
-            result = self.trade_api.get_order_list(**params)
+            result = self.trade_api.get_orders_history(**params)
             
             if not result:
                 logger.warning("⚠️  Empty response from API")
                 return []
+            
+            # Log the full API response for debugging
+            logger.debug(f"🔍 Full API response: {result}")
             
             if result.get('code') == '0':
                 orders = result.get('data', [])
@@ -222,6 +225,9 @@ class OKXFilledOrdersFetcher:
                 if orders:
                     logger.debug(f"📝 Order types found: {list(set(order.get('ordType', 'unknown') for order in orders))}")
                     logger.debug(f"📝 Order sides found: {list(set(order.get('side', 'unknown') for order in orders))}")
+                    # Log first order structure for debugging
+                    if len(orders) > 0:
+                        logger.debug(f"📝 First order structure: {list(orders[00].keys())}")
                 
                 return orders
             else:
@@ -244,7 +250,9 @@ class OKXFilledOrdersFetcher:
             fill_px = order.get('fillPx', '')
             fill_sz = order.get('fillSz', '')
             side = order.get('side', '')
-            ts = order.get('fillTime', '')  # Use fillTime as timestamp
+            
+            # Try multiple timestamp fields in order of preference
+            ts = order.get('fillTime') or order.get('uTime') or order.get('cTime') or ''
             
             # Calculate sell time (ts + 20 hours)
             sell_time = None
@@ -257,9 +265,9 @@ class OKXFilledOrdersFetcher:
                 except (ValueError, TypeError) as e:
                     logger.warning(f"⚠️  Could not calculate sell time for order {ord_id}: {e}")
             
-            # Validate required fields
-            if not all([inst_id, ord_id, fill_px, fill_sz, side, ts]):
-                logger.warning(f"⚠️  Skipping order with missing data: {order}")
+            # Validate required fields (make ts optional for now)
+            if not all([inst_id, ord_id, fill_px, fill_sz, side]):
+                logger.warning(f"⚠️  Skipping order with missing required data: {order}")
                 return False
             
             # Prepare data for insertion

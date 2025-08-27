@@ -50,14 +50,6 @@ class OKXOrderManager:
         # Convert to OKX flag: true -> "1" (demo), false -> "0" (live)
         okx_flag = "1" if testnet.lower() == "true" else "0"
         
-        # Initialize OKX SDK clients
-        self.market_client = Market(
-            key=self.api_key,
-            secret=self.secret_key,
-            passphrase=self.passphrase,
-            flag=okx_flag  # Use environment variable setting
-        )
-        
         # Initialize OKX Client
         self.okx_client = OKXClient()
         self.trade_api = self.okx_client.get_trade_api()
@@ -68,24 +60,90 @@ class OKXOrderManager:
         retry=retry_if_exception_type((Exception,))
     )
     def get_pending_algo_orders(self):
-        """Get all pending algo orders with retry mechanism"""
+        """Get all pending algo orders with retry mechanism and pagination support"""
         try:
-            # Use the order_algos_list method to get pending algo orders
-            result = self.trade_api.order_algos_list(
-                ordType="trigger"  # Get trigger orders specifically
-            )
+            all_orders = []
+            limit = 100  # OKX API default limit
+            after = None
             
-            if result.get('code') == '0':
-                orders = result.get('data', [])
-                logger.info(f"📋 Found {len(orders)} pending algo orders")
-                return orders
-            else:
-                error_msg = result.get('msg', 'Unknown error')
-                logger.error(f"❌ Failed to get pending orders: {error_msg}")
-                return []
+            while True:
+                # Prepare parameters for pagination
+                params = {
+                    "ordType": "trigger"  # Get trigger orders specifically
+                }
+                
+                if after:
+                    params["after"] = after
+                
+                # Use the order_algos_list method to get pending algo orders
+                result = self.trade_api.order_algos_list(**params)
+                
+                if result.get('code') == '0':
+                    orders = result.get('data', [])
+                    if not orders:
+                        break  # No more orders
+                    
+                    all_orders.extend(orders)
+                    logger.info(f"📋 Fetched {len(orders)} orders (total: {len(all_orders)})")
+                    
+                    # Check if we got less than the limit (means it's the last page)
+                    if len(orders) < limit:
+                        break
+                    
+                    # Get the last order's ID for next page
+                    after = orders[-1].get('algoId')
+                    if not after:
+                        break
+                    
+                    # Small delay to avoid rate limiting
+                    time.sleep(0.1)
+                else:
+                    error_msg = result.get('msg', 'Unknown error')
+                    logger.error(f"❌ Failed to get pending orders: {error_msg}")
+                    break
+            
+            logger.info(f"📋 Total pending algo orders found: {len(all_orders)}")
+            return all_orders
                 
         except Exception as e:
             logger.error(f"❌ Error getting pending orders: {e}")
+            logger.debug(f"Traceback: {traceback.format_exc()}")
+            raise  # Re-raise for retry mechanism
+    
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=4, max=10),
+        retry=retry_if_exception_type((Exception,))
+    )
+    def cancel_algo_orders_batch(self, orders_batch):
+        """Cancel multiple algo orders in a single API call (max 10 per batch)"""
+        try:
+            # Create the params array as required by the API
+            algo_orders = []
+            for order in orders_batch:
+                algo_orders.append({
+                    "instId": order['instId'], 
+                    "algoId": order['algoId']
+                })
+            
+            result = self.trade_api.cancel_algo_order(algo_orders)
+            
+            if result.get('code') == '0':
+                # Log successful batch cancellation
+                order_ids = [order['algoId'] for order in orders_batch]
+                inst_ids = [order['instId'] for order in orders_batch]
+                logger.info(f"✅ Successfully cancelled batch of {len(orders_batch)} orders")
+                logger.info(f"   Instruments: {', '.join(inst_ids)}")
+                logger.info(f"   Order IDs: {', '.join(order_ids)}")
+                return True
+            else:
+                error_msg = result.get('msg', 'Unknown error')
+                logger.error(f"❌ Failed to cancel batch: {error_msg}")
+                logger.debug(f"   Full response: {result}")
+                return False
+                
+        except Exception as e:
+            logger.error(f"❌ Error cancelling batch: {e}")
             logger.debug(f"Traceback: {traceback.format_exc()}")
             raise  # Re-raise for retry mechanism
     
@@ -162,24 +220,81 @@ class OKXOrderManager:
             total_count = len(trigger_orders)
             failed_orders = []
             
-            for order in trigger_orders:
-                inst_id = order.get('instId', '')
-                algo_id = order.get('algoId', '')
+            # Process orders in batches of 10
+            batch_size = 10
+            total_batches = (len(trigger_orders) + batch_size - 1) // batch_size
+            
+            # Track cancellation attempts
+            max_attempts = 3
+            attempt = 1
+            remaining_orders = trigger_orders.copy()
+            
+            while remaining_orders and attempt <= max_attempts:
+                logger.info(f"\n🔄 Cancellation attempt {attempt}/{max_attempts}")
+                logger.info(f"   Remaining orders: {len(remaining_orders)}")
+                logger.info("=" * 60)
                 
-                logger.info(f"\n🔄 Cancelling {inst_id}...")
+                current_batch_size = min(batch_size, len(remaining_orders))
+                total_current_batches = (len(remaining_orders) + current_batch_size - 1) // current_batch_size
                 
-                try:
-                    if self.cancel_algo_order(algo_id, inst_id):
-                        success_count += 1
-                    else:
-                        failed_orders.append((inst_id, algo_id, "API returned error"))
-                except Exception as e:
-                    logger.error(f"❌ Exception while cancelling {inst_id}: {e}")
-                    failed_orders.append((inst_id, algo_id, str(e)))
-                    continue
+                for i in range(0, len(remaining_orders), current_batch_size):
+                    batch = remaining_orders[i : i + current_batch_size]
+                    batch_num = i // current_batch_size + 1
+                    logger.info(f"\n🔄 Processing batch {batch_num}/{total_current_batches}...")
+                    logger.info(f"   Batch size: {len(batch)} orders")
+                    
+                    # Format batch for cancellation
+                    batch_for_cancellation = []
+                    for order in batch:
+                        batch_for_cancellation.append({
+                            'instId': order.get('instId', ''),
+                            'algoId': order.get('algoId', '')
+                        })
+                    
+                    try:
+                        if self.cancel_algo_orders_batch(batch_for_cancellation):
+                            success_count += len(batch)
+                            logger.info(f"   ✅ Batch {batch_num} completed successfully")
+                        else:
+                            failed_orders.extend([(order.get('instId', ''), order.get('algoId', ''), f"API returned error (attempt {attempt})") for order in batch])
+                            logger.error(f"   ❌ Batch {batch_num} failed")
+                    except Exception as e:
+                        logger.error(f"   ❌ Exception while cancelling batch {batch_num}: {e}")
+                        failed_orders.extend([(order.get('instId', ''), order.get('algoId', ''), f"{str(e)} (attempt {attempt})") for order in batch])
+                        continue
+                    
+                    # Rate limiting: OKX allows 20 requests per 2 seconds, so we can be more aggressive
+                    # With batch size 10, we can process batches faster
+                    if batch_num < total_current_batches:  # Don't sleep after the last batch
+                        time.sleep(0.2)  # Reduced from 0.5s to 0.2s for batch processing
                 
-                # Rate limiting: OKX allows 5 requests per 2 seconds
-                time.sleep(0.5)
+                # After this round, check if any orders remain
+                if attempt < max_attempts:
+                    logger.info(f"\n🔍 Verifying cancellation results (attempt {attempt})...")
+                    time.sleep(2)  # Wait a bit for API to update
+                    
+                    try:
+                        remaining_pending = self.get_pending_algo_orders()
+                        remaining_trigger_orders = [order for order in remaining_pending if order.get('ordType') == 'trigger']
+                        
+                        if remaining_trigger_orders:
+                            logger.warning(f"⚠️  {len(remaining_trigger_orders)} orders still pending after attempt {attempt}")
+                            # Update remaining_orders for next attempt
+                            remaining_orders = remaining_trigger_orders
+                            attempt += 1
+                        else:
+                            logger.info("✅ All orders successfully cancelled!")
+                            break
+                    except Exception as e:
+                        logger.error(f"❌ Error verifying cancellation results: {e}")
+                        # If verification fails, assume we need to continue
+                        attempt += 1
+                else:
+                    # Last attempt completed
+                    if remaining_orders:
+                        logger.error(f"❌ Failed to cancel all orders after {max_attempts} attempts")
+                        logger.error(f"   {len(remaining_orders)} orders remain uncancelled")
+                    break
             
             logger.info("\n" + "=" * 60)
             logger.info(f"📊 Summary: {success_count}/{total_count} orders cancelled successfully")
