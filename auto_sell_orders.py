@@ -128,7 +128,7 @@ class AutoSellOrders:
                 SELECT instId, ordId, fillSz, side, ts, sell_time, fillPx
                 FROM filled_orders 
                 WHERE sell_time IS NOT NULL 
-                AND sell_time NOT LIKE 'SOLD_%'
+                AND (sold_status IS NULL OR sold_status != 'SOLD')
                 AND sell_time <= ? 
                 AND sell_time > ?
                 AND side = 'buy'
@@ -197,9 +197,18 @@ class AutoSellOrders:
     def mark_order_as_sold(self, order_id):
         """Mark order as sold in database"""
         try:
+            # Add a new column to track sold status instead of modifying sell_time
+            self.cursor.execute('''
+                ALTER TABLE filled_orders ADD COLUMN sold_status TEXT DEFAULT NULL
+            ''')
+        except sqlite3.OperationalError:
+            # Column already exists
+            pass
+        
+        try:
             self.cursor.execute('''
                 UPDATE filled_orders 
-                SET sell_time = 'SOLD_' || sell_time 
+                SET sold_status = 'SOLD'
                 WHERE ordId = ?
             ''', (order_id,))
             
