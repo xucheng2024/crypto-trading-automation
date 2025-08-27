@@ -162,14 +162,10 @@ class AutoSellOrders:
         try:
             logger.info(f"📤 Placing market sell order for {inst_id}: {size}")
             
-            # Generate unique client order ID
-            client_order_id = f"auto_sell_{order_id}_{int(time.time())}"
-            
             # Place market sell order
             result = self.trade_api.place_order(
                 instId=inst_id,
                 tdMode="cash",
-                clOrdId=client_order_id,
                 side="sell",
                 ordType="market",
                 sz=size
@@ -184,7 +180,6 @@ class AutoSellOrders:
                 okx_order_id = order_data.get('ordId', 'Unknown')
                 logger.info(f"✅ Market sell order placed successfully for {inst_id}")
                 logger.info(f"   📋 OKX Order ID: {okx_order_id}")
-                logger.info(f"   📊 Client Order ID: {client_order_id}")
                 logger.info(f"   💰 Size: {size}")
                 return True
             else:
