@@ -214,11 +214,35 @@ class AutoSellOrders:
             
             self.conn.commit()
             logger.info(f"✅ Order {order_id} marked as sold in database")
+            
+            # Play notification sound for 10 seconds when order is sold
+            self.play_sell_notification_sound()
+            
             return True
             
         except Exception as e:
             logger.error(f"❌ Error marking order {order_id} as sold: {e}")
             return False
+
+    def play_sell_notification_sound(self):
+        """Play system notification sound on macOS for 10 seconds continuously when selling"""
+        try:
+            logger.info("🔊 Playing sell notification sound for 10 seconds...")
+            
+            # Play sound continuously for 10 seconds
+            start_time = time.time()
+            duration = 10  # 10 seconds
+            
+            while time.time() - start_time < duration:
+                # Play system beep sound
+                os.system('osascript -e "beep"')
+                # Small delay to prevent overwhelming the system
+                time.sleep(0.5)
+            
+            logger.info("🔊 Sell notification sound completed")
+            
+        except Exception as e:
+            logger.warning(f"⚠️  Could not play sell notification sound: {e}")
 
     def process_sell_orders(self):
         """Process all orders ready to sell"""
