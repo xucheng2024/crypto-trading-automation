@@ -1,0 +1,6 @@
+# OKX Algo Trigger Orders - Auto Cancel at 23:55 daily
+# Format: minute hour day month weekday command
+55 23 * * * cd /Users/mac/Downloads/projects/crypto && /usr/bin/python3 cancel_pending_triggers.py >> /Users/mac/Downloads/projects/crypto/cron_cancel.log 2>&1
+
+# Alternative format (if you prefer):
+# 55 23 * * * cd /Users/mac/Downloads/projects/crypto && python3 cancel_pending_triggers.py >> cron_cancel.log 2>&1

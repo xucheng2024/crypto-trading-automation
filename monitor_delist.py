@@ -10,13 +10,18 @@ import time
 import json
 from datetime import datetime, timedelta
 import os
-from dotenv import load_dotenv
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    # If dotenv is not available, try to load from environment directly
+    def load_dotenv():
+        pass
+    load_dotenv()
+
 import hmac
 import hashlib
 import base64
-
-# 加载环境变量
-load_dotenv('.env.local')
 
 class OKXDelistMonitor:
     def __init__(self):
