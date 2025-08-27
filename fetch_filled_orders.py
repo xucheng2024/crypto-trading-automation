@@ -95,11 +95,8 @@ class OKXFilledOrdersFetcher:
             # Initialize database
             self.init_database()
             
-            logger.info("🚀 OKX Filled Orders Fetcher")
-            logger.info("============================================================")
-            logger.info(f"🔧 Trading Environment: {'Demo' if self.testnet else 'Live'}")
-            logger.info(f"🔑 API Key: {self.api_key[:8]}...{self.api_key[-4:] if len(self.api_key) > 12 else '***'}")
-            logger.info("============================================================")
+            logger.info(f"🚀 OKX Filled Orders Fetcher - {'Demo' if self.testnet else 'Live'}")
+            logger.info(f"🔑 API: {self.api_key[:8]}...{self.api_key[-4:] if len(self.api_key) > 12 else '***'}")
             
         except Exception as e:
             logger.error(f"❌ Failed to initialize OKX API: {e}")
@@ -156,7 +153,7 @@ class OKXFilledOrdersFetcher:
             ''')
             
             self.conn.commit()
-            logger.info(f"🗄️  Database initialized: {self.db_path}")
+            logger.info(f"🗄️  Database: {self.db_path}")
             
             # Update existing orders with sell_time if missing
             self.update_existing_orders_sell_time()
@@ -336,7 +333,7 @@ class OKXFilledOrdersFetcher:
             end_time = datetime.now()
             begin_time = end_time - timedelta(minutes=minutes or 15)  # Default to 15 minutes
             
-            logger.info(f"🔍 Fetching filled orders from {begin_time.strftime('%Y-%m-%d %H:%M:%S')} to {end_time.strftime('%Y-%m-%d %H:%M:%S')}")
+            logger.info(f"🔍 Fetching orders: {begin_time.strftime('%H:%M')} → {end_time.strftime('%H:%M')}")
             
             # Get filled orders
             orders = self.get_filled_orders(begin_time, end_time)
@@ -365,13 +362,13 @@ class OKXFilledOrdersFetcher:
             self.conn.commit()
             
             # Summary
-            logger.info("============================================================")
-            logger.info(f"📊 Summary: {successful_saves}/{len(orders)} orders saved successfully")
+            logger.info("─" * 50)
+            logger.info(f"📊 Summary: {successful_saves}/{len(orders)} saved")
             if failed_saves > 0:
-                logger.warning(f"⚠️  Failed saves: {failed_saves}")
+                logger.warning(f"⚠️  Failed: {failed_saves}")
             
             success_rate = (successful_saves / len(orders) * 100) if len(orders) > 0 else 0
-            logger.info(f"📈 Success rate: {success_rate:.1f}%")
+            logger.info(f"📈 Success: {success_rate:.1f}%")
             
         except Exception as e:
             logger.error(f"❌ Error in fetch_and_save_filled_orders: {e}")
@@ -381,7 +378,7 @@ class OKXFilledOrdersFetcher:
     def play_notification_sound(self):
         """Play system notification sound on macOS for 10 seconds continuously"""
         try:
-            logger.info("🔊 Playing notification sound for 10 seconds...")
+            logger.info("🔊 Playing notification sound...")
             
             # Play sound continuously for 10 seconds
             start_time = time.time()
@@ -393,7 +390,7 @@ class OKXFilledOrdersFetcher:
                 # Small delay to prevent overwhelming the system
                 time.sleep(0.5)
             
-            logger.info("🔊 Notification sound completed")
+            logger.info("🔊 Sound completed")
             
         except Exception as e:
             logger.warning(f"⚠️  Could not play notification sound: {e}")

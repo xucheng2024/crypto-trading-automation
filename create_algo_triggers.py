@@ -116,7 +116,7 @@ class OKXAlgoTrigger:
                     
                     # Use Decimal for high precision, especially for very small prices
                     open_price = Decimal(raw_open_price)
-                    logger.info(f"📊 {inst_id} daily open price: {open_price} (Decimal precision)")
+                    logger.info(f"📊 {inst_id}: ${open_price}")
                     
                     return open_price
             
@@ -167,8 +167,8 @@ class OKXAlgoTrigger:
                 (base_trigger_price * Decimal('1.001')).quantize(precision_context, rounding=ROUND_HALF_UP)   # Slightly above target
             ]
             
-            logger.info(f"🎯 {inst_id} base trigger price: {base_trigger_price} (limit: {limit_coefficient}%)")
-            logger.info(f"🔍 {inst_id} multiple trigger points: {[str(p) for p in trigger_prices]}")
+            logger.info(f"🎯 {inst_id} | Base: ${base_trigger_price} | Limit: {limit_coefficient}%")
+            logger.info(f"🔍 {inst_id} | Triggers: {[str(p) for p in trigger_prices]}")
             
             # Calculate token quantity based on base price using Decimal
             usdt_amount = Decimal(self.order_size)
@@ -182,7 +182,7 @@ class OKXAlgoTrigger:
             else:
                 adjusted_order_size = f"{token_quantity:.4f}"
             
-            logger.info(f"📊 {inst_id} order size: {adjusted_order_size} tokens")
+            logger.info(f"📊 {inst_id} | Size: {adjusted_order_size} tokens")
             
             # Create trigger orders for each price point
             success_count = 0

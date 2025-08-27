@@ -88,7 +88,7 @@ class AutoSellOrders:
         # Initialize database
         self.init_database()
         
-        self.logger.info(f"🚀 Auto Sell Orders initialized - {'Demo' if self.testnet else 'Live'} mode")
+        self.logger.info(f"🚀 Auto Sell Orders - {'Demo' if self.testnet else 'Live'} mode")
 
     def format_price(self, price_str):
         """Format price string using Decimal for consistency"""
@@ -115,7 +115,7 @@ class AutoSellOrders:
         except sqlite3.OperationalError:
             pass  # Column already exists
         
-        self.logger.info(f"🗄️  Database connected: {self.db_path}")
+        self.logger.info(f"🗄️  Database: {self.db_path}")
 
     def get_orders_ready_to_sell(self):
         """Get orders that are ready to sell within the 15-minute window"""
@@ -139,15 +139,16 @@ class AutoSellOrders:
             self.logger.info(f"🔍 Found {len(orders)} orders ready to sell")
             for order in orders:
                 inst_id, ord_id, fill_sz, side, ts, sell_time, fill_px = order
-                sell_time_str = datetime.fromtimestamp(int(sell_time)/1000).strftime('%Y-%m-%d %H:%M:%S')
-                self.logger.info(f"   📋 {inst_id}: {ord_id} - Size: {fill_sz} - Sell Time: {sell_time_str}")
+                sell_time_str = datetime.fromtimestamp(int(sell_time)/1000).strftime('%H:%M:%S')
+                buy_price = self.format_price(fill_px)
+                self.logger.info(f"   📋 {inst_id} | Size: {fill_sz} | Buy: ${buy_price} | Sell: {sell_time_str}")
         
         return orders
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=10))
     def place_market_sell_order(self, inst_id, size, order_id):
         """Place market sell order with retry mechanism"""
-        self.logger.info(f"📤 Placing market sell order for {inst_id}: {size}")
+        self.logger.info(f"📤 Selling {inst_id}: {size} tokens")
         
         result = self.trade_api.place_order(
             instId=inst_id,
@@ -160,13 +161,11 @@ class AutoSellOrders:
         
         if not result or result.get('code') != '0':
             error_msg = result.get('msg', 'Unknown error') if result else 'Empty response'
-            self.logger.error(f"❌ API Error placing sell order for {inst_id}: {error_msg}")
+            self.logger.error(f"❌ Sell failed for {inst_id}: {error_msg}")
             return False
         
         okx_order_id = result.get('data', [{}])[0].get('ordId', 'Unknown')
-        self.logger.info(f"✅ Market sell order placed successfully for {inst_id}")
-        self.logger.info(f"   📋 OKX Order ID: {okx_order_id}")
-        self.logger.info(f"   💰 Size: {size}")
+        self.logger.info(f"✅ Sold {inst_id} | Size: {size} | Order: {okx_order_id}")
         return True
 
     def mark_order_as_sold(self, order_id):
@@ -179,7 +178,7 @@ class AutoSellOrders:
             ''', (order_id,))
             
             self.conn.commit()
-            self.logger.info(f"✅ Order {order_id} marked as sold in database")
+            self.logger.info(f"✅ Order {order_id} marked as sold")
             
             # Play notification sound
             self.play_sell_notification_sound()
@@ -192,14 +191,14 @@ class AutoSellOrders:
     def play_sell_notification_sound(self):
         """Play 10-second notification sound on macOS"""
         try:
-            self.logger.info("🔊 Playing sell notification sound for 10 seconds...")
+            self.logger.info("🔊 Playing sell notification sound...")
             
             start_time = time.time()
             while time.time() - start_time < 10:
                 os.system('osascript -e "beep"')
                 time.sleep(0.5)
             
-            self.logger.info("🔊 Sell notification sound completed")
+            self.logger.info("🔊 Notification sound completed")
             
         except Exception as e:
             self.logger.warning(f"⚠️  Could not play notification sound: {e}")
@@ -219,7 +218,7 @@ class AutoSellOrders:
             
             try:
                 formatted_price = self.format_price(fill_px)
-                self.logger.info(f"🔄 Processing sell order: {inst_id} - {ord_id} (Price: {formatted_price})")
+                self.logger.info(f"🔄 Processing: {inst_id} | Buy: ${formatted_price}")
                 
                 if self.place_market_sell_order(inst_id, fill_sz, ord_id):
                     if self.mark_order_as_sold(ord_id):
@@ -240,19 +239,19 @@ class AutoSellOrders:
         
         # Summary
         if successful_sells > 0 or failed_sells > 0:
-            self.logger.info("=" * 60)
-            self.logger.info(f"📊 Summary: {successful_sells} successful, {failed_sells} failed")
-            self.logger.info("=" * 60)
+            self.logger.info("─" * 50)
+            self.logger.info(f"📊 Summary: {successful_sells} sold, {failed_sells} failed")
+            self.logger.info("─" * 50)
 
     def run_continuous_monitoring(self, interval_minutes=15):
         """Run continuous monitoring with specified interval"""
-        self.logger.info(f"🔄 Starting continuous monitoring (check every {interval_minutes} minutes)")
+        self.logger.info(f"🔄 Continuous monitoring - check every {interval_minutes}min")
         self.logger.info("⏹️  Press Ctrl+C to stop")
         
         try:
             while True:
                 start_time = datetime.now()
-                self.logger.info(f"⏰ Starting monitoring cycle at {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
+                self.logger.info(f"⏰ Cycle: {start_time.strftime('%H:%M:%S')}")
                 
                 self.process_sell_orders()
                 
@@ -260,8 +259,7 @@ class AutoSellOrders:
                 cycle_duration = (datetime.now() - start_time).total_seconds()
                 sleep_time = max(0, (interval_minutes * 60) - cycle_duration)
                 
-                self.logger.info(f"⏱️  Cycle completed in {cycle_duration:.1f} seconds")
-                self.logger.info(f"😴 Sleeping for {sleep_time:.1f} seconds until next cycle")
+                self.logger.info(f"⏱️  Cycle: {cycle_duration:.1f}s | Sleep: {sleep_time:.1f}s")
                 
                 time.sleep(sleep_time)
                 
@@ -288,8 +286,8 @@ def main():
     start_time = datetime.now()
     logger = setup_logging()
     
-    logger.info(f"🚀 Starting OKX Auto Sell Orders ({'continuous' if args.continuous else 'once'})")
-    logger.info(f"⏰ Start time: {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
+    logger.info(f"🚀 OKX Auto Sell Orders - {'continuous' if args.continuous else 'once'}")
+    logger.info(f"⏰ Start: {start_time.strftime('%H:%M:%S')}")
     
     auto_seller = None
     exit_code = 0
@@ -316,8 +314,8 @@ def main():
             auto_seller.close()
         
         duration = datetime.now() - start_time
-        logger.info(f"⏰ Duration: {duration}")
-        logger.info("✅ Script finished" if exit_code == 0 else f"❌ Script finished with error code: {exit_code}")
+        logger.info(f"⏱️  Duration: {duration}")
+        logger.info("✅ Script finished" if exit_code == 0 else f"❌ Script finished (code: {exit_code})")
         
         sys.exit(exit_code)
 

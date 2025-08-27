@@ -114,7 +114,7 @@ class OKXOrderManager:
                         break  # No more orders
                     
                     all_orders.extend(orders)
-                    logger.info(f"📋 Fetched {len(orders)} orders (total: {len(all_orders)})")
+                    logger.info(f"📋 Fetched {len(orders)} orders | Total: {len(all_orders)}")
                     
                     # Check if we got less than the limit (means it's the last page)
                     if len(orders) < limit:
@@ -162,9 +162,7 @@ class OKXOrderManager:
                 # Log successful batch cancellation
                 order_ids = [order['algoId'] for order in orders_batch]
                 inst_ids = [order['instId'] for order in orders_batch]
-                logger.info(f"✅ Successfully cancelled batch of {len(orders_batch)} orders")
-                logger.info(f"   Instruments: {', '.join(inst_ids)}")
-                logger.info(f"   Order IDs: {', '.join(order_ids)}")
+                logger.info(f"✅ Cancelled {len(orders_batch)} orders | Instruments: {', '.join(inst_ids)}")
                 return True
             else:
                 error_msg = result.get('msg', 'Unknown error')

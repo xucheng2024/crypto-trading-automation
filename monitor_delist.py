@@ -137,12 +137,12 @@ class OKXDelistMonitor:
                     if data.get('code') == '0':
                         return data['data'][0]['details']
                     else:
-                        self.logger.error(f"❌ OKX API错误: {data}")
+                        self.logger.error(f"❌ OKX API error: {data}")
                         return []
                 elif response.status_code == 429:
                     # Rate limit hit - exponential backoff
                     delay = base_delay * (2 ** attempt)
-                    self.logger.warning(f"⚠️ Rate limit hit (429), attempt {attempt + 1}/{max_retries}. Waiting {delay} seconds...")
+                    self.logger.warning(f"⚠️ Rate limit (429) | Attempt {attempt + 1}/{max_retries} | Wait {delay}s")
                     if attempt < max_retries - 1:
                         time.sleep(delay)
                         continue
@@ -150,11 +150,11 @@ class OKXDelistMonitor:
                         self.logger.error(f"❌ Rate limit exceeded after {max_retries} attempts")
                         return []
                 else:
-                    self.logger.error(f"❌ 请求失败: {response.status_code}")
+                    self.logger.error(f"❌ Request failed: {response.status_code}")
                     return []
                     
             except Exception as e:
-                self.logger.error(f"❌ 获取公告失败 (attempt {attempt + 1}): {e}")
+                self.logger.error(f"❌ Fetch failed (attempt {attempt + 1}): {e}")
                 if attempt < max_retries - 1:
                     time.sleep(base_delay)
                     continue
