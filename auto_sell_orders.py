@@ -140,7 +140,8 @@ class AutoSellOrders:
             tdMode="cash",
             side="sell",
             ordType="market",
-            sz=size
+            sz=size,
+            tgtCcy="base_ccy"  # 明确指定按基础货币数量卖出
         )
         
         if not result or result.get('code') != '0':
