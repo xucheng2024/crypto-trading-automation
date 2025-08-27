@@ -72,7 +72,7 @@ class OKXLimitOrderManager:
             self.okx_flag = "1" if self.testnet else "0"
             
             # Initialize OKX Client
-            self.okx_client = OKXClient(self.logger)
+            self.okx_client = OKXClient(logger)
             self.trade_api = self.okx_client.get_trade_api()
             
             logger.info("🚀 OKX Pending Limit Order Canceller")
