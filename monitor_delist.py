@@ -141,8 +141,8 @@ class OKXDelistMonitor:
         except:
             return False
     
-    def send_alert(self, announcement: Dict[str, Any], affected_cryptos: Set[str]):
-        """发送警报并执行保护操作"""
+    def send_protection_alert(self, announcement: Dict[str, Any], affected_cryptos: Set[str]):
+        """发送保护警报并执行保护操作"""
         timestamp = int(announcement['pTime']) / 1000
         date = datetime.fromtimestamp(timestamp).strftime('%Y-%m-%d %H:%M:%S')
         
@@ -162,9 +162,22 @@ class OKXDelistMonitor:
         
         results = self.protection_manager.execute_full_protection(affected_cryptos)
         self.protection_manager.print_protection_summary(results)
+    
+    def send_info_alert(self, announcement: Dict[str, Any]):
+        """发送信息警报（不执行保护操作）"""
+        timestamp = int(announcement['pTime']) / 1000
+        date = datetime.fromtimestamp(timestamp).strftime('%Y-%m-%d %H:%M:%S')
         
-        # 播放警报声音
-        self.play_alert_sound()
+        print("\n" + "="*60)
+        print("ℹ️  发现Delist Spot公告")
+        print("="*60)
+        print(f"📅 发布时间: {date}")
+        print(f"📢 公告标题: {announcement['title']}")
+        print(f"🔗 详细链接: {announcement['url']}")
+        print(f"⏰ 时间戳: {announcement['pTime']}")
+        print("="*60)
+        
+        self.logger.info(f"ℹ️ 发现Delist Spot公告: {announcement['title']}")
     
     def play_alert_sound(self):
         """播放警报声音"""
@@ -206,30 +219,45 @@ class OKXDelistMonitor:
                 self.logger.error("❌ 无法获取公告数据")
                 return
             
-            # 检查是否有今天的受影响加密货币相关公告
+            # 检查是否有今天的delist spot公告
+            today_spot_announcements = []
             today_affected_announcements = []
             
             for ann in announcements:
                 if self.is_today_announcement(ann):
-                    # 检查是否影响配置的加密货币
-                    is_affected, affected_cryptos = self.crypto_matcher.check_announcement_impact(ann)
+                    # 生成唯一ID（使用标题和时间戳）
+                    announcement_id = f"{ann['title']}_{ann['pTime']}"
                     
-                    if is_affected:
-                        # 生成唯一ID（使用标题和时间戳）
-                        announcement_id = f"{ann['title']}_{ann['pTime']}"
-                        
-                        # 检查是否是新公告
-                        if announcement_id not in self.known_announcements:
-                            ann['affected_cryptos'] = affected_cryptos  # 保存受影响的加密货币
-                            today_affected_announcements.append(ann)
+                    # 检查是否是新公告
+                    if announcement_id not in self.known_announcements:
+                        # 检查是否是spot相关的公告
+                        if self.crypto_matcher.is_spot_related(ann):
+                            today_spot_announcements.append(ann)
                             self.known_announcements.add(announcement_id)
+                            
+                            # 同时检查是否影响配置的加密货币
+                            is_affected, affected_cryptos = self.crypto_matcher.check_announcement_impact(ann)
+                            if is_affected:
+                                ann['affected_cryptos'] = affected_cryptos
+                                today_affected_announcements.append(ann)
             
-            if today_affected_announcements:
-                self.logger.warning(f"🎯 发现 {len(today_affected_announcements)} 条影响配置加密货币的新公告！")
-                for ann in today_affected_announcements:
-                    self.send_alert(ann, ann['affected_cryptos'])
+            # 对所有新的delist spot公告播放警报声
+            if today_spot_announcements:
+                self.logger.warning(f"🔊 发现 {len(today_spot_announcements)} 条新的delist spot公告！")
+                # 先播放警报声
+                self.play_alert_sound()
+                
+                # 然后处理影响配置加密货币的公告
+                if today_affected_announcements:
+                    self.logger.warning(f"🎯 其中 {len(today_affected_announcements)} 条影响配置加密货币！")
+                    for ann in today_affected_announcements:
+                        self.send_protection_alert(ann, ann['affected_cryptos'])
+                else:
+                    self.logger.info("✅ 这些spot公告不影响你配置的加密货币")
+                    for ann in today_spot_announcements:
+                        self.send_info_alert(ann)
             else:
-                self.logger.info("✅ 没有发现影响配置加密货币的新公告")
+                self.logger.info("✅ 没有发现新的delist spot公告")
                 
         except Exception as e:
             self.logger.error(f"❌ 检查过程中出错: {e}")
