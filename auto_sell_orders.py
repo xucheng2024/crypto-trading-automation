@@ -123,11 +123,12 @@ class AutoSellOrders:
             current_time = int(datetime.now().timestamp() * 1000)
             cutoff_time = int((datetime.now() - timedelta(minutes=15)).timestamp() * 1000)
             
-            # Query orders ready to sell
+            # Query orders ready to sell (exclude already sold orders)
             self.cursor.execute('''
                 SELECT instId, ordId, fillSz, side, ts, sell_time, fillPx
                 FROM filled_orders 
                 WHERE sell_time IS NOT NULL 
+                AND sell_time NOT LIKE 'SOLD_%'
                 AND sell_time <= ? 
                 AND sell_time > ?
                 AND side = 'buy'
