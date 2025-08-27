@@ -1,0 +1,478 @@
+#!/usr/bin/env python3
+"""
+OKX Filled Orders Fetcher
+Fetches all filled limit orders and stores them in SQLite database
+"""
+
+import os
+import sys
+import logging
+import traceback
+import sqlite3
+import time
+from datetime import datetime, timedelta
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    # If dotenv is not available, try to load from environment directly
+    def load_dotenv():
+        pass
+    load_dotenv()
+
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type, RetryError
+from okx import Trade
+
+# Configure logging with rotation
+def setup_logging():
+    """Setup logging with file rotation"""
+    log_filename = f"fetch_filled_orders_{datetime.now().strftime('%Y%m%d')}.log"
+    
+    # Create logs directory if it doesn't exist
+    os.makedirs('logs', exist_ok=True)
+    log_path = os.path.join('logs', log_filename)
+    
+    # Configure logging
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(levelname)s - %(message)s',
+        handlers=[
+            logging.FileHandler(log_path, encoding='utf-8'),
+            logging.StreamHandler(sys.stdout)
+        ]
+    )
+    
+    return logging.getLogger(__name__)
+
+logger = setup_logging()
+
+class OKXFilledOrdersFetcher:
+    def __init__(self):
+        """Initialize OKX API connection and database"""
+        try:
+            self.api_key = os.getenv('OKX_API_KEY')
+            self.secret_key = os.getenv('OKX_SECRET_KEY')
+            self.passphrase = os.getenv('OKX_PASSPHRASE')
+            self.testnet = os.getenv('OKX_TESTNET', '1').lower() == 'true'
+            
+            # Validate environment variables
+            missing_vars = []
+            if not self.api_key:
+                missing_vars.append('OKX_API_KEY')
+            if not self.secret_key:
+                missing_vars.append('OKX_SECRET_KEY')
+            if not self.passphrase:
+                missing_vars.append('OKX_PASSPHRASE')
+            
+            if missing_vars:
+                raise ValueError(f"Missing required environment variables: {', '.join(missing_vars)}")
+            
+            # Set flag for demo/live trading
+            self.okx_flag = "1" if self.testnet else "0"
+            
+            # Initialize Trade API
+            self.trade_api = Trade.TradeAPI(
+                api_key=self.api_key,
+                api_secret_key=self.secret_key,
+                passphrase=self.passphrase,
+                flag=self.okx_flag,
+                debug=False
+            )
+            
+            # Initialize database
+            self.init_database()
+            
+            logger.info("🚀 OKX Filled Orders Fetcher")
+            logger.info("============================================================")
+            logger.info(f"🔧 Trading Environment: {'Demo' if self.testnet else 'Live'}")
+            logger.info(f"🔑 API Key: {self.api_key[:8]}...{self.api_key[-4:] if len(self.api_key) > 12 else '***'}")
+            logger.info("============================================================")
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to initialize OKX API: {e}")
+            logger.debug(f"Traceback: {traceback.format_exc()}")
+            raise
+
+    def init_database(self):
+        """Initialize SQLite database and create tables if they don't exist"""
+        try:
+            self.db_path = 'filled_orders.db'
+            self.conn = sqlite3.connect(self.db_path)
+            self.cursor = self.conn.cursor()
+            
+            # Create filled orders table
+            self.cursor.execute('''
+                CREATE TABLE IF NOT EXISTS filled_orders (
+                    instId TEXT NOT NULL,
+                    ordId TEXT PRIMARY KEY UNIQUE,
+                    fillPx TEXT NOT NULL,
+                    fillSz TEXT NOT NULL,
+                    side TEXT NOT NULL,
+                    ts TEXT NOT NULL,
+                    ordType TEXT,
+                    avgPx TEXT,
+                    accFillSz TEXT,
+                    fee TEXT,
+                    feeCcy TEXT,
+                    tradeId TEXT,
+                    fillTime TEXT,
+                    cTime TEXT,
+                    uTime TEXT,
+                    sell_time TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            
+            # Add sell_time column if it doesn't exist (for existing databases)
+            try:
+                self.cursor.execute('ALTER TABLE filled_orders ADD COLUMN sell_time TEXT')
+                logger.info("✅ Added sell_time column to existing table")
+            except sqlite3.OperationalError:
+                # Column already exists
+                pass
+            
+            # Create index for better query performance
+            self.cursor.execute('''
+                CREATE INDEX IF NOT EXISTS idx_filled_orders_instId 
+                ON filled_orders(instId)
+            ''')
+            
+            self.cursor.execute('''
+                CREATE INDEX IF NOT EXISTS idx_filled_orders_ts 
+                ON filled_orders(ts)
+            ''')
+            
+            self.conn.commit()
+            logger.info(f"🗄️  Database initialized: {self.db_path}")
+            
+            # Update existing orders with sell_time if missing
+            self.update_existing_orders_sell_time()
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to initialize database: {e}")
+            logger.debug(f"Traceback: {traceback.format_exc()}")
+            raise
+
+    def update_existing_orders_sell_time(self):
+        """Update existing orders with sell_time if missing"""
+        try:
+            # Find orders without sell_time
+            self.cursor.execute("SELECT ordId, ts FROM filled_orders WHERE sell_time IS NULL AND ts IS NOT NULL")
+            orders_to_update = self.cursor.fetchall()
+            
+            if not orders_to_update:
+                logger.info("✅ All existing orders already have sell_time calculated")
+                return
+            
+            logger.info(f"🔄 Updating {len(orders_to_update)} existing orders with sell_time...")
+            
+            updated_count = 0
+            for ord_id, ts in orders_to_update:
+                try:
+                    # Calculate sell time (ts + 20 hours)
+                    ts_datetime = datetime.fromtimestamp(int(ts) / 1000)
+                    sell_time_datetime = ts_datetime + timedelta(hours=20)
+                    sell_time = str(int(sell_time_datetime.timestamp() * 1000))
+                    
+                    # Update the order
+                    self.cursor.execute("UPDATE filled_orders SET sell_time = ? WHERE ordId = ?", (sell_time, ord_id))
+                    updated_count += 1
+                    
+                except (ValueError, TypeError) as e:
+                    logger.warning(f"⚠️  Could not calculate sell_time for order {ord_id}: {e}")
+                    continue
+            
+            self.conn.commit()
+            logger.info(f"✅ Updated {updated_count}/{len(orders_to_update)} existing orders with sell_time")
+            
+        except Exception as e:
+            logger.error(f"❌ Error updating existing orders with sell_time: {e}")
+            logger.debug(f"Traceback: {traceback.format_exc()}")
+
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=4, max=10),
+        retry=retry_if_exception_type((Exception,))
+    )
+    def get_filled_orders(self, begin_time=None, end_time=None, limit=100):
+        """Get filled limit orders with retry mechanism"""
+        try:
+            logger.debug("🔍 Fetching filled limit orders...")
+            
+            # Prepare parameters
+            params = {
+                'instType': 'SPOT',
+                'ordType': 'limit',
+                'state': 'filled',
+                'limit': str(limit)
+            }
+            
+            # Add time filters if provided (using correct parameter names)
+            if begin_time:
+                params['after'] = str(int(begin_time.timestamp() * 1000))
+            if end_time:
+                params['before'] = str(int(end_time.timestamp() * 1000))
+            
+            result = self.trade_api.get_order_list(**params)
+            
+            if not result:
+                logger.warning("⚠️  Empty response from API")
+                return []
+            
+            if result.get('code') == '0':
+                orders = result.get('data', [])
+                logger.info(f"📋 Found {len(orders)} filled limit orders")
+                
+                # Log order details for debugging
+                if orders:
+                    logger.debug(f"📝 Order types found: {list(set(order.get('ordType', 'unknown') for order in orders))}")
+                    logger.debug(f"📝 Order sides found: {list(set(order.get('side', 'unknown') for order in orders))}")
+                
+                return orders
+            else:
+                error_msg = result.get('msg', 'Unknown error')
+                logger.error(f"❌ API Error getting filled orders: {error_msg}")
+                logger.debug(f"Full API response: {result}")
+                return []
+                
+        except Exception as e:
+            logger.error(f"❌ Exception getting filled orders: {e}")
+            logger.debug(f"Traceback: {traceback.format_exc()}")
+            raise  # Re-raise for retry mechanism
+
+    def save_order_to_db(self, order):
+        """Save a single order to database"""
+        try:
+            # Extract required fields
+            inst_id = order.get('instId', '')
+            ord_id = order.get('ordId', '')
+            fill_px = order.get('fillPx', '')
+            fill_sz = order.get('fillSz', '')
+            side = order.get('side', '')
+            ts = order.get('fillTime', '')  # Use fillTime as timestamp
+            
+            # Calculate sell time (ts + 20 hours)
+            sell_time = None
+            if ts:
+                try:
+                    # Convert timestamp to datetime and add 20 hours
+                    ts_datetime = datetime.fromtimestamp(int(ts) / 1000)
+                    sell_time_datetime = ts_datetime + timedelta(hours=20)
+                    sell_time = str(int(sell_time_datetime.timestamp() * 1000))
+                except (ValueError, TypeError) as e:
+                    logger.warning(f"⚠️  Could not calculate sell time for order {ord_id}: {e}")
+            
+            # Validate required fields
+            if not all([inst_id, ord_id, fill_px, fill_sz, side, ts]):
+                logger.warning(f"⚠️  Skipping order with missing data: {order}")
+                return False
+            
+            # Prepare data for insertion
+            data = {
+                'instId': inst_id,
+                'ordId': ord_id,
+                'fillPx': fill_px,
+                'fillSz': fill_sz,
+                'side': side,
+                'ts': ts,
+                'ordType': order.get('ordType', ''),
+                'avgPx': order.get('avgPx', ''),
+                'accFillSz': order.get('accFillSz', ''),
+                'fee': order.get('fee', ''),
+                'feeCcy': order.get('feeCcy', ''),
+                'tradeId': order.get('tradeId', ''),
+                'fillTime': order.get('fillTime', ''),
+                'cTime': order.get('cTime', ''),
+                'uTime': order.get('uTime', ''),
+                'sell_time': sell_time
+            }
+            
+            # Insert or update order (upsert)
+            self.cursor.execute('''
+                INSERT OR REPLACE INTO filled_orders 
+                (instId, ordId, fillPx, fillSz, side, ts, ordType, avgPx, accFillSz, fee, feeCcy, tradeId, fillTime, cTime, uTime, sell_time)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                data['instId'], data['ordId'], data['fillPx'], data['fillSz'], data['side'], data['ts'],
+                data['ordType'], data['avgPx'], data['accFillSz'], data['fee'], data['feeCcy'],
+                data['tradeId'], data['fillTime'], data['cTime'], data['uTime'], data['sell_time']
+            ))
+            
+            return True
+            
+        except sqlite3.IntegrityError as e:
+            logger.warning(f"⚠️  Duplicate order ID {ord_id}: {e}")
+            return False
+        except Exception as e:
+            logger.error(f"❌ Error saving order {ord_id}: {e}")
+            logger.debug(f"Traceback: {traceback.format_exc()}")
+            return False
+
+    def fetch_and_save_filled_orders(self, minutes=None):
+        """Fetch filled orders with minutes parameter"""
+        try:
+            # Calculate time range based on minutes
+            end_time = datetime.now()
+            begin_time = end_time - timedelta(minutes=minutes or 15)  # Default to 15 minutes
+            
+            logger.info(f"🔍 Fetching filled orders from {begin_time.strftime('%Y-%m-%d %H:%M:%S')} to {end_time.strftime('%Y-%m-%d %H:%M:%S')}")
+            
+            # Get filled orders
+            orders = self.get_filled_orders(begin_time, end_time)
+            
+            if not orders:
+                logger.info("🎯 No filled orders found in the specified time range")
+                return
+            
+            # Play notification sound if orders found
+            if orders:
+                self.play_notification_sound()
+                logger.info("🔔 Notification sound played - orders found!")
+            
+            # Save orders to database
+            logger.info("💾 Saving orders to database...")
+            successful_saves = 0
+            failed_saves = 0
+            
+            for order in orders:
+                if self.save_order_to_db(order):
+                    successful_saves += 1
+                else:
+                    failed_saves += 1
+            
+            # Commit changes
+            self.conn.commit()
+            
+            # Summary
+            logger.info("============================================================")
+            logger.info(f"📊 Summary: {successful_saves}/{len(orders)} orders saved successfully")
+            if failed_saves > 0:
+                logger.warning(f"⚠️  Failed saves: {failed_saves}")
+            
+            success_rate = (successful_saves / len(orders) * 100) if len(orders) > 0 else 0
+            logger.info(f"📈 Success rate: {success_rate:.1f}%")
+            
+        except Exception as e:
+            logger.error(f"❌ Error in fetch_and_save_filled_orders: {e}")
+            logger.debug(f"Traceback: {traceback.format_exc()}")
+            raise
+
+    def play_notification_sound(self):
+        """Play system notification sound on macOS for 10 seconds continuously"""
+        try:
+            logger.info("🔊 Playing notification sound for 10 seconds...")
+            
+            # Play sound continuously for 10 seconds
+            start_time = time.time()
+            duration = 10  # 10 seconds
+            
+            while time.time() - start_time < duration:
+                # Play system beep sound
+                os.system('osascript -e "beep"')
+                # Small delay to prevent overwhelming the system
+                time.sleep(0.5)
+            
+            logger.info("🔊 Notification sound completed")
+            
+        except Exception as e:
+            logger.warning(f"⚠️  Could not play notification sound: {e}")
+
+    def get_database_stats(self):
+        """Get database statistics"""
+        try:
+            # Total orders
+            self.cursor.execute("SELECT COUNT(*) FROM filled_orders")
+            total_orders = self.cursor.fetchone()[0]
+            
+            # Orders by side
+            self.cursor.execute("SELECT side, COUNT(*) FROM filled_orders GROUP BY side")
+            side_stats = dict(self.cursor.fetchall())
+            
+            # Latest order
+            self.cursor.execute("SELECT MAX(ts) FROM filled_orders")
+            latest_ts = self.cursor.fetchone()[0]
+            
+            # Orders with sell_time calculated
+            self.cursor.execute("SELECT COUNT(*) FROM filled_orders WHERE sell_time IS NOT NULL")
+            orders_with_sell_time = self.cursor.fetchone()[0]
+            
+            logger.info("📊 Database Statistics:")
+            logger.info(f"   Total orders: {total_orders}")
+            logger.info(f"   Buy orders: {side_stats.get('buy', 0)}")
+            logger.info(f"   Sell orders: {side_stats.get('sell', 0)}")
+            logger.info(f"   Orders with sell_time: {orders_with_sell_time}/{total_orders}")
+            if latest_ts:
+                latest_time = datetime.fromtimestamp(int(latest_ts)/1000).strftime('%Y-%m-%d %H:%M:%S')
+                logger.info(f"   Latest order: {latest_time}")
+            
+        except Exception as e:
+            logger.error(f"❌ Error getting database stats: {e}")
+
+    def close(self):
+        """Close database connection"""
+        if hasattr(self, 'conn'):
+            self.conn.close()
+            logger.info("🗄️  Database connection closed")
+
+def main():
+    """Main function"""
+    start_time = datetime.now()
+    
+    # Parse command line arguments
+    import argparse
+    parser = argparse.ArgumentParser(description='Fetch OKX filled limit orders and save to database')
+    parser.add_argument('--minutes', type=int, default=15, help='Number of minutes to look back (default: 15)')
+    args = parser.parse_args()
+    
+    # Determine time range
+    time_description = f"last {args.minutes} minutes"
+    
+    logger.info(f"🚀 Starting OKX Filled Orders Fetch Process ({time_description})")
+    logger.info(f"⏰ Start time: {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
+    
+    exit_code = 0
+    fetcher = None
+    
+    try:
+        # Initialize fetcher
+        logger.info("🔧 Initializing OKX API connection and database...")
+        fetcher = OKXFilledOrdersFetcher()
+        
+        # Fetch and save filled orders
+        fetcher.fetch_and_save_filled_orders(minutes=args.minutes)
+        
+        # Show database statistics
+        fetcher.get_database_stats()
+        
+        logger.info("🎉 Process completed successfully")
+        
+    except KeyboardInterrupt:
+        logger.info("⏹️  Script interrupted by user")
+        exit_code = 130  # SIGINT exit code
+    except ValueError as e:
+        logger.error(f"❌ Configuration error: {e}")
+        exit_code = 1
+    except Exception as e:
+        logger.error(f"❌ Script failed: {e}")
+        logger.debug(f"Traceback: {traceback.format_exc()}")
+        exit_code = 1
+    finally:
+        # Clean up
+        if fetcher:
+            fetcher.close()
+        
+        end_time = datetime.now()
+        duration = end_time - start_time
+        logger.info(f"⏰ End time: {end_time.strftime('%Y-%m-%d %H:%M:%S')}")
+        logger.info(f"⏱️  Duration: {duration}")
+        
+        if exit_code == 0:
+            logger.info("✅ Script finished with success")
+        else:
+            logger.error(f"❌ Script finished with error code: {exit_code}")
+        
+        # Exit with appropriate code
+        sys.exit(exit_code)
+
+if __name__ == "__main__":
+    main()
