@@ -30,7 +30,7 @@ python monitor_delist.py
 ### Modular Components (New!) 🆕
 - **`config_manager.py`** - Configuration file management and backup (184 lines)
 - **`crypto_matcher.py`** - Smart cryptocurrency matching and detection (119 lines)
-- **`okx_client.py`** - OKX API client wrapper with error handling (195 lines)
+- **`okx_client.py`** - Universal OKX API client for all scripts (210 lines) ⭐
 - **`protection_manager.py`** - Automated protection operations orchestration (232 lines)
 
 ### Database & Utilities
@@ -53,7 +53,7 @@ python monitor_delist.py
 - **🔄 Major Refactoring** - Modular architecture with 5 specialized components (683 → 277 lines for main script)
 - **🛡️ Enhanced Protection** - Intelligent delisting detection with automatic order cancellation and balance liquidation
 - **⚙️ Configuration Management** - Automated backup and cleanup of trading configurations
-- **🔧 API Optimization** - Improved OKX client with proper error handling and market sell parameters
+- **🔧 Universal OKX Client** - Single OKX API client shared across all scripts, eliminating code duplication
 - **📊 Better Maintainability** - 59% code reduction in main script, improved testability and debugging
 
 ### Cron Job Schedule
@@ -153,13 +153,15 @@ python monitor_delist.py
   - **Case Insensitive**: Robust text matching regardless of case
   - **Validation**: Ensures only configured cryptocurrencies trigger actions
 
-#### `okx_client.py`
-- **Purpose**: OKX API client wrapper with enhanced functionality
+#### `okx_client.py` ⭐
+- **Purpose**: Universal OKX API client shared across all trading scripts
 - **Features**:
-  - **Unified Initialization**: Centralized API client setup with environment variables
-  - **Error Handling**: Robust error handling for API operations
-  - **Multi-API Support**: Integrates Funding, Trade, and other OKX APIs
-  - **Security**: Proper credential management and validation
+  - **Multi-API Support**: Funding, Trade, and Market APIs in one client
+  - **Universal Interface**: `get_funding_api()`, `get_trade_api()`, `get_market_api()`
+  - **Smart Availability**: `is_available()` for authenticated APIs, `is_market_available()` for public data
+  - **Unified Error Handling**: Consistent error management across all scripts
+  - **Environment Integration**: Automatic credential loading from environment variables
+  - **Code Deduplication**: Eliminates 50+ lines of repeated API initialization across 6 scripts
 
 #### `protection_manager.py`
 - **Purpose**: Orchestrates complete protection workflow
@@ -307,7 +309,7 @@ crypto/
 ├── # Modular Components (New!) 🆕
 ├── config_manager.py      # Configuration management (184 lines)
 ├── crypto_matcher.py      # Smart crypto detection (119 lines)
-├── okx_client.py          # OKX API wrapper (195 lines)
+├── okx_client.py          # Universal OKX API client (210 lines) ⭐
 ├── protection_manager.py  # Protection workflow (232 lines)
 │
 ├── # Documentation & Scripts
@@ -330,6 +332,7 @@ crypto/
 
 ### Architecture Benefits
 - **Maintainability**: Clean separation of concerns across 5 specialized modules
+- **Code Reusability**: Universal OKX client eliminates duplication across 6 scripts
 - **Testability**: Individual components can be tested independently
 - **Extensibility**: Easy to add new protection features or API integrations
 - **Reliability**: Robust error handling and logging throughout all modules
@@ -359,11 +362,23 @@ python monitor_delist.py
 from config_manager import ConfigManager
 from crypto_matcher import CryptoMatcher
 from protection_manager import ProtectionManager
+from okx_client import OKXClient
 
 # Initialize components
 config_mgr = ConfigManager()
 crypto_matcher = CryptoMatcher()
 protection_mgr = ProtectionManager()
+okx_client = OKXClient()
+
+# Universal OKX API access
+if okx_client.is_available():
+    trade_api = okx_client.get_trade_api()
+    funding_api = okx_client.get_funding_api()
+    print("✅ Authenticated APIs ready")
+
+if okx_client.is_market_available():
+    market_api = okx_client.get_market_api()
+    print("✅ Public data API ready")
 
 # Load configuration
 cryptos = config_mgr.load_configured_cryptos()
@@ -381,4 +396,4 @@ if affected:
 This project is for educational and personal use. Please ensure compliance with OKX API terms and local trading regulations.
 
 ---
-**System Architecture**: Modular • **Total Lines**: 1,107 (5 modules) • **Main Script**: 277 lines • **Code Reduction**: 59% • **Last Updated**: 2025-01-27
+**System Architecture**: Modular • **Total Lines**: 1,120+ (5 modules) • **Main Script**: 277 lines • **Code Reduction**: 59% • **API Unification**: 6 scripts share 1 OKX client • **Last Updated**: 2025-01-27
