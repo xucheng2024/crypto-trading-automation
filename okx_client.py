@@ -9,11 +9,13 @@ import logging
 from typing import Dict, Any, Optional, Tuple
 try:
     from okx import Funding, Trade
+    from okx.api import Market
     OKX_AVAILABLE = True
 except ImportError:
     OKX_AVAILABLE = False
     Funding = None
     Trade = None
+    Market = None
 
 
 class OKXClient:
@@ -27,6 +29,7 @@ class OKXClient:
         
         self.funding_api = None
         self.trade_api = None
+        self.market_api = None
         
         self._init_clients()
     
@@ -63,16 +66,39 @@ class OKXClient:
                 debug=False
             )
             
+            # 初始化 Market API (用于公共数据查询)
+            self.market_api = Market.MarketAPI(
+                flag=okx_flag,
+                debug=False
+            )
+            
             self.logger.info(f"✅ OKX API 客户端初始化成功 (环境: {'Demo' if okx_flag == '1' else 'Live'})")
             
         except Exception as e:
             self.logger.error(f"❌ 初始化 OKX API 客户端失败: {e}")
             self.funding_api = None
             self.trade_api = None
+            self.market_api = None
     
     def is_available(self) -> bool:
         """检查 OKX 客户端是否可用"""
         return self.funding_api is not None and self.trade_api is not None
+    
+    def get_funding_api(self):
+        """获取 Funding API 实例"""
+        return self.funding_api
+    
+    def get_trade_api(self):
+        """获取 Trade API 实例"""
+        return self.trade_api
+    
+    def get_market_api(self):
+        """获取 Market API 实例"""
+        return self.market_api
+    
+    def is_market_available(self) -> bool:
+        """检查 Market API 是否可用（不需要认证）"""
+        return self.market_api is not None
     
     def get_affected_balances(self, affected_cryptos: set) -> Dict[str, Dict[str, float]]:
         """检查受影响加密货币的余额"""

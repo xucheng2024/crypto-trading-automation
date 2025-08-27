@@ -13,7 +13,7 @@ import time
 from datetime import datetime, timedelta
 from decimal import Decimal, getcontext
 from tenacity import retry, stop_after_attempt, wait_exponential
-from okx import Trade
+from okx_client import OKXClient
 
 # Set Decimal precision for consistency with create_algo_triggers.py
 getcontext().prec = 28
@@ -62,14 +62,9 @@ class AutoSellOrders:
         if not all([self.api_key, self.secret_key, self.passphrase]):
             raise ValueError("Missing required environment variables: OKX_API_KEY, OKX_SECRET_KEY, OKX_PASSPHRASE")
         
-        # Initialize OKX API
-        self.trade_api = Trade.TradeAPI(
-            api_key=self.api_key,
-            api_secret_key=self.secret_key,
-            passphrase=self.passphrase,
-            flag="1" if self.testnet else "0",
-            debug=False
-        )
+        # Initialize OKX Client
+        self.okx_client = OKXClient(self.logger)
+        self.trade_api = self.okx_client.get_trade_api()
         
         # Initialize database
         self.init_database()

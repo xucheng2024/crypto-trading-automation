@@ -19,8 +19,7 @@ except ImportError:
 import time
 import traceback
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
-from okx.api import Market
-from okx import Trade
+from okx_client import OKXClient
 
 
 
@@ -59,12 +58,9 @@ class OKXOrderManager:
             flag=okx_flag  # Use environment variable setting
         )
         
-        self.trade_api = Trade.TradeAPI(
-            api_key=self.api_key,
-            api_secret_key=self.secret_key,
-            passphrase=self.passphrase,
-            flag=okx_flag  # 0: live trading, 1: demo trading
-        )
+        # Initialize OKX Client
+        self.okx_client = OKXClient()
+        self.trade_api = self.okx_client.get_trade_api()
     
     @retry(
         stop=stop_after_attempt(3),

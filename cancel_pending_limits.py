@@ -19,7 +19,7 @@ except ImportError:
         pass
     load_dotenv()
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type, RetryError
-from okx import Trade
+from okx_client import OKXClient
 
 # Load environment variables
 load_dotenv()
@@ -71,14 +71,9 @@ class OKXLimitOrderManager:
             # Set flag for demo/live trading
             self.okx_flag = "1" if self.testnet else "0"
             
-            # Initialize Trade API
-            self.trade_api = Trade.TradeAPI(
-                api_key=self.api_key,
-                api_secret_key=self.secret_key,
-                passphrase=self.passphrase,
-                flag=self.okx_flag,
-                debug=False
-            )
+            # Initialize OKX Client
+            self.okx_client = OKXClient(self.logger)
+            self.trade_api = self.okx_client.get_trade_api()
             
             logger.info("🚀 OKX Pending Limit Order Canceller")
             logger.info("============================================================")

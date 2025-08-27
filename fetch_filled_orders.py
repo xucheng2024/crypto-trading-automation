@@ -21,7 +21,7 @@ except ImportError:
     load_dotenv()
 
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type, RetryError
-from okx import Trade
+from okx_client import OKXClient
 
 # Configure logging with rotation
 def setup_logging():
@@ -70,14 +70,9 @@ class OKXFilledOrdersFetcher:
             # Set flag for demo/live trading
             self.okx_flag = "1" if self.testnet else "0"
             
-            # Initialize Trade API
-            self.trade_api = Trade.TradeAPI(
-                api_key=self.api_key,
-                api_secret_key=self.secret_key,
-                passphrase=self.passphrase,
-                flag=self.okx_flag,
-                debug=False
-            )
+            # Initialize OKX Client
+            self.okx_client = OKXClient(self.logger)
+            self.trade_api = self.okx_client.get_trade_api()
             
             # Initialize database
             self.init_database()
