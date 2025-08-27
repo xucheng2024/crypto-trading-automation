@@ -76,18 +76,18 @@ class OKXAlgoTrigger:
             print("Please set: OKX_API_KEY, OKX_SECRET_KEY, OKX_PASSPHRASE")
             sys.exit(1)
         
+        # Get trading environment from environment variable
+        testnet = os.getenv('OKX_TESTNET', 'true')
+        # Convert to OKX flag: true -> "1" (demo), false -> "0" (live)
+        okx_flag = "1" if testnet.lower() == "true" else "0"
+        
         # Initialize OKX SDK clients
         self.market_api = Market(
             key=self.api_key,
             secret=self.secret_key,
             passphrase=self.passphrase,
-            flag="1"  # 0: live trading, 1: demo trading
+            flag=okx_flag  # Use environment variable setting
         )
-        
-        # Get trading environment from environment variable
-        testnet = os.getenv('OKX_TESTNET', 'true')
-        # Convert to OKX flag: true -> "1" (demo), false -> "0" (live)
-        okx_flag = "1" if testnet.lower() == "true" else "0"
         
         self.trade_api = Trade.TradeAPI(
             api_key=self.api_key,

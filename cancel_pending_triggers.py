@@ -51,7 +51,7 @@ class OKXOrderManager:
             key=self.api_key,
             secret=self.secret_key,
             passphrase=self.passphrase,
-            flag="1"  # 0: live trading, 1: demo trading
+            flag=okx_flag  # Use environment variable setting
         )
         
         # Get trading environment from environment variable
