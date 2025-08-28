@@ -8,13 +8,14 @@ import os
 import logging
 from typing import Dict, Any, Optional, Tuple
 try:
-    from okx import Funding, Trade, MarketData
+    from okx import Funding, Trade, MarketData, Account
     OKX_AVAILABLE = True
 except ImportError:
     OKX_AVAILABLE = False
     Funding = None
     Trade = None
     MarketData = None
+    Account = None
 
 
 class OKXClient:
@@ -29,6 +30,7 @@ class OKXClient:
         self.funding_api = None
         self.trade_api = None
         self.market_api = None
+        self.account_api = None
         
         self._init_clients()
     
@@ -68,6 +70,18 @@ class OKXClient:
                     flag=okx_flag,
                     debug=False
                 )
+                
+                # 初始化 Account API (用于交易账户余额)
+                try:
+                    self.account_api = Account.AccountAPI(
+                        api_key=self.api_key,
+                        api_secret_key=self.secret_key,
+                        passphrase=self.passphrase,
+                        flag=okx_flag,
+                        debug=False
+                    )
+                except Exception as e:
+                    self.logger.warning(f"⚠️ 初始化 Account API 失败: {e}")
                 self.logger.info(f"✅ OKX API 客户端初始化成功 (环境: {'Demo' if okx_flag == '1' else 'Live'})")
             else:
                 self.logger.warning("⚠️ OKX API 凭证不完整，认证功能将被禁用")
@@ -95,49 +109,53 @@ class OKXClient:
         """获取 Market API 实例"""
         return self.market_api
     
+    def get_account_api(self):
+        """获取 Account API 实例"""
+        return self.account_api
+    
     def is_market_available(self) -> bool:
         """检查 Market API 是否可用（不需要认证）"""
         return self.market_api is not None
     
     def get_affected_balances(self, affected_cryptos: set) -> Dict[str, Dict[str, float]]:
-        """检查受影响加密货币的余额"""
-        if not self.funding_api or not affected_cryptos:
+        """检查受影响加密货币的余额（交易账户）"""
+        if not affected_cryptos:
             return {}
         
-        self.logger.info(f"🔍 检查受影响加密货币的余额: {sorted(affected_cryptos)}")
+        if not self.account_api:
+            self.logger.warning("⚠️ Account API 未初始化，无法检查交易账户余额")
+            return {}
+        
+        self.logger.info(f"🔍 检查受影响加密货币的交易账户余额: {sorted(affected_cryptos)}")
         
         affected_balances = {}
         
         try:
-            # 获取所有余额
-            result = self.funding_api.get_balances()
+            # 一次性获取所有交易账户余额
+            result = self.account_api.get_account_balance()
+            self.logger.info(f"🔎 交易账户余额返回(ALL): {result}")
+            if not result or result.get('code') != '0':
+                self.logger.warning(f"⚠️ 获取交易账户余额失败: {result}")
+                return {}
+            data = result.get('data', [])
+            if not data:
+                return {}
+            details = data[0].get('details', [])
+            for detail in details:
+                ccy = detail.get('ccy')
+                if not ccy or ccy not in affected_cryptos:
+                    continue
+                avail = float(detail.get('availBal', 0))
+                if avail > 0:
+                    affected_balances[ccy] = {'availBal': avail}
+                    self.logger.warning(f"🎯 发现受影响的交易余额: {ccy} = {avail}")
             
-            if result.get('code') == '0':
-                balances = result.get('data', [])
-                
-                for balance_info in balances:
-                    ccy = balance_info.get('ccy', '')
-                    available_bal = float(balance_info.get('availBal', '0'))
-                    
-                    # 检查是否是受影响的加密货币且有可用余额
-                    if ccy in affected_cryptos and available_bal > 0:
-                        affected_balances[ccy] = {
-                            'availBal': available_bal,
-                            'bal': float(balance_info.get('bal', '0')),
-                            'frozenBal': float(balance_info.get('frozenBal', '0'))
-                        }
-                        self.logger.warning(f"🎯 发现受影响的余额: {ccy} = {available_bal}")
-                
-                if affected_balances:
-                    self.logger.warning(f"📊 总共发现 {len(affected_balances)} 个受影响的加密货币有余额")
-                else:
-                    self.logger.info("✅ 受影响的加密货币均无余额")
-                    
+            if affected_balances:
+                self.logger.warning(f"📊 共发现 {len(affected_balances)} 个受影响币种在交易账户有余额")
             else:
-                self.logger.error(f"❌ 获取余额失败: {result}")
-                
+                self.logger.info("✅ 受影响的加密货币在交易账户均无余额")
         except Exception as e:
-            self.logger.error(f"❌ 检查余额时发生错误: {e}")
+            self.logger.error(f"❌ 检查交易账户余额时发生错误: {e}")
         
         return affected_balances
     

@@ -141,6 +141,55 @@ class AutoSellOrders:
         
         return orders
 
+    def get_available_balance(self, inst_id):
+        """Get available balance for a specific instrument"""
+        try:
+            # 从inst_id中提取币种代码 (例如: NMR-USDT -> NMR)
+            base_ccy = inst_id.split('-')[0].upper()
+            
+            account_api = self.okx_client.get_account_api()
+            if not account_api:
+                self.logger.warning(f"⚠️ Account API 未初始化，无法获取 {base_ccy} 交易账户余额")
+                return 0.0
+            
+            result = account_api.get_account_balance(ccy=base_ccy)
+            self.logger.info(f"🔍 交易账户余额API返回: {result}")
+            
+            if not result or result.get('code') != '0':
+                self.logger.warning(f"⚠️ 无法获取 {base_ccy} 交易账户余额: {result}")
+                return 0.0
+            
+            data = result.get('data', [])
+            if not data:
+                self.logger.warning(f"⚠️ 交易账户余额返回空数据: {result}")
+                return 0.0
+            
+            details = data[0].get('details', [])
+            self.logger.info(f"📊 交易账户详情条目: {len(details)} | 返回币种: {[d.get('ccy') for d in details][:20]}")
+            
+            for detail in details:
+                ccy = detail.get('ccy', '').upper()
+                if ccy == base_ccy:
+                    # 优先使用 availBal；若缺失或为0，回退到 availEq（交易账户可用权益）
+                    avail_str = detail.get('availBal')
+                    avail_val = float(avail_str) if avail_str is not None else 0.0
+                    if avail_val <= 0:
+                        eq_str = detail.get('availEq')
+                        if eq_str is not None:
+                            try:
+                                avail_val = float(eq_str)
+                            except Exception:
+                                pass
+                    self.logger.info(f"💰 {base_ccy} 交易账户可用: {avail_val} (字段: {'availBal' if avail_str else 'availEq'})")
+                    return avail_val
+            
+            self.logger.warning(f"⚠️ 未在交易账户详情中找到 {base_ccy} 的余额信息")
+            return 0.0
+            
+        except Exception as e:
+            self.logger.error(f"❌ 获取 {inst_id} 余额时出错: {e}")
+            return 0.0
+
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=10))
     def place_market_sell_order(self, inst_id, size, order_id):
         """Place market sell order with retry mechanism"""
@@ -157,6 +206,36 @@ class AutoSellOrders:
         
         if not result or result.get('code') != '0':
             error_msg = result.get('msg', 'Unknown error') if result else 'Empty response'
+            
+            # 检查是否是余额不足导致的失败
+            if "insufficient" in error_msg.lower() or "balance" in error_msg.lower() or "all operations failed" in error_msg.lower():
+                self.logger.warning(f"⚠️ 检测到可能的余额不足，尝试获取实际余额...")
+                actual_balance = self.get_available_balance(inst_id)
+                
+                if actual_balance > 0.0001:  # 如果余额大于0.0001，尝试卖出
+                    self.logger.info(f"🔄 余额不足，按实际余额卖出: {actual_balance} tokens")
+                    # 按实际余额重新下单
+                    result = self.trade_api.place_order(
+                        instId=inst_id,
+                        tdMode="cash",
+                        side="sell",
+                        ordType="market",
+                        sz=str(actual_balance),
+                        tgtCcy="base_ccy"
+                    )
+                    
+                    if result and result.get('code') == '0':
+                        okx_order_id = result.get('data', [{}])[0].get('ordId', 'Unknown')
+                        self.logger.info(f"✅ 按实际余额卖出成功: {inst_id} | Size: {actual_balance} | Order: {okx_order_id}")
+                        return True
+                    else:
+                        self.logger.error(f"❌ 按实际余额卖出也失败: {result.get('msg', 'Unknown error')}")
+                        return False
+                else:
+                    # 余额太小，无法卖出
+                    self.logger.warning(f"💰 {inst_id} 余额过小 ({actual_balance})，无法卖出")
+                    return False
+            
             self.logger.error(f"❌ Sell failed for {inst_id}: {error_msg}")
             return False
         
