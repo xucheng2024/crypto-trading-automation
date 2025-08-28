@@ -118,9 +118,8 @@ class AutoSellOrders:
         self.logger.info(f"🗄️  Database: {self.db_path}")
 
     def get_orders_ready_to_sell(self):
-        """Get orders that are ready to sell within the 15-minute window"""
+        """Get all orders that are ready to sell (sell_time < current_time)"""
         current_time = int(datetime.now().timestamp() * 1000)
-        cutoff_time = int((datetime.now() - timedelta(minutes=15)).timestamp() * 1000)
         
         self.cursor.execute('''
             SELECT instId, ordId, fillSz, side, ts, sell_time, fillPx
@@ -128,10 +127,9 @@ class AutoSellOrders:
             WHERE sell_time IS NOT NULL 
             AND (sold_status IS NULL OR sold_status != 'SOLD')
             AND sell_time <= ? 
-            AND sell_time > ?
             AND side = 'buy'
             ORDER BY sell_time ASC
-        ''', (current_time, cutoff_time))
+        ''', (current_time,))
         
         orders = self.cursor.fetchall()
         
