@@ -325,6 +325,7 @@ class OKXFilledOrdersFetcher:
             
             # If order is successfully saved and it's a buy order, create trigger sell order
             if side == 'buy' and fill_px and fill_sz:
+                logger.info(f"💰 Buy order saved: {inst_id} @ {fill_px} x {fill_sz}")
                 try:
                     self.create_trigger_sell_order(inst_id, fill_px, fill_sz, ord_id)
                 except Exception as e:
