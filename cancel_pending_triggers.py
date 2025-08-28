@@ -9,6 +9,11 @@ import sys
 import logging
 import logging.handlers
 from datetime import datetime
+import time
+import traceback
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+
+# Load environment variables first
 try:
     from dotenv import load_dotenv
     load_dotenv()
@@ -17,9 +22,7 @@ except ImportError:
     def load_dotenv():
         pass
     load_dotenv()
-import time
-import traceback
-from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+
 from okx_client import OKXClient
 
 
@@ -76,7 +79,7 @@ class OKXOrderManager:
             sys.exit(1)
         
         # Get trading environment from environment variable
-        testnet = os.getenv('OKX_TESTNET', 'true')
+        testnet = os.getenv('OKX_TESTNET', 'false')
         # Convert to OKX flag: true -> "1" (demo), false -> "0" (live)
         okx_flag = "1" if testnet.lower() == "true" else "0"
         

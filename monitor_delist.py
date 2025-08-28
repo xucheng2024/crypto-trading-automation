@@ -17,6 +17,7 @@ import base64
 from datetime import datetime, timedelta
 from typing import Set, List, Dict, Any
 
+# Load environment variables first
 try:
     from dotenv import load_dotenv
     load_dotenv()

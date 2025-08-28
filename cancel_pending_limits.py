@@ -11,6 +11,9 @@ import logging.handlers
 import traceback
 import time
 from datetime import datetime
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type, RetryError
+
+# Load environment variables first
 try:
     from dotenv import load_dotenv
     load_dotenv()
@@ -19,11 +22,8 @@ except ImportError:
     def load_dotenv():
         pass
     load_dotenv()
-from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type, RetryError
-from okx_client import OKXClient
 
-# Load environment variables
-load_dotenv()
+from okx_client import OKXClient
 
 # Configure logging with rotation
 def setup_logging():

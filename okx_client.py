@@ -40,7 +40,7 @@ class OKXClient:
         
         try:
             # 获取交易环境设置
-            testnet = os.getenv('OKX_TESTNET', 'true')
+            testnet = os.getenv('OKX_TESTNET', 'false')
             okx_flag = "1" if testnet.lower() == "true" else "0"
             
             # 初始化 Market API (公共数据，不需要认证)

@@ -12,6 +12,9 @@ import traceback
 import sqlite3
 import time
 from datetime import datetime, timedelta
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type, RetryError
+
+# Load environment variables first
 try:
     from dotenv import load_dotenv
     load_dotenv()
@@ -21,7 +24,6 @@ except ImportError:
         pass
     load_dotenv()
 
-from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type, RetryError
 from okx_client import OKXClient
 
 # Configure logging with rotation

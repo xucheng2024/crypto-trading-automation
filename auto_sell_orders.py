@@ -14,12 +14,11 @@ import time
 from datetime import datetime, timedelta
 from decimal import Decimal, getcontext
 from tenacity import retry, stop_after_attempt, wait_exponential
-from okx_client import OKXClient
 
 # Set Decimal precision for consistency with create_algo_triggers.py
 getcontext().prec = 28
 
-# Load environment variables from .env file
+# Load environment variables first
 try:
     from dotenv import load_dotenv
     load_dotenv()
@@ -29,8 +28,7 @@ except ImportError:
         pass
     load_dotenv()
 
-# Load environment variables
-load_dotenv()
+from okx_client import OKXClient
 
 def setup_logging():
     """Setup logging with file rotation"""
