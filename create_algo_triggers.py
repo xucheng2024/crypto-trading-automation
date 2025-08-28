@@ -137,6 +137,53 @@ class OKXAlgoTrigger:
         wait=wait_exponential(multiplier=1, min=4, max=10),
         retry=retry_if_exception_type((Exception,))
     )
+    def check_price_increase_filter(self, inst_id):
+        """Check if crypto has risen more than 70% in the past 3 days (excluding today)"""
+        try:
+            # Get past 4 days of data (today + 3 days back)
+            result = self.market_api.get_candlesticks(
+                instId=inst_id,
+                bar="1D",
+                limit="4"  # Get 4 days of data
+            )
+            
+            if result.get('code') == '0' and result.get('data'):
+                data = result['data']
+                if len(data) >= 4:
+                    # Data is ordered from newest to oldest
+                    # data[0] = today, data[1] = yesterday, data[2] = 2 days ago, data[3] = 3 days ago
+                    today_open = Decimal(data[0][1])  # Today's open price
+                    three_days_ago_open = Decimal(data[3][1])  # 3 days ago open price
+                    
+                    # Calculate percentage increase from 3 days ago to today
+                    price_increase_pct = ((today_open - three_days_ago_open) / three_days_ago_open) * Decimal('100')
+                    
+                    logger.info(f"📈 {inst_id} | 3d ago: ${three_days_ago_open} | Today: ${today_open} | Change: {price_increase_pct:.2f}%")
+                    
+                    if price_increase_pct > Decimal('70'):
+                        logger.warning(f"🚫 {inst_id} | SKIPPING - Rose {price_increase_pct:.2f}% in past 3 days (>70%)")
+                        return False  # Skip this crypto
+                    else:
+                        logger.info(f"✅ {inst_id} | OK - Only rose {price_increase_pct:.2f}% in past 3 days (<70%)")
+                        return True   # Allow trigger creation
+                else:
+                    logger.warning(f"⚠️ {inst_id} | Insufficient historical data, allowing trigger creation")
+                    return True  # Allow if we don't have enough data
+            
+            error_msg = result.get('msg', 'Unknown error')
+            logger.warning(f"⚠️ Failed to get historical data for {inst_id}: {error_msg}, allowing trigger creation")
+            return True  # Allow if API call fails
+            
+        except Exception as e:
+            logger.warning(f"⚠️ Error checking price increase for {inst_id}: {e}, allowing trigger creation")
+            logger.debug(f"Traceback: {traceback.format_exc()}")
+            return True  # Allow if exception occurs
+    
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=4, max=10),
+        retry=retry_if_exception_type((Exception,))
+    )
     def create_algo_trigger_order(self, inst_id, limit_coefficient, open_price):
         """Create multiple trigger points to increase trigger probability"""
         try:
@@ -256,6 +303,12 @@ class OKXAlgoTrigger:
                 logger.info(f"\n🔄 Processing {inst_id}...")
                 
                 try:
+                    # Check if crypto has risen more than 70% in past 3 days
+                    if not self.check_price_increase_filter(inst_id):
+                        logger.warning(f"⚠️  Skipping {inst_id}: rose >70% in past 3 days")
+                        failed_pairs.append((inst_id, "Skipped due to high price increase (>70% in 3 days)"))
+                        continue
+                    
                     # Get daily open price
                     open_price = self.get_daily_open_price(inst_id)
                     if open_price is None:
