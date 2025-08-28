@@ -4,6 +4,10 @@
   "description": "Duration 0 baseline configuration - same day trading strategy with min_trades=30 (High-risk cryptos removed)",
   "strategy_type": "same_day",
   "duration": 0,
+  "auto_sell_config": {
+    "min_usd_value": 0.01,
+    "description": "Minimum USD value threshold for auto-selling small balances"
+  },
   "strategy_params": {
     "limit_range": [
       60,
