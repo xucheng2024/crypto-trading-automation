@@ -238,15 +238,19 @@ class OKXFilledOrdersFetcher:
                 orders = result.get('data', [])
                 logger.info(f"📋 Found {len(orders)} filled limit orders")
                 
-                # Log order details for debugging
-                if orders:
-                    logger.debug(f"📝 Order types found: {list(set(order.get('ordType', 'unknown') for order in orders))}")
-                    logger.debug(f"📝 Order sides found: {list(set(order.get('side', 'unknown') for order in orders))}")
-                    # Log first order structure for debugging
-                    if len(orders) > 0:
-                        logger.debug(f"📝 First order structure: {list(orders[00].keys())}")
+                # Filter for buy orders only
+                buy_orders = [order for order in orders if order.get('side') == 'buy']
+                logger.info(f"📋 Filtered to {len(buy_orders)} buy orders (removed {len(orders) - len(buy_orders)} sell orders)")
                 
-                return orders
+                # Log order details for debugging
+                if buy_orders:
+                    logger.debug(f"📝 Order types found: {list(set(order.get('ordType', 'unknown') for order in buy_orders))}")
+                    logger.debug(f"📝 Order sides found: {list(set(order.get('side', 'unknown') for order in buy_orders))}")
+                    # Log first order structure for debugging
+                    if len(buy_orders) > 0:
+                        logger.debug(f"📝 First order structure: {list(buy_orders[0].keys())}")
+                
+                return buy_orders
             else:
                 error_msg = result.get('msg', 'Unknown error')
                 logger.error(f"❌ API Error getting filled orders: {error_msg}")
@@ -400,26 +404,25 @@ class OKXFilledOrdersFetcher:
     def get_database_stats(self):
         """Get database statistics"""
         try:
-            # Total orders
-            self.cursor.execute("SELECT COUNT(*) FROM filled_orders")
+            # Total orders (excluding sold ones)
+            self.cursor.execute("SELECT COUNT(*) FROM filled_orders WHERE sold_status != 'SOLD' OR sold_status IS NULL")
             total_orders = self.cursor.fetchone()[0]
             
-            # Orders by side
-            self.cursor.execute("SELECT side, COUNT(*) FROM filled_orders GROUP BY side")
+            # Orders by side (excluding sold ones)
+            self.cursor.execute("SELECT side, COUNT(*) FROM filled_orders WHERE sold_status != 'SOLD' OR sold_status IS NULL GROUP BY side")
             side_stats = dict(self.cursor.fetchall())
             
-            # Latest order
-            self.cursor.execute("SELECT MAX(ts) FROM filled_orders")
+            # Latest order (excluding sold ones)
+            self.cursor.execute("SELECT MAX(ts) FROM filled_orders WHERE sold_status != 'SOLD' OR sold_status IS NULL")
             latest_ts = self.cursor.fetchone()[0]
             
-            # Orders with sell_time calculated
-            self.cursor.execute("SELECT COUNT(*) FROM filled_orders WHERE sell_time IS NOT NULL")
+            # Orders with sell_time calculated (excluding sold ones)
+            self.cursor.execute("SELECT COUNT(*) FROM filled_orders WHERE (sold_status != 'SOLD' OR sold_status IS NULL) AND sell_time IS NOT NULL")
             orders_with_sell_time = self.cursor.fetchone()[0]
             
             logger.info("📊 Database Statistics:")
             logger.info(f"   Total orders: {total_orders}")
             logger.info(f"   Buy orders: {side_stats.get('buy', 0)}")
-            logger.info(f"   Sell orders: {side_stats.get('sell', 0)}")
             logger.info(f"   Orders with sell_time: {orders_with_sell_time}/{total_orders}")
             if latest_ts:
                 latest_time = datetime.fromtimestamp(int(latest_ts)/1000).strftime('%Y-%m-%d %H:%M:%S')
