@@ -350,11 +350,7 @@ class OKXFilledOrdersFetcher:
             # Convert to string for API call (maintains precision)
             trigger_price_str = str(trigger_price)
             
-            logger.info(f"🎯 Creating trigger sell order for {inst_id}")
-            logger.info(f"   Buy price: {buy_price}")
-            logger.info(f"   Trigger price: {trigger_price_str} (+20%)")
-            logger.info(f"   Quantity: {fill_sz}")
-            logger.info(f"   Order type: trigger (market sell when triggered)")
+            logger.info(f"🎯 Creating trigger sell order: {inst_id} @ {trigger_price_str} (+20%)")
             
             # Create trigger order using OKX algo order API
             result = self.trade_api.place_algo_order(
@@ -369,10 +365,7 @@ class OKXFilledOrdersFetcher:
             
             if result and result.get('code') == '0':
                 algo_ord_id = result.get('data', [{}])[0].get('algoOrdId', '')
-                logger.info(f"✅ Trigger sell order created successfully: {algo_ord_id}")
-                logger.info(f"   Order ID: {algo_ord_id}")
-                logger.info(f"   Trigger: {trigger_price_str}")
-                logger.info(f"   Quantity: {fill_sz}")
+                logger.info(f"✅ Trigger sell order created: {algo_ord_id}")
             else:
                 error_msg = result.get('msg', 'Unknown error') if result else 'No response'
                 logger.error(f"❌ Failed to create trigger sell order: {error_msg}")
@@ -404,10 +397,8 @@ class OKXFilledOrdersFetcher:
             # Play notification sound if orders found
             if orders:
                 self.play_notification_sound()
-                logger.info("🔔 Notification sound played - orders found!")
             
             # Save orders to database
-            logger.info("💾 Saving orders to database...")
             successful_saves = 0
             failed_saves = 0
             
@@ -421,13 +412,9 @@ class OKXFilledOrdersFetcher:
             self.conn.commit()
             
             # Summary
-            logger.info("─" * 50)
             logger.info(f"📊 Summary: {successful_saves}/{len(orders)} saved")
             if failed_saves > 0:
                 logger.warning(f"⚠️  Failed: {failed_saves}")
-            
-            success_rate = (successful_saves / len(orders) * 100) if len(orders) > 0 else 0
-            logger.info(f"📈 Success: {success_rate:.1f}%")
             
         except Exception as e:
             logger.error(f"❌ Error in fetch_and_save_filled_orders: {e}")
@@ -437,19 +424,13 @@ class OKXFilledOrdersFetcher:
     def play_notification_sound(self):
         """Play system notification sound on macOS for 10 seconds continuously"""
         try:
-            logger.info("🔊 Playing notification sound...")
-            
             # Play sound continuously for 10 seconds
             start_time = time.time()
             duration = 10  # 10 seconds
             
             while time.time() - start_time < duration:
-                # Play system beep sound
                 os.system('osascript -e "beep"')
-                # Small delay to prevent overwhelming the system
                 time.sleep(0.5)
-            
-            logger.info("🔊 Sound completed")
             
         except Exception as e:
             logger.warning(f"⚠️  Could not play notification sound: {e}")
@@ -473,13 +454,7 @@ class OKXFilledOrdersFetcher:
             self.cursor.execute("SELECT COUNT(*) FROM filled_orders WHERE (sold_status != 'SOLD' OR sold_status IS NULL) AND sell_time IS NOT NULL")
             orders_with_sell_time = self.cursor.fetchone()[0]
             
-            logger.info("📊 Database Statistics:")
-            logger.info(f"   Total orders: {total_orders}")
-            logger.info(f"   Buy orders: {side_stats.get('buy', 0)}")
-            logger.info(f"   Orders with sell_time: {orders_with_sell_time}/{total_orders}")
-            if latest_ts:
-                latest_time = datetime.fromtimestamp(int(latest_ts)/1000).strftime('%Y-%m-%d %H:%M:%S')
-                logger.info(f"   Latest order: {latest_time}")
+            logger.info(f"📊 DB: {total_orders} orders, {side_stats.get('buy', 0)} buy, {orders_with_sell_time} with sell_time")
             
         except Exception as e:
             logger.error(f"❌ Error getting database stats: {e}")
@@ -503,15 +478,13 @@ def main():
     # Determine time range
     time_description = f"last {args.minutes} minutes"
     
-    logger.info(f"🚀 Starting OKX Filled Orders Fetch Process ({time_description})")
-    logger.info(f"⏰ Start time: {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
+    logger.info(f"🚀 Starting OKX Filled Orders Fetch ({time_description})")
     
     exit_code = 0
     fetcher = None
     
     try:
         # Initialize fetcher
-        logger.info("🔧 Initializing OKX API connection and database...")
         fetcher = OKXFilledOrdersFetcher()
         
         # Fetch and save filled orders
@@ -520,7 +493,7 @@ def main():
         # Show database statistics
         fetcher.get_database_stats()
         
-        logger.info("🎉 Process completed successfully")
+        logger.info("✅ Process completed")
         
     except KeyboardInterrupt:
         logger.info("⏹️  Script interrupted by user")
@@ -539,13 +512,10 @@ def main():
         
         end_time = datetime.now()
         duration = end_time - start_time
-        logger.info(f"⏰ End time: {end_time.strftime('%Y-%m-%d %H:%M:%S')}")
         logger.info(f"⏱️  Duration: {duration}")
         
-        if exit_code == 0:
-            logger.info("✅ Script finished with success")
-        else:
-            logger.error(f"❌ Script finished with error code: {exit_code}")
+        if exit_code != 0:
+            logger.error(f"❌ Script failed with code: {exit_code}")
         
         # Exit with appropriate code
         sys.exit(exit_code)
