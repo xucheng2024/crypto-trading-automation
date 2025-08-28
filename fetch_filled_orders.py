@@ -340,7 +340,7 @@ class OKXFilledOrdersFetcher:
             return False
 
     def create_trigger_sell_order(self, inst_id, fill_px, fill_sz, ord_id):
-        """Create a trigger sell order at 20% above buy price"""
+        """Create a trigger sell order at 20% above buy price using OKX trigger order"""
         try:
             # Calculate trigger price (20% above buy price)
             buy_price = float(fill_px)
@@ -353,16 +353,17 @@ class OKXFilledOrdersFetcher:
             logger.info(f"   Buy price: {buy_price}")
             logger.info(f"   Trigger price: {trigger_price} (+20%)")
             logger.info(f"   Quantity: {fill_sz}")
+            logger.info(f"   Order type: trigger (market sell when triggered)")
             
             # Create trigger order using OKX algo order API
             result = self.trade_api.place_algo_order(
                 instId=inst_id,
                 tdMode="cash",  # SPOT trading mode
                 side="sell",
-                ordType="conditional",  # One-way stop order
+                ordType="trigger",  # Trigger order
                 sz=fill_sz,
-                tpTriggerPx=str(trigger_price),  # Trigger price
-                tpOrdPx=str(trigger_price),  # Order price (same as trigger for market sell)
+                triggerPx=str(trigger_price),  # Trigger price
+                orderPx="-1",  # -1 for market price execution
                 tag=f"auto_20p_{ord_id}"  # Tag to identify auto-generated orders
             )
             
