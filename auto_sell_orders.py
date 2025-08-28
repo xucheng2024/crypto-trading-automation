@@ -237,8 +237,9 @@ class AutoSellOrders:
                 
                 # 使用 eqUsd 判断是否值得卖出（如果USD等值小于配置的阈值，认为不值得卖出）
                 if eq_usd < self.min_usd_value:
-                    self.logger.warning(f"💰 {inst_id} USD等值过小 (${eq_usd:.4f}) < ${self.min_usd_value}，不值得卖出")
-                    return False
+                    self.logger.warning(f"💰 {inst_id} USD等值过小 (${eq_usd:.4f}) < ${self.min_usd_value}，不值得卖出，标记为已处理")
+                    # 即使不卖出，也标记为已处理，避免重复检查
+                    return "INSUFFICIENT_VALUE"
                 
                 if actual_balance > 0:  # 移除 0.0001 限制，只要有余额就尝试卖出
                     self.logger.info(f"🔄 余额不足，按实际余额卖出: {actual_balance} tokens (USD等值: ${eq_usd:.4f})")
@@ -323,13 +324,22 @@ class AutoSellOrders:
                 formatted_price = self.format_price(fill_px)
                 self.logger.info(f"🔄 Processing: {inst_id} | Buy: ${formatted_price}")
                 
-                if self.place_market_sell_order(inst_id, fill_sz, ord_id):
+                sell_result = self.place_market_sell_order(inst_id, fill_sz, ord_id)
+                
+                if sell_result == True:  # 成功卖出
                     if self.mark_order_as_sold(ord_id):
                         successful_sells += 1
                     else:
                         self.logger.warning(f"⚠️  Order {ord_id} sold but failed to update database")
                         successful_sells += 1
-                else:
+                elif sell_result == "INSUFFICIENT_VALUE":  # USD等值过小，标记为已处理
+                    if self.mark_order_as_sold(ord_id):
+                        self.logger.info(f"✅ Order {ord_id} marked as sold (insufficient USD value)")
+                        successful_sells += 1
+                    else:
+                        self.logger.warning(f"⚠️  Order {ord_id} insufficient value but failed to update database")
+                        failed_sells += 1
+                else:  # 卖出失败
                     failed_sells += 1
                 
                 # Rate limiting: wait 0.1 seconds between orders
