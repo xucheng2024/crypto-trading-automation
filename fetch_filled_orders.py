@@ -371,11 +371,8 @@ class OKXFilledOrdersFetcher:
                 algo_ord_id = result.get('data', [{}])[0].get('algoOrdId', '')
                 logger.info(f"✅ Trigger sell order created successfully: {algo_ord_id}")
                 logger.info(f"   Order ID: {algo_ord_id}")
-                logger.info(f"   Trigger: {trigger_price}")
+                logger.info(f"   Trigger: {trigger_price_str}")
                 logger.info(f"   Quantity: {fill_sz}")
-                
-
-                
             else:
                 error_msg = result.get('msg', 'Unknown error') if result else 'No response'
                 logger.error(f"❌ Failed to create trigger sell order: {error_msg}")
