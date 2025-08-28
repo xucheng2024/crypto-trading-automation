@@ -374,8 +374,7 @@ class OKXFilledOrdersFetcher:
                 logger.info(f"   Trigger: {trigger_price}")
                 logger.info(f"   Quantity: {fill_sz}")
                 
-                # Store trigger order info in database for tracking
-                self.store_trigger_order_info(ord_id, algo_ord_id, trigger_price_str, fill_sz)
+
                 
             else:
                 error_msg = result.get('msg', 'Unknown error') if result else 'No response'
@@ -387,44 +386,7 @@ class OKXFilledOrdersFetcher:
             logger.error(f"❌ Exception creating trigger sell order: {e}")
             logger.debug(f"Traceback: {traceback.format_exc()}")
 
-    def store_trigger_order_info(self, original_ord_id, algo_ord_id, trigger_price, quantity):
-        """Store trigger order information in database for tracking"""
-        try:
-            # Add trigger_orders table if it doesn't exist
-            self.cursor.execute('''
-                CREATE TABLE IF NOT EXISTS trigger_orders (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    original_ord_id TEXT NOT NULL,
-                    algo_ord_id TEXT NOT NULL,
-                    inst_id TEXT NOT NULL,
-                    trigger_price TEXT NOT NULL,
-                    quantity TEXT NOT NULL,
-                    status TEXT DEFAULT 'active',
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    triggered_at TIMESTAMP,
-                    filled_at TIMESTAMP
-                )
-            ''')
-            
-            # Get inst_id from the original order
-            self.cursor.execute("SELECT instId FROM filled_orders WHERE ordId = ?", (original_ord_id,))
-            result = self.cursor.fetchone()
-            if result:
-                inst_id = result[0]
-                
-                # Insert trigger order info
-                self.cursor.execute('''
-                    INSERT INTO trigger_orders 
-                    (original_ord_id, algo_ord_id, inst_id, trigger_price, quantity)
-                    VALUES (?, ?, ?, ?, ?)
-                ''', (original_ord_id, algo_ord_id, str(trigger_price), quantity, inst_id))
-                
-                self.conn.commit()
-                logger.info(f"💾 Trigger order info stored in database: {algo_ord_id}")
-                
-        except Exception as e:
-            logger.error(f"❌ Error storing trigger order info: {e}")
-            logger.debug(f"Traceback: {traceback.format_exc()}")
+
 
     def fetch_and_save_filled_orders(self, minutes=None):
         """Fetch filled orders with minutes parameter"""
@@ -514,20 +476,6 @@ class OKXFilledOrdersFetcher:
             self.cursor.execute("SELECT COUNT(*) FROM filled_orders WHERE (sold_status != 'SOLD' OR sold_status IS NULL) AND sell_time IS NOT NULL")
             orders_with_sell_time = self.cursor.fetchone()[0]
             
-            # Trigger orders statistics
-            try:
-                self.cursor.execute("SELECT COUNT(*) FROM trigger_orders WHERE status = 'active'")
-                active_triggers = self.cursor.fetchone()[0]
-                
-                self.cursor.execute("SELECT COUNT(*) FROM trigger_orders WHERE status = 'triggered'")
-                triggered_triggers = self.cursor.fetchone()[0]
-                
-                self.cursor.execute("SELECT COUNT(*) FROM trigger_orders WHERE status = 'filled'")
-                filled_triggers = self.cursor.fetchone()[0]
-            except sqlite3.OperationalError:
-                # Table doesn't exist yet
-                active_triggers = triggered_triggers = filled_triggers = 0
-            
             logger.info("📊 Database Statistics:")
             logger.info(f"   Total orders: {total_orders}")
             logger.info(f"   Buy orders: {side_stats.get('buy', 0)}")
@@ -535,11 +483,6 @@ class OKXFilledOrdersFetcher:
             if latest_ts:
                 latest_time = datetime.fromtimestamp(int(latest_ts)/1000).strftime('%Y-%m-%d %H:%M:%S')
                 logger.info(f"   Latest order: {latest_time}")
-            
-            logger.info("🎯 Trigger Orders Statistics:")
-            logger.info(f"   Active triggers: {active_triggers}")
-            logger.info(f"   Triggered: {triggered_triggers}")
-            logger.info(f"   Filled: {filled_triggers}")
             
         except Exception as e:
             logger.error(f"❌ Error getting database stats: {e}")
