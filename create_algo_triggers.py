@@ -101,46 +101,10 @@ class OKXAlgoTrigger:
         wait=wait_exponential(multiplier=1, min=4, max=10),
         retry=retry_if_exception_type((Exception,))
     )
-    def get_daily_open_price(self, inst_id):
-        """Get today's open price for a trading pair using OKX SDK with retry mechanism"""
+    def get_crypto_data(self, inst_id):
+        """Get crypto data in one API call: today's open price and 3-day price increase check"""
         try:
-            # Get daily candlestick data (much simpler than 1m intervals)
-            result = self.market_api.get_candlesticks(
-                instId=inst_id,
-                bar="1D",
-                limit="1"  # Just get today's daily candle
-            )
-            
-            if result.get('code') == '0' and result.get('data'):
-                data = result['data']
-                if data:
-                    # Get raw open price string to preserve precision
-                    raw_open_price = data[0][1]  # Open price is at index 1
-                    
-                    # Use Decimal for high precision, especially for very small prices
-                    open_price = Decimal(raw_open_price)
-                    logger.info(f"📊 {inst_id}: ${open_price}")
-                    
-                    return open_price
-            
-            error_msg = result.get('msg', 'Unknown error')
-            logger.error(f"❌ Failed to get open price for {inst_id}: {error_msg}")
-            return None
-            
-        except Exception as e:
-            logger.error(f"❌ Error getting open price for {inst_id}: {e}")
-            logger.debug(f"Traceback: {traceback.format_exc()}")
-            raise  # Re-raise for retry mechanism
-    
-    @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=4, max=10),
-        retry=retry_if_exception_type((Exception,))
-    )
-    def check_price_increase_filter(self, inst_id):
-        """Check if crypto has risen more than 70% in the past 3 days (excluding today)"""
-        try:
-            # Get past 4 days of data (today + 3 days back)
+            # Get past 4 days of data (today + 3 days back) in one API call
             result = self.market_api.get_candlesticks(
                 instId=inst_id,
                 bar="1D",
@@ -160,24 +124,30 @@ class OKXAlgoTrigger:
                     
                     logger.info(f"📈 {inst_id} | 3d ago: ${three_days_ago_open} | Today: ${today_open} | Change: {price_increase_pct:.2f}%")
                     
+                    # Check if price increase is too high (>70%)
                     if price_increase_pct > Decimal('70'):
                         logger.warning(f"🚫 {inst_id} | SKIPPING - Rose {price_increase_pct:.2f}% in past 3 days (>70%)")
-                        return False  # Skip this crypto
+                        return None, False  # Return None for price, False for filter
                     else:
                         logger.info(f"✅ {inst_id} | OK - Only rose {price_increase_pct:.2f}% in past 3 days (<70%)")
-                        return True   # Allow trigger creation
+                        return today_open, True  # Return today's price, True for filter
                 else:
                     logger.warning(f"⚠️ {inst_id} | Insufficient historical data, allowing trigger creation")
-                    return True  # Allow if we don't have enough data
+                    # If we have at least today's data, use it
+                    if data:
+                        today_open = Decimal(data[0][1])
+                        logger.info(f"📊 {inst_id}: ${today_open} (limited historical data)")
+                        return today_open, True
+                    return None, True  # Allow if we don't have enough data
             
             error_msg = result.get('msg', 'Unknown error')
             logger.warning(f"⚠️ Failed to get historical data for {inst_id}: {error_msg}, allowing trigger creation")
-            return True  # Allow if API call fails
+            return None, True  # Allow if API call fails
             
         except Exception as e:
-            logger.warning(f"⚠️ Error checking price increase for {inst_id}: {e}, allowing trigger creation")
+            logger.warning(f"⚠️ Error getting data for {inst_id}: {e}, allowing trigger creation")
             logger.debug(f"Traceback: {traceback.format_exc()}")
-            return True  # Allow if exception occurs
+            return None, True  # Allow if exception occurs
     
     @retry(
         stop=stop_after_attempt(3),
@@ -303,14 +273,14 @@ class OKXAlgoTrigger:
                 logger.info(f"\n🔄 Processing {inst_id}...")
                 
                 try:
-                    # Check if crypto has risen more than 70% in past 3 days
-                    if not self.check_price_increase_filter(inst_id):
+                    # Get crypto data in one API call: price and 3-day increase check
+                    open_price, price_check_passed = self.get_crypto_data(inst_id)
+                    
+                    if not price_check_passed:
                         logger.warning(f"⚠️  Skipping {inst_id}: rose >70% in past 3 days")
                         failed_pairs.append((inst_id, "Skipped due to high price increase (>70% in 3 days)"))
                         continue
                     
-                    # Get daily open price
-                    open_price = self.get_daily_open_price(inst_id)
                     if open_price is None:
                         logger.warning(f"⚠️  Skipping {inst_id}: could not get open price")
                         failed_pairs.append((inst_id, "Failed to get open price"))
