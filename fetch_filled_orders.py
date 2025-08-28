@@ -363,8 +363,7 @@ class OKXFilledOrdersFetcher:
                 ordType="trigger",  # Trigger order
                 sz=fill_sz,
                 triggerPx=str(trigger_price),  # Trigger price
-                orderPx="-1",  # -1 for market price execution
-                tag=f"auto_20p_{ord_id}"  # Tag to identify auto-generated orders
+                orderPx="-1"  # -1 for market price execution
             )
             
             if result and result.get('code') == '0':
