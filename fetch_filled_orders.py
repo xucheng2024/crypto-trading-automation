@@ -166,6 +166,17 @@ class OKXFilledOrdersFetcher:
             logger.debug(f"Traceback: {traceback.format_exc()}")
             raise
 
+    def get_latest_order_ts(self):
+        """Get latest saved order timestamp (ms) from DB, or None"""
+        try:
+            self.cursor.execute("SELECT MAX(CAST(ts AS INTEGER)) FROM filled_orders")
+            row = self.cursor.fetchone()
+            if row and row[0]:
+                return int(row[0])
+        except Exception as e:
+            logger.warning(f"⚠️  Failed to get latest ts from DB: {e}")
+        return None
+
     def update_existing_orders_sell_time(self):
         """Update existing orders with sell_time if missing"""
         try:
@@ -390,6 +401,16 @@ class OKXFilledOrdersFetcher:
             # Calculate time range based on minutes
             end_time = datetime.now()
             begin_time = end_time - timedelta(minutes=minutes or 15)  # Default to 15 minutes
+
+            # Use DB watermark if more recent than computed begin_time (with small overlap)
+            latest_ts_ms = self.get_latest_order_ts()
+            if latest_ts_ms:
+                latest_dt = datetime.fromtimestamp(latest_ts_ms / 1000)
+                # 2-minute overlap to avoid missing late-arriving records
+                adjusted_begin = latest_dt - timedelta(minutes=2)
+                if adjusted_begin > begin_time:
+                    logger.info(f"🧭 Using DB watermark. Adjust begin from {begin_time.strftime('%H:%M')} to {adjusted_begin.strftime('%H:%M')}")
+                    begin_time = adjusted_begin
             
             logger.info(f"🔍 Fetching orders: {begin_time.strftime('%H:%M')} → {end_time.strftime('%H:%M')}")
             
