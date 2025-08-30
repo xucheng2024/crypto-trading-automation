@@ -406,9 +406,10 @@ class OKXFilledOrdersFetcher:
             latest_ts_ms = self.get_latest_order_ts()
             if latest_ts_ms:
                 latest_dt = datetime.fromtimestamp(latest_ts_ms / 1000)
-                if latest_dt > begin_time:
-                    logger.info(f"🧭 Using DB watermark. Adjust begin from {begin_time.strftime('%H:%M')} to {latest_dt.strftime('%H:%M')}")
-                    begin_time = latest_dt
+                adjusted_begin = latest_dt + timedelta(milliseconds=1)
+                if adjusted_begin > begin_time:
+                    logger.info(f"🧭 Using DB watermark (+1ms). Adjust begin from {begin_time.strftime('%H:%M:%S')} to {adjusted_begin.strftime('%H:%M:%S')}")
+                    begin_time = adjusted_begin
             
             logger.info(f"🔍 Fetching orders: {begin_time.strftime('%H:%M')} → {end_time.strftime('%H:%M')}")
             
