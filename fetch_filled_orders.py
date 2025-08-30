@@ -326,9 +326,10 @@ class OKXFilledOrdersFetcher:
             # Log when a duplicate ordId is ignored (rowcount == 0)
             if self.cursor.rowcount == 0:
                 logger.debug(f"🔁 Duplicate order ignored (preserved sold_status): {ord_id}")
+                return False
             
-            # If order is successfully saved and it's a buy order, create trigger sell order
-            if side == 'buy' and fill_px and fill_sz:
+            # If order is newly saved and it's a buy order, create trigger sell order
+            if self.cursor.rowcount == 1 and side == 'buy' and fill_px and fill_sz:
                 logger.info(f"💰 Buy order saved: {inst_id} @ {fill_px} x {fill_sz}")
                 try:
                     self.create_trigger_sell_order(inst_id, fill_px, fill_sz, ord_id)
