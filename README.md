@@ -125,6 +125,8 @@ python monitor_delist.py
   - **Database Storage**: SQLite database for order history
   - **Configurable Intervals**: Adjustable monitoring frequency
   - **Order Statistics**: Comprehensive order analytics and reporting
+  - **Buy-only Storage**: Filters to side='buy' before saving
+  - **Preserve Status**: Uses INSERT OR IGNORE so existing SOLD status is not reset
 
 #### `auto_sell_orders.py` ⭐
 - **Purpose**: Automatically execute market sell orders based on sell_time
@@ -132,6 +134,9 @@ python monitor_delist.py
   - **Time-based Selling**: Executes sells when sell_time < current_time and > (current_time - 15 minutes)
   - **Audio Notifications**: 10-second continuous beep sound for successful sells
   - **Duplicate Prevention**: Tracks sold_status to avoid re-processing
+  - **Processing Lock**: Marks rows as PROCESSING before sell to prevent overlaps
+  - **Strict Selection**: Only processes rows where sold_status IS NULL; sell_time cast to INTEGER
+  - **Detailed Logging**: Includes ordId in scan and processing logs for auditability
   - **Market Order Execution**: Uses market orders for immediate execution
   - **Comprehensive Logging**: Detailed transaction logging and error handling
 
