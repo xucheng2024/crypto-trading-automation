@@ -141,10 +141,10 @@ class AutoSellOrders:
             SELECT instId, ordId, fillSz, side, ts, sell_time, fillPx
             FROM filled_orders 
             WHERE sell_time IS NOT NULL 
-            AND (sold_status IS NULL OR sold_status != 'SOLD')
-            AND sell_time <= ? 
+            AND sold_status IS NULL
+            AND CAST(sell_time AS INTEGER) <= ? 
             AND side = 'buy'
-            ORDER BY sell_time ASC
+            ORDER BY CAST(sell_time AS INTEGER) ASC
         ''', (current_time,))
         
         orders = self.cursor.fetchall()
@@ -155,9 +155,41 @@ class AutoSellOrders:
                 inst_id, ord_id, fill_sz, side, ts, sell_time, fill_px = order
                 sell_time_str = datetime.fromtimestamp(int(sell_time)/1000).strftime('%H:%M:%S')
                 buy_price = self.format_price(fill_px)
-                self.logger.info(f"   📋 {inst_id} | Size: {fill_sz} | Buy: ${buy_price} | Sell: {sell_time_str}")
+                self.logger.info(f"   📋 {inst_id} | ordId: {ord_id} | Size: {fill_sz} | Buy: ${buy_price} | Sell: {sell_time_str}")
         
         return orders
+
+    def mark_order_processing(self, order_id):
+        """Mark order as PROCESSING to avoid duplicate processing"""
+        try:
+            self.cursor.execute('''
+                UPDATE filled_orders 
+                SET sold_status = 'PROCESSING'
+                WHERE ordId = ? AND sold_status IS NULL
+            ''', (order_id,))
+            self.conn.commit()
+            if self.cursor.rowcount == 1:
+                self.logger.info(f"🔒 Locked order for processing: {order_id}")
+                return True
+            else:
+                self.logger.info(f"⏭️  Skip, already taken or processed: {order_id}")
+                return False
+        except Exception as e:
+            self.logger.error(f"❌ Error locking order {order_id}: {e}")
+            return False
+
+    def clear_order_processing(self, order_id):
+        """Clear PROCESSING status to allow future retries on failure"""
+        try:
+            self.cursor.execute('''
+                UPDATE filled_orders 
+                SET sold_status = NULL
+                WHERE ordId = ? AND sold_status = 'PROCESSING'
+            ''', (order_id,))
+            self.conn.commit()
+            self.logger.info(f"🔓 Cleared processing lock: {order_id}")
+        except Exception as e:
+            self.logger.error(f"❌ Error clearing processing for {order_id}: {e}")
 
     def get_available_balance(self, inst_id):
         """Get available balance for a specific instrument"""
@@ -322,7 +354,11 @@ class AutoSellOrders:
             
             try:
                 formatted_price = self.format_price(fill_px)
-                self.logger.info(f"🔄 Processing: {inst_id} | Buy: ${formatted_price}")
+                self.logger.info(f"🔄 Processing: {inst_id} | ordId: {ord_id} | Buy: ${formatted_price}")
+                
+                # Lock this order to prevent duplicate processing (intra-run or concurrent)
+                if not self.mark_order_processing(ord_id):
+                    continue
                 
                 sell_result = self.place_market_sell_order(inst_id, fill_sz, ord_id)
                 
@@ -340,12 +376,19 @@ class AutoSellOrders:
                         self.logger.warning(f"⚠️  Order {ord_id} insufficient value but failed to update database")
                         failed_sells += 1
                 else:  # 卖出失败
+                    # Clear PROCESSING to allow future retry
+                    self.clear_order_processing(ord_id)
                     failed_sells += 1
                 
                 # Rate limiting: wait 0.1 seconds between orders
                 time.sleep(0.1)
                 
             except Exception as e:
+                # Clear PROCESSING on unexpected error to avoid stuck state
+                try:
+                    self.clear_order_processing(ord_id)
+                except Exception:
+                    pass
                 failed_sells += 1
                 self.logger.error(f"❌ Error processing sell order {ord_id}: {e}")
                 continue

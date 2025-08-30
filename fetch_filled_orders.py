@@ -312,9 +312,9 @@ class OKXFilledOrdersFetcher:
                 'sell_time': sell_time
             }
             
-            # Insert or update order (upsert)
+            # Insert new order; ignore if ordId already exists to preserve sold_status
             self.cursor.execute('''
-                INSERT OR REPLACE INTO filled_orders 
+                INSERT OR IGNORE INTO filled_orders 
                 (instId, ordId, fillPx, fillSz, side, ts, ordType, avgPx, accFillSz, fee, feeCcy, tradeId, fillTime, cTime, uTime, sell_time)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', (
@@ -322,6 +322,10 @@ class OKXFilledOrdersFetcher:
                 data['ordType'], data['avgPx'], data['accFillSz'], data['fee'], data['feeCcy'],
                 data['tradeId'], data['fillTime'], data['cTime'], data['uTime'], data['sell_time']
             ))
+
+            # Log when a duplicate ordId is ignored (rowcount == 0)
+            if self.cursor.rowcount == 0:
+                logger.debug(f"🔁 Duplicate order ignored (preserved sold_status): {ord_id}")
             
             # If order is successfully saved and it's a buy order, create trigger sell order
             if side == 'buy' and fill_px and fill_sz:
