@@ -342,10 +342,9 @@ class OKXOrderManager:
 
 def main():
     try:
-        # Check if .env file exists
+        # Allow running without .env in CI; rely on environment variables from runner
         if not os.path.exists(".env"):
-            logger.error("❌ Error: .env file not found in current directory")
-            sys.exit(1)
+            logger.info("ℹ️ .env not found; using environment variables from environment/CI")
         
         logger.info("🚀 Starting OKX Order Cancellation Process")
         logger.info(f"⏰ Start time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
