@@ -24,28 +24,28 @@ try:
     
     # 尝试导入各个模块
     try:
-        from okx import Funding
+        import okx.Funding as Funding
         logging.info("✅ Funding 模块导入成功")
     except ImportError as e:
         logging.warning(f"⚠️ Funding 模块导入失败: {e}")
         Funding = None
     
     try:
-        from okx import Trade
+        import okx.Trade as Trade
         logging.info("✅ Trade 模块导入成功")
     except ImportError as e:
         logging.warning(f"⚠️ Trade 模块导入失败: {e}")
         Trade = None
     
     try:
-        from okx import MarketData
+        import okx.MarketData as MarketData
         logging.info("✅ MarketData 模块导入成功")
     except ImportError as e:
         logging.warning(f"⚠️ MarketData 模块导入失败: {e}")
         MarketData = None
     
     try:
-        from okx import Account
+        import okx.Account as Account
         logging.info("✅ Account 模块导入成功")
     except ImportError as e:
         logging.warning(f"⚠️ Account 模块导入失败: {e}")
