@@ -17,10 +17,10 @@ export default {
       // 根据cron频率决定触发哪些脚本
       let scripts = [];
       
-      if (cron.includes('2,7,12,17,22,27,32,37,42,47,52,57')) {
-        // 每5分钟执行: monitor_delist + cancel_pending_limits (避开整点)
+      if (cron.includes('2,9,16,23,30,37,44,51,58')) {
+        // 每7分钟执行: monitor_delist + cancel_pending_limits (避开整点)
         scripts = ['monitor_delist', 'cancel_pending_limits'];
-        console.log('📅 5-minute interval: monitor_delist + cancel_pending_limits');
+        console.log('📅 7-minute interval: monitor_delist + cancel_pending_limits');
       } else if (cron.includes('0,15,30,45')) {
         // 每15分钟执行: fetch_filled_orders + auto_sell_orders (整点)
         scripts = ['fetch_filled_orders', 'auto_sell_orders'];
@@ -84,7 +84,7 @@ export default {
       <hr>
       <h2>📅 Cron Schedule:</h2>
       <ul>
-        <li><strong>每5分钟</strong>: monitor_delist.py + cancel_pending_limits.py</li>
+        <li><strong>每7分钟</strong>: monitor_delist.py + cancel_pending_limits.py</li>
         <li><strong>每15分钟</strong>: fetch_filled_orders.py + auto_sell_orders.py</li>
         <li><strong>每天23:55</strong>: cancel_pending_triggers.py</li>
         <li><strong>每天00:05</strong>: create_algo_triggers.py</li>
@@ -92,7 +92,7 @@ export default {
       <hr>
       <h2>🔧 执行逻辑:</h2>
       <ul>
-        <li>5分钟间隔: 监控和保护 + 取消限价单</li>
+        <li>7分钟间隔: 监控和保护 + 取消限价单</li>
         <li>15分钟间隔: 获取已完成订单 + 自动卖出</li>
         <li>夜间任务: 取消待处理触发器</li>
         <li>早晨任务: 创建算法触发器</li>
