@@ -1,6 +1,6 @@
 /**
  * Cloudflare Worker for triggering GitHub Actions
- * Cron triggers: 每5分钟执行一次，避开整点时间
+ * Cron triggers: 每5分钟和每15分钟执行不同脚本组合
  */
 
 // GitHub 配置
@@ -8,13 +8,33 @@ const GITHUB_OWNER = 'xucheng2024';
 const GITHUB_REPO = 'crypto-trading-automation';
 const GITHUB_TOKEN = 'YOUR_GITHUB_TOKEN'; // 需要设置环境变量
 
-// 每5分钟执行一次，避开整点 (02, 07, 12, 17, 22, 27, 32, 37, 42, 47, 52, 57)
 export default {
   async scheduled(event, env, ctx) {
     const cron = event.cron;
     console.log(`🕐 Cron triggered: ${cron}`);
     
     try {
+      // 根据cron频率决定触发哪些脚本
+      let scripts = [];
+      
+      if (cron.includes('*/5')) {
+        // 每5分钟执行: monitor_delist + cancel_pending_limits
+        scripts = ['monitor_delist', 'cancel_pending_limits'];
+        console.log('📅 5-minute interval: monitor_delist + cancel_pending_limits');
+      } else if (cron.includes('*/15')) {
+        // 每15分钟执行: fetch_filled_orders + auto_sell_orders
+        scripts = ['fetch_filled_orders', 'auto_sell_orders'];
+        console.log('📅 15-minute interval: fetch_filled_orders + auto_sell_orders');
+      } else if (cron.includes('54 23')) {
+        // 每天23:54: 取消待处理触发器
+        scripts = ['cancel_pending_triggers'];
+        console.log('🌙 Nightly: cancel_pending_triggers');
+      } else if (cron.includes('6 0')) {
+        // 每天00:06: 创建算法触发器
+        scripts = ['create_algo_triggers'];
+        console.log('🌅 Morning: create_algo_triggers');
+      }
+      
       // 触发 GitHub repository_dispatch
       const response = await fetch(`https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/dispatches`, {
         method: 'POST',
@@ -28,13 +48,15 @@ export default {
           client_payload: {
             timestamp: new Date().toISOString(),
             source: 'cloudflare-worker',
-            cron_schedule: cron
+            cron_schedule: cron,
+            scripts: scripts,
+            interval: cron.includes('*/5') ? '5min' : cron.includes('*/15') ? '15min' : 'daily'
           }
         })
       });
 
       if (response.ok) {
-        console.log('✅ GitHub Actions triggered successfully');
+        console.log(`✅ GitHub Actions triggered successfully for: ${scripts.join(', ')}`);
         return new Response('OK', { status: 200 });
       } else {
         const errorText = await response.text();
@@ -62,9 +84,18 @@ export default {
       <hr>
       <h2>📅 Cron Schedule:</h2>
       <ul>
-        <li>每5分钟: 02, 07, 12, 17, 22, 27, 32, 37, 42, 47, 52, 57</li>
-        <li>每天23:54: 取消待处理触发器</li>
-        <li>每天00:06: 创建算法触发器</li>
+        <li><strong>每5分钟</strong>: monitor_delist.py + cancel_pending_limits.py</li>
+        <li><strong>每15分钟</strong>: fetch_filled_orders.py + auto_sell_orders.py</li>
+        <li><strong>每天23:54</strong>: cancel_pending_triggers.py</li>
+        <li><strong>每天00:06</strong>: create_algo_triggers.py</li>
+      </ul>
+      <hr>
+      <h2>🔧 执行逻辑:</h2>
+      <ul>
+        <li>5分钟间隔: 监控和保护 + 取消限价单</li>
+        <li>15分钟间隔: 获取已完成订单 + 自动卖出</li>
+        <li>夜间任务: 取消待处理触发器</li>
+        <li>早晨任务: 创建算法触发器</li>
       </ul>
     `, {
       headers: { 'Content-Type': 'text/html' }

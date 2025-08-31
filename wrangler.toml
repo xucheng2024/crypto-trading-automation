@@ -4,8 +4,10 @@ compatibility_date = "2024-01-01"
 
 [triggers]
 crons = [
-  # 每5分钟执行一次，避开整点时间
-  "2,7,12,17,22,27,32,37,42,47,52,57 * * * *",
+  # 每5分钟执行: monitor_delist + cancel_pending_limits
+  "*/5 * * * *",
+  # 每15分钟执行: fetch_filled_orders + auto_sell_orders
+  "*/15 * * * *",
   # 每天23:54 - 取消待处理触发器
   "54 23 * * *",
   # 每天00:06 - 创建算法触发器
