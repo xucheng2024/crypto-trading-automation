@@ -43,7 +43,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cache/uv
-          key: uv-packages-${{ runner.os }}-py311-${{ hashFiles('requirements.txt') }}
+          key: uv-packages-${{ runner.os }}-py311-${{ hashFiles('uv.lock', 'pyproject.toml', 'requirements.txt') }}
           restore-keys: |
             uv-packages-${{ runner.os }}-py311-
             uv-packages-${{ runner.os }}-
@@ -53,7 +53,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: .venv
-          key: python-venv-${{ runner.os }}-py311-${{ hashFiles('requirements.txt') }}
+          key: python-venv-${{ runner.os }}-py311-${{ hashFiles('uv.lock', 'pyproject.toml', 'requirements.txt') }}
           restore-keys: |
             python-venv-${{ runner.os }}-py311-
             python-venv-${{ runner.os }}-
@@ -63,7 +63,9 @@ jobs:
 
       - name: Install dependencies
         run: |
-          ~/.local/bin/uv sync --frozen
+          mkdir -p logs
+          set -o pipefail
+          ~/.local/bin/uv sync --locked 2>&1 | tee logs/uv_install.log
           
       - name: Activate virtual environment
         run: |
@@ -142,6 +144,7 @@ jobs:
         with:
           name: trading-logs-${{ github.run_id }}
           path: |
-            logs/
+            logs/**
             *.log
+          if-no-files-found: ignore
           retention-days: 7
