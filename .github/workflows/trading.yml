@@ -1,18 +1,10 @@
 name: Crypto Trading Automation
 
 on:
-  schedule:
-    # Every 5 minutes - Monitoring and auto sell orders (avoiding peak hours)
-    - cron: '2,7,12,17,22,27,32,37,42,47,52,57 * * * *'
-    # Daily at 23:55 - Cancel pending trigger orders
-    - cron: '54 23 * * *'
-    # Daily at 00:05 - Create new algo triggers
-    - cron: '6 0 * * *'
-
   # 手动触发
   workflow_dispatch:
 
-  # External trigger support (for forks or external schedulers)
+  # Cloudflare Worker 触发
   repository_dispatch:
     types: [cron]
 
@@ -55,7 +47,7 @@ jobs:
           ~/.local/bin/uv pip install --system -r requirements.txt
           
       - name: Run monitoring and protection
-        if: (github.event_name == 'schedule' && github.event.schedule == '*/5 * * * *') || github.event_name == 'workflow_dispatch' || (github.event_name == 'repository_dispatch' && github.event.action == 'cron')
+        if: github.event_name == 'workflow_dispatch' || (github.event_name == 'repository_dispatch' && github.event.action == 'cron')
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           OKX_API_KEY: ${{ secrets.OKX_API_KEY }}
@@ -66,7 +58,7 @@ jobs:
           python monitor_delist.py || echo "⚠️ monitor_delist.py completed with warnings"
           
       - name: Run auto sell orders
-        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'repository_dispatch' && github.event.action == 'cron')
+        if: github.event_name == 'workflow_dispatch' || (github.event_name == 'repository_dispatch' && github.event.action == 'cron')
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           OKX_API_KEY: ${{ secrets.OKX_API_KEY }}
@@ -77,7 +69,7 @@ jobs:
           python auto_sell_orders.py || echo "⚠️ auto_sell_orders.py completed with warnings"
           
       - name: Run fetch filled orders
-        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'repository_dispatch' && github.event.action == 'cron')
+        if: github.event_name == 'workflow_dispatch' || (github.event_name == 'repository_dispatch' && github.event.action == 'cron')
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           OKX_API_KEY: ${{ secrets.OKX_API_KEY }}
@@ -88,7 +80,7 @@ jobs:
           python fetch_filled_orders.py || echo "⚠️ fetch_filled_orders.py completed with warnings"
           
       - name: Run cancel pending limits
-        if: (github.event_name == 'schedule' && github.event.schedule == '*/5 * * * *') || github.event_name == 'workflow_dispatch' || (github.event_name == 'repository_dispatch' && github.event.action == 'cron')
+        if: github.event_name == 'workflow_dispatch' || (github.event_name == 'repository_dispatch' && github.event.action == 'cron')
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           OKX_API_KEY: ${{ secrets.OKX_API_KEY }}
@@ -99,7 +91,7 @@ jobs:
           python cancel_pending_limits.py --side buy || echo "⚠️ cancel_pending_limits.py completed with warnings"
           
       - name: Run cancel pending triggers (nightly)
-        if: (github.event_name == 'schedule' && github.event.schedule == '55 23 * * *')
+        if: (github.event_name == 'repository_dispatch' && github.event.action == 'cron')
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           OKX_API_KEY: ${{ secrets.OKX_API_KEY }}
@@ -110,7 +102,7 @@ jobs:
           python cancel_pending_triggers.py || echo "⚠️ cancel_pending_triggers.py completed with warnings"
           
       - name: Run create algo triggers (nightly)
-        if: (github.event_name == 'schedule' && github.event.schedule == '5 0 * * *')
+        if: (github.event_name == 'repository_dispatch' && github.event.action == 'cron')
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           OKX_API_KEY: ${{ secrets.OKX_API_KEY }}
