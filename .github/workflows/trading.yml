@@ -33,9 +33,20 @@ jobs:
           cache: 'pip'
           cache-dependency-path: requirements.txt
           
+      - name: Cache uv
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/uv
+          key: uv-${{ runner.os }}-py311-${{ hashFiles('requirements.txt') }}
+          restore-keys: |
+            uv-${{ runner.os }}-py311-
+
+      - name: Install uv
+        run: curl -LsSf https://astral.sh/uv/install.sh | sh -s -- --yes
+
       - name: Install dependencies
         run: |
-          pip install -r requirements.txt
+          ~/.local/bin/uv pip install --system -r requirements.txt
           
       - name: Run monitoring and protection
         env:
