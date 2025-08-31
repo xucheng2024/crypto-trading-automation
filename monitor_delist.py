@@ -45,6 +45,7 @@ class OKXDelistMonitor:
         # Monitoring configuration
         self.check_interval = 600  # 10 minutes = 600 seconds (match crontab)
         self.known_announcements = set()  # Record known announcement IDs
+        self._found_announcements = False  # Track if announcements were found
         
         # Setup logging
         self.setup_logging()
@@ -136,7 +137,13 @@ class OKXDelistMonitor:
                 if response.status_code == 200:
                     data = response.json()
                     if data.get('code') == '0':
-                        return data['data'][0]['details']
+                        # Check if there's actual announcement data
+                        if 'data' in data and len(data['data']) > 0 and 'details' in data['data'][0]:
+                            self.logger.info(f"📢 Found {len(data['data'])} announcement(s)")
+                            return data['data'][0]['details']
+                        else:
+                            self.logger.info("ℹ️ No announcement details found in API response")
+                            return []
                     else:
                         self.logger.error(f"❌ OKX API error: {data}")
                         return []
@@ -217,33 +224,7 @@ class OKXDelistMonitor:
         
         self.logger.info(f"ℹ️ Delist Spot announcement found: {announcement['title']}")
     
-    def play_alert_sound(self):
-        """Play alert sound"""
-        print("\n🔊 Alert ongoing... Press Enter to stop")
-        
-        # Continuous system sound
-        alert_count = 0
-        while True:
-            try:
-                # Play system sound (macOS)
-                os.system('afplay /System/Library/Sounds/Glass.aiff')
-                alert_count += 1
-                
-                # Display count every 3 alerts
-                if alert_count % 3 == 0:
-                    print(f"🔊 Played {alert_count} alert sounds... Press Enter to stop")
-                
-                # Continue after 0.8 seconds
-                time.sleep(0.8)
-                
-            except KeyboardInterrupt:
-                print("\n🛑 Alert stopped")
-                break
-            except Exception as e:
-                self.logger.warning(f"❌ Failed to play sound: {e}")
-                break
-        
-        print("✅ Alert ended")
+
     
     def check_for_new_announcements(self):
         """Check for new announcements"""
@@ -254,7 +235,8 @@ class OKXDelistMonitor:
             announcements = self.fetch_delist_announcements(page=1)
             
             if not announcements:
-                self.logger.error("❌ Could not fetch announcement data")
+                self.logger.info("ℹ️ No announcements found - ending check")
+                self._found_announcements = False
                 return
             
             # Check for today's delist spot announcements
@@ -282,8 +264,8 @@ class OKXDelistMonitor:
             # Play alert sound for all new delist spot announcements
             if today_spot_announcements:
                 self.logger.warning(f"🔊 Found {len(today_spot_announcements)} new delist spot announcements!")
-                # Play alert sound first
-                self.play_alert_sound()
+                self._found_announcements = True
+
                 
                 # Then process announcements affecting configured cryptocurrencies
                 if today_affected_announcements:
@@ -296,9 +278,11 @@ class OKXDelistMonitor:
                         self.send_info_alert(ann)
             else:
                 self.logger.info("✅ No new delist spot announcements found")
+                self._found_announcements = False
                 
         except Exception as e:
             self.logger.error(f"❌ Error during check: {e}")
+            self._found_announcements = False
     
     def run_monitor(self):
         """Run monitoring (continuous mode)"""
@@ -346,7 +330,12 @@ class OKXDelistMonitor:
         
         # Perform a single check
         self.check_for_new_announcements()
-        self.logger.info("✅ Single check completed, program exiting")
+        
+        # Check if we found any announcements to determine exit status
+        if not hasattr(self, '_found_announcements') or not self._found_announcements:
+            self.logger.info("✅ No announcements found - program exiting normally")
+        else:
+            self.logger.info("✅ Single check completed, program exiting")
 
 
 def main():

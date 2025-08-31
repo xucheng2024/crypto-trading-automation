@@ -87,7 +87,7 @@ class AutoSellOrders:
         self.trade_api = self.okx_client.get_trade_api()
         
         # Initialize database
-        self.init_database()
+        self.connect_database()
         
         self.logger.info(f"🚀 Auto Sell Orders - {'Demo' if self.testnet else 'Live'} mode | Min USD: ${self.min_usd_value}")
 
@@ -100,8 +100,8 @@ class AutoSellOrders:
         except:
             return price_str
 
-    def init_database(self):
-        """Initialize PostgreSQL database connection"""
+    def connect_database(self):
+        """Connect to PostgreSQL database (assumes tables already exist)"""
         try:
             # Use unified database connection
             from lib.database import get_database_connection
@@ -109,45 +109,14 @@ class AutoSellOrders:
             self.conn = get_database_connection()
             self.cursor = self.conn.cursor()
             
-            # Ensure filled_orders table exists
-            self.cursor.execute('''
-                CREATE TABLE IF NOT EXISTS filled_orders (
-                    instId VARCHAR(255) NOT NULL,
-                    ordId VARCHAR(255) PRIMARY KEY,
-                    fillPx TEXT NOT NULL,
-                    fillSz TEXT NOT NULL,
-                    side VARCHAR(50) NOT NULL,
-                    ts TEXT NOT NULL,
-                    ordType VARCHAR(50),
-                    avgPx TEXT,
-                    accFillSz TEXT,
-                    fee TEXT,
-                    feeCcy VARCHAR(50),
-                    tradeId VARCHAR(255),
-                    fillTime TEXT,
-                    cTime TEXT,
-                    uTime TEXT,
-                    sell_time TEXT,
-                    sold_status TEXT DEFAULT NULL,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            ''')
-
-            # Ensure sold_status column exists (compatible with old database); rollback and retry ALTER on error
-            try:
-                self.cursor.execute("SELECT sold_status FROM filled_orders LIMIT 1")
-            except Exception:
-                try:
-                    self.conn.rollback()
-                except Exception:
-                    pass
-                self.cursor.execute("ALTER TABLE filled_orders ADD COLUMN sold_status TEXT DEFAULT NULL")
-
-            self.conn.commit()
+            # Simple connection test
+            self.cursor.execute("SELECT 1")
+            self.cursor.fetchone()
+            
             self.logger.info("✅ Connected to PostgreSQL database")
             
         except Exception as e:
-            self.logger.error(f"❌ Failed to initialize database: {e}")
+            self.logger.error(f"❌ Failed to connect to database: {e}")
             raise
 
     def load_auto_sell_config(self):
@@ -337,7 +306,7 @@ class AutoSellOrders:
         return True
 
     def mark_order_as_sold(self, order_id):
-        """Mark order as sold in database and play notification sound"""
+        """Mark order as sold in database"""
         try:
             self.cursor.execute('''
                 UPDATE filled_orders 
@@ -348,28 +317,14 @@ class AutoSellOrders:
             self.conn.commit()
             self.logger.info(f"✅ Order {order_id} marked as sold")
             
-            # Play notification sound
-            self.play_sell_notification_sound()
+
             return True
             
         except Exception as e:
             self.logger.error(f"❌ Error marking order {order_id} as sold: {e}")
             return False
 
-    def play_sell_notification_sound(self):
-        """Play 10-second notification sound on macOS"""
-        try:
-            self.logger.info("🔊 Playing sell notification sound...")
-            
-            start_time = time.time()
-            while time.time() - start_time < 10:
-                os.system('osascript -e "beep"')
-                time.sleep(0.5)
-            
-            self.logger.info("🔊 Notification sound completed")
-            
-        except Exception as e:
-            self.logger.warning(f"⚠️  Could not play notification sound: {e}")
+
 
     def process_sell_orders(self):
         """Process all orders ready to sell"""

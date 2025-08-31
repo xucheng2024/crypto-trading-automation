@@ -117,7 +117,7 @@ class OKXFilledOrdersFetcher:
             self.trade_api = self.okx_client.get_trade_api()
             
             # Initialize database
-            self.init_database()
+            self.connect_database()
             
             logger.info(f"🚀 OKX Filled Orders Fetcher - {'Demo' if self.testnet else 'Live'}")
             logger.info(f"🔑 API: {self.api_key[:8]}...{self.api_key[-4:] if len(self.api_key) > 12 else '***'}")
@@ -127,8 +127,8 @@ class OKXFilledOrdersFetcher:
             logger.debug(f"Traceback: {traceback.format_exc()}")
             raise
 
-    def init_database(self):
-        """Initialize PostgreSQL database and create tables if they don't exist"""
+    def connect_database(self):
+        """Connect to PostgreSQL database (assumes tables already exist)"""
         try:
             # Use unified database connection
             from lib.database import get_database_connection
@@ -136,60 +136,14 @@ class OKXFilledOrdersFetcher:
             self.conn = get_database_connection()
             self.cursor = self.conn.cursor()
             
-            # PostgreSQL syntax
-            self.cursor.execute('''
-                CREATE TABLE IF NOT EXISTS filled_orders (
-                    instId VARCHAR(255) NOT NULL,
-                    ordId VARCHAR(255) PRIMARY KEY,
-                    fillPx TEXT NOT NULL,
-                    fillSz TEXT NOT NULL,
-                    side VARCHAR(50) NOT NULL,
-                    ts TEXT NOT NULL,
-                    ordType VARCHAR(50),
-                    avgPx TEXT,
-                    accFillSz TEXT,
-                    fee TEXT,
-                    feeCcy VARCHAR(50),
-                    tradeId VARCHAR(255),
-                    fillTime TEXT,
-                    cTime TEXT,
-                    uTime TEXT,
-                    sell_time TEXT,
-                    sold_status TEXT DEFAULT NULL,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            ''')
-
-            # Ensure sold_status column exists for older DBs (safe with rollback)
-            try:
-                self.cursor.execute("SELECT sold_status FROM filled_orders LIMIT 1")
-            except Exception:
-                try:
-                    self.conn.rollback()
-                except Exception:
-                    pass
-                self.cursor.execute("ALTER TABLE filled_orders ADD COLUMN sold_status TEXT DEFAULT NULL")
+            # Simple connection test
+            self.cursor.execute("SELECT 1")
+            self.cursor.fetchone()
             
             logger.info("✅ Connected to PostgreSQL database")
             
-            # Create index for better query performance
-            self.cursor.execute('''
-                CREATE INDEX IF NOT EXISTS idx_filled_orders_instId 
-                ON filled_orders(instId)
-            ''')
-            
-            self.cursor.execute('''
-                CREATE INDEX IF NOT EXISTS idx_filled_orders_ts 
-                ON filled_orders(ts)
-            ''')
-            
-            self.conn.commit()
-            
-            # Update existing orders with sell_time if missing
-            self.update_existing_orders_sell_time()
-            
         except Exception as e:
-            logger.error(f"❌ Failed to initialize database: {e}")
+            logger.error(f"❌ Failed to connect to database: {e}")
             logger.debug(f"Traceback: {traceback.format_exc()}")
             raise
 
@@ -204,41 +158,7 @@ class OKXFilledOrdersFetcher:
             logger.warning(f"⚠️  Failed to get latest ts from DB: {e}")
         return None
 
-    def update_existing_orders_sell_time(self):
-        """Update existing orders with sell_time if missing"""
-        try:
-            # Find orders without sell_time
-            self.cursor.execute("SELECT ordId, ts FROM filled_orders WHERE sell_time IS NULL AND ts IS NOT NULL")
-            orders_to_update = self.cursor.fetchall()
-            
-            if not orders_to_update:
-                logger.info("✅ All existing orders already have sell_time calculated")
-                return
-            
-            logger.info(f"🔄 Updating {len(orders_to_update)} existing orders with sell_time...")
-            
-            updated_count = 0
-            for ord_id, ts in orders_to_update:
-                try:
-                    # Calculate sell time (ts + 20 hours)
-                    ts_datetime = datetime.fromtimestamp(int(ts) / 1000)
-                    sell_time_datetime = ts_datetime + timedelta(hours=20)
-                    sell_time = str(int(sell_time_datetime.timestamp() * 1000))
-                    
-                    # Update the order
-                    self.cursor.execute("UPDATE filled_orders SET sell_time = %s WHERE ordId = %s", (sell_time, ord_id))
-                    updated_count += 1
-                    
-                except (ValueError, TypeError) as e:
-                    logger.warning(f"⚠️  Could not calculate sell_time for order {ord_id}: {e}")
-                    continue
-            
-            self.conn.commit()
-            logger.info(f"✅ Updated {updated_count}/{len(orders_to_update)} existing orders with sell_time")
-            
-        except Exception as e:
-            logger.error(f"❌ Error updating existing orders with sell_time: {e}")
-            logger.debug(f"Traceback: {traceback.format_exc()}")
+
 
     @retry(
         stop=stop_after_attempt(3),
@@ -448,9 +368,7 @@ class OKXFilledOrdersFetcher:
                 logger.info("🎯 No filled orders found in the specified time range")
                 return
             
-            # Play notification sound if orders found
-            if orders:
-                self.play_notification_sound()
+
             
             # Save orders to database
             successful_saves = 0
@@ -475,43 +393,9 @@ class OKXFilledOrdersFetcher:
             logger.debug(f"Traceback: {traceback.format_exc()}")
             raise
 
-    def play_notification_sound(self):
-        """Play system notification sound on macOS for 10 seconds continuously"""
-        try:
-            # Play sound continuously for 10 seconds
-            start_time = time.time()
-            duration = 10  # 10 seconds
-            
-            while time.time() - start_time < duration:
-                os.system('osascript -e "beep"')
-                time.sleep(0.5)
-            
-        except Exception as e:
-            logger.warning(f"⚠️  Could not play notification sound: {e}")
 
-    def get_database_stats(self):
-        """Get database statistics"""
-        try:
-            # Total orders (excluding sold ones)
-            self.cursor.execute("SELECT COUNT(*) FROM filled_orders WHERE sold_status != 'SOLD' OR sold_status IS NULL")
-            total_orders = self.cursor.fetchone()[0]
-            
-            # Orders by side (excluding sold ones)
-            self.cursor.execute("SELECT side, COUNT(*) FROM filled_orders WHERE sold_status != 'SOLD' OR sold_status IS NULL GROUP BY side")
-            side_stats = dict(self.cursor.fetchall())
-            
-            # Latest order (excluding sold ones)
-            self.cursor.execute("SELECT MAX(ts) FROM filled_orders WHERE sold_status != 'SOLD' OR sold_status IS NULL")
-            latest_ts = self.cursor.fetchone()[0]
-            
-            # Orders with sell_time calculated (excluding sold ones)
-            self.cursor.execute("SELECT COUNT(*) FROM filled_orders WHERE (sold_status != 'SOLD' OR sold_status IS NULL) AND sell_time IS NOT NULL")
-            orders_with_sell_time = self.cursor.fetchone()[0]
-            
-            logger.info(f"📊 DB: {total_orders} orders, {side_stats.get('buy', 0)} buy, {orders_with_sell_time} with sell_time")
-            
-        except Exception as e:
-            logger.error(f"❌ Error getting database stats: {e}")
+
+
 
     def close(self):
         """Close database connection"""
@@ -543,9 +427,6 @@ def main():
         
         # Fetch and save filled orders
         fetcher.fetch_and_save_filled_orders(minutes=args.minutes)
-        
-        # Show database statistics
-        fetcher.get_database_stats()
         
         logger.info("✅ Process completed")
         
