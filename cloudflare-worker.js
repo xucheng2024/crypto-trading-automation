@@ -17,8 +17,8 @@ export default {
       // 根据cron频率决定触发哪些脚本
       let scripts = [];
       
-      if (cron.includes('2,9,16,23,30,37,44,51,58')) {
-        // 每7分钟执行: monitor_delist + cancel_pending_limits (避开整点)
+      if (cron.includes('*/7')) {
+        // 每7分钟执行: monitor_delist + cancel_pending_limits
         scripts = ['monitor_delist', 'cancel_pending_limits'];
         console.log('📅 7-minute interval: monitor_delist + cancel_pending_limits');
       } else if (cron.includes('0,15,30,45')) {
