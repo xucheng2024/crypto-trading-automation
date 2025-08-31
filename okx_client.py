@@ -7,16 +7,36 @@ OKX API 客户端封装模块
 import os
 import logging
 from typing import Dict, Any, Optional, Tuple
+
+# 尝试导入新版本的OKX SDK
 try:
+    import okx
     from okx import Funding, Trade, MarketData, Account
     OKX_AVAILABLE = True
-except ImportError:
+    OKX_VERSION = okx.__version__
+    logging.info(f"✅ OKX SDK 导入成功，版本: {OKX_VERSION}")
+except ImportError as e:
     OKX_AVAILABLE = False
     Funding = None
     Trade = None
     MarketData = None
     Account = None
+    logging.warning(f"⚠️ OKX SDK 导入失败: {e}")
 
+# 如果新版本导入失败，尝试旧版本
+if not OKX_AVAILABLE:
+    try:
+        from okx import Funding, Trade, MarketData, Account
+        OKX_AVAILABLE = True
+        OKX_VERSION = "legacy"
+        logging.info("✅ OKX SDK 导入成功 (legacy版本)")
+    except ImportError:
+        OKX_AVAILABLE = False
+        Funding = None
+        Trade = None
+        MarketData = None
+        Account = None
+        logging.warning("⚠️ OKX SDK 所有版本导入都失败")
 
 class OKXClient:
     """OKX API 客户端封装"""
@@ -46,33 +66,45 @@ class OKXClient:
             okx_flag = "1" if testnet.lower() == "true" else "0"
             
             # 初始化 Market API (公共数据，不需要认证)
-            self.market_api = MarketData.MarketAPI(
-                flag=okx_flag,
-                debug=False
-            )
+            try:
+                self.market_api = MarketData.MarketAPI(
+                    flag=okx_flag,
+                    debug=False
+                )
+                self.logger.info("✅ Market API 初始化成功")
+            except Exception as e:
+                self.logger.warning(f"⚠️ Market API 初始化失败: {e}")
             
             # 检查认证API凭证
             if all([self.api_key, self.secret_key, self.passphrase]):
-                # 初始化 Funding API (用于检查余额)
-                self.funding_api = Funding.FundingAPI(
-                    api_key=self.api_key,
-                    api_secret_key=self.secret_key,
-                    passphrase=self.passphrase,
-                    flag=okx_flag,
-                    debug=False
-                )
-                
-                # 初始化 Trade API (用于市价卖出)
-                self.trade_api = Trade.TradeAPI(
-                    api_key=self.api_key,
-                    api_secret_key=self.secret_key,
-                    passphrase=self.passphrase,
-                    flag=okx_flag,
-                    debug=False
-                )
-                
-                # 初始化 Account API (用于交易账户余额)
                 try:
+                    # 初始化 Funding API (用于检查余额)
+                    self.funding_api = Funding.FundingAPI(
+                        api_key=self.api_key,
+                        api_secret_key=self.secret_key,
+                        passphrase=self.passphrase,
+                        flag=okx_flag,
+                        debug=False
+                    )
+                    self.logger.info("✅ Funding API 初始化成功")
+                except Exception as e:
+                    self.logger.warning(f"⚠️ Funding API 初始化失败: {e}")
+                
+                try:
+                    # 初始化 Trade API (用于市价卖出)
+                    self.trade_api = Trade.TradeAPI(
+                        api_key=self.api_key,
+                        api_secret_key=self.secret_key,
+                        passphrase=self.passphrase,
+                        flag=okx_flag,
+                        debug=False
+                    )
+                    self.logger.info("✅ Trade API 初始化成功")
+                except Exception as e:
+                    self.logger.warning(f"⚠️ Trade API 初始化失败: {e}")
+                
+                try:
+                    # 初始化 Account API (用于交易账户余额)
                     self.account_api = Account.AccountAPI(
                         api_key=self.api_key,
                         api_secret_key=self.secret_key,
@@ -80,12 +112,24 @@ class OKXClient:
                         flag=okx_flag,
                         debug=False
                     )
+                    self.logger.info("✅ Account API 初始化成功")
                 except Exception as e:
-                    self.logger.warning(f"⚠️ 初始化 Account API 失败: {e}")
-                self.logger.info(f"✅ OKX API 客户端初始化成功 (环境: {'Demo' if okx_flag == '1' else 'Live'})")
+                    self.logger.warning(f"⚠️ Account API 初始化失败: {e}")
+                
+                # 检查是否有可用的API
+                available_apis = []
+                if self.funding_api: available_apis.append("Funding")
+                if self.trade_api: available_apis.append("Trade")
+                if self.account_api: available_apis.append("Account")
+                
+                if available_apis:
+                    self.logger.info(f"✅ OKX API 客户端初始化成功 (环境: {'Demo' if okx_flag == '1' else 'Live'}, 可用API: {', '.join(available_apis)})")
+                else:
+                    self.logger.warning("⚠️ 所有认证API初始化都失败")
             else:
                 self.logger.warning("⚠️ OKX API 凭证不完整，认证功能将被禁用")
-                self.logger.info(f"✅ OKX Market API 初始化成功 (环境: {'Demo' if okx_flag == '1' else 'Live'})")
+                if self.market_api:
+                    self.logger.info("✅ OKX Market API 初始化成功 (仅公共数据)")
             
         except Exception as e:
             self.logger.error(f"❌ 初始化 OKX API 客户端失败: {e}")
