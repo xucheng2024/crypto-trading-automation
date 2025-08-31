@@ -17,19 +17,19 @@ export default {
       // 根据cron频率决定触发哪些脚本
       let scripts = [];
       
-      if (cron === '*/7 * * * *' || cron.startsWith('*/7')) {
+      if (cron === '*/7 * * * *') {
         // 每7分钟执行: monitor_delist + cancel_pending_limits
         scripts = ['monitor_delist', 'cancel_pending_limits'];
         console.log('📅 7-minute interval: monitor_delist + cancel_pending_limits');
-      } else if (cron.includes('0,15,30,45')) {
+      } else if (cron === '0,15,30,45 * * * *') {
         // 每15分钟执行: fetch_filled_orders + auto_sell_orders (整点)
         scripts = ['fetch_filled_orders', 'auto_sell_orders'];
         console.log('📅 15-minute interval: fetch_filled_orders + auto_sell_orders');
-      } else if (cron.includes('55 23')) {
+      } else if (cron === '55 23 * * *') {
         // 每天23:55: 取消待处理触发器
         scripts = ['cancel_pending_triggers'];
         console.log('🌙 Nightly: cancel_pending_triggers');
-      } else if (cron.includes('5 0')) {
+      } else if (cron === '5 0 * * *') {
         // 每天00:05: 创建算法触发器
         scripts = ['create_algo_triggers'];
         console.log('🌅 Morning: create_algo_triggers');
@@ -50,7 +50,7 @@ export default {
             source: 'cloudflare-worker',
             cron_schedule: cron,
             scripts: scripts,
-            interval: cron.includes('*/7') ? '7min' : (cron.includes('0,15,30,45') || cron.includes('*/15')) ? '15min' : (cron.includes('55 23') || cron.includes('5 0') ? 'daily' : 'other')
+            interval: cron === '*/7 * * * *' ? '7min' : cron === '0,15,30,45 * * * *' ? '15min' : (cron === '55 23 * * *' || cron === '5 0 * * *' ? 'daily' : 'other')
           }
         })
       });

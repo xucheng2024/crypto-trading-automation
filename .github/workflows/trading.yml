@@ -73,7 +73,7 @@ jobs:
           echo "✅ Virtual environment activated"
           
       - name: Run monitoring and protection
-        if: github.event_name == 'workflow_dispatch' || (github.event_name == 'repository_dispatch' && github.event.action == 'cron' && contains(github.event.client_payload.scripts, 'monitor_delist'))
+        if: github.event_name == 'workflow_dispatch' || (github.event_name == 'repository_dispatch' && github.event.action == 'cron' && contains(toJSON(github.event.client_payload.scripts), 'monitor_delist'))
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           OKX_API_KEY: ${{ secrets.OKX_API_KEY }}
@@ -106,7 +106,7 @@ jobs:
           source .venv/bin/activate && python fetch_filled_orders.py || echo "⚠️ fetch_filled_orders.py completed with warnings"
           
       - name: Run cancel pending limits
-        if: github.event_name == 'workflow_dispatch' || (github.event_name == 'repository_dispatch' && github.event.action == 'cron' && contains(github.event.client_payload.scripts, 'cancel_pending_limits'))
+        if: github.event_name == 'workflow_dispatch' || (github.event_name == 'repository_dispatch' && github.event.action == 'cron' && contains(toJSON(github.event.client_payload.scripts), 'cancel_pending_limits'))
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           OKX_API_KEY: ${{ secrets.OKX_API_KEY }}
