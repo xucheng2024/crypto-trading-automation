@@ -2,6 +2,11 @@ name = "crypto-trading-cron"
 main = "cloudflare-worker.js"
 compatibility_date = "2024-01-01"
 
+# 环境变量配置
+[vars]
+GITHUB_OWNER = "xucheng2024"
+GITHUB_REPO = "crypto-trading-automation"
+
 [triggers]
 crons = [
   # 每5分钟执行: monitor_delist + cancel_pending_limits (避开整点)
@@ -19,11 +24,6 @@ name = "crypto-trading-cron-prod"
 
 [env.staging]
 name = "crypto-trading-cron-staging"
-
-# 环境变量配置
-[vars]
-GITHUB_OWNER = "xucheng2024"
-GITHUB_REPO = "crypto-trading-automation"
 
 # 密钥配置 (需要在Cloudflare Dashboard中设置)
 # GITHUB_TOKEN = "your_github_token_here"
