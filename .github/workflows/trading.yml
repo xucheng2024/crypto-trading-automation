@@ -29,23 +29,46 @@ jobs:
         with:
           python-version: '3.11'
           
-      - name: Cache uv
+      # 第一层：缓存 uv 包管理器
+      - name: Cache uv binary
         uses: actions/cache@v4
         with:
-          path: |
-            ~/.cache/uv
-            ~/.local/bin/uv
-          key: uv-${{ runner.os }}-py311-${{ hashFiles('requirements.txt') }}
+          path: ~/.local/bin/uv
+          key: uv-binary-${{ runner.os }}-py311
           restore-keys: |
-            uv-${{ runner.os }}-py311-
-            uv-${{ runner.os }}-
+            uv-binary-${{ runner.os }}-
+
+      # 第二层：缓存 uv 下载的包
+      - name: Cache uv packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/uv
+          key: uv-packages-${{ runner.os }}-py311-${{ hashFiles('requirements.txt') }}
+          restore-keys: |
+            uv-packages-${{ runner.os }}-py311-
+            uv-packages-${{ runner.os }}-
+
+      # 第三层：缓存 Python 虚拟环境
+      - name: Cache Python venv
+        uses: actions/cache@v4
+        with:
+          path: .venv
+          key: python-venv-${{ runner.os }}-py311-${{ hashFiles('requirements.txt') }}
+          restore-keys: |
+            python-venv-${{ runner.os }}-py311-
+            python-venv-${{ runner.os }}-
 
       - name: Install uv
         run: curl -LsSf https://astral.sh/uv/install.sh | sh
 
       - name: Install dependencies
         run: |
-          ~/.local/bin/uv pip install --system -r requirements.txt
+          ~/.local/bin/uv sync --frozen
+          
+      - name: Activate virtual environment
+        run: |
+          source .venv/bin/activate
+          echo "✅ Virtual environment activated"
           
       - name: Run monitoring and protection
         if: github.event_name == 'workflow_dispatch' || (github.event_name == 'repository_dispatch' && github.event.action == 'cron' && contains(github.event.client_payload.scripts, 'monitor_delist'))
@@ -56,7 +79,7 @@ jobs:
           OKX_PASSPHRASE: ${{ secrets.OKX_PASSPHRASE }}
         run: |
           echo "🔄 Running monitor_delist.py..."
-          python monitor_delist.py || echo "⚠️ monitor_delist.py completed with warnings"
+          source .venv/bin/activate && python monitor_delist.py || echo "⚠️ monitor_delist.py completed with warnings"
           
       - name: Run auto sell orders
         if: github.event_name == 'workflow_dispatch' || (github.event_name == 'repository_dispatch' && github.event.action == 'cron' && contains(github.event.client_payload.scripts, 'auto_sell_orders'))
@@ -67,7 +90,7 @@ jobs:
           OKX_PASSPHRASE: ${{ secrets.OKX_PASSPHRASE }}
         run: |
           echo "🔄 Running auto_sell_orders.py..."
-          python auto_sell_orders.py || echo "⚠️ auto_sell_orders.py completed with warnings"
+          source .venv/bin/activate && python auto_sell_orders.py || echo "⚠️ auto_sell_orders.py completed with warnings"
           
       - name: Run fetch filled orders
         if: github.event_name == 'workflow_dispatch' || (github.event_name == 'repository_dispatch' && github.event.action == 'cron' && contains(github.event.client_payload.scripts, 'fetch_filled_orders'))
@@ -78,7 +101,7 @@ jobs:
           OKX_PASSPHRASE: ${{ secrets.OKX_PASSPHRASE }}
         run: |
           echo "🔄 Running fetch_filled_orders.py..."
-          python fetch_filled_orders.py || echo "⚠️ fetch_filled_orders.py completed with warnings"
+          source .venv/bin/activate && python fetch_filled_orders.py || echo "⚠️ fetch_filled_orders.py completed with warnings"
           
       - name: Run cancel pending limits
         if: github.event_name == 'workflow_dispatch' || (github.event_name == 'repository_dispatch' && github.event.action == 'cron' && contains(github.event.client_payload.scripts, 'cancel_pending_limits'))
@@ -89,7 +112,7 @@ jobs:
           OKX_PASSPHRASE: ${{ secrets.OKX_PASSPHRASE }}
         run: |
           echo "🔄 Running cancel_pending_limits.py..."
-          python cancel_pending_limits.py --side buy || echo "⚠️ cancel_pending_limits.py completed with warnings"
+          source .venv/bin/activate && python cancel_pending_limits.py --side buy || echo "⚠️ cancel_pending_limits.py completed with warnings"
           
       - name: Run cancel pending triggers (nightly)
         if: (github.event_name == 'repository_dispatch' && github.event.action == 'cron' && contains(github.event.client_payload.scripts, 'cancel_pending_triggers'))
@@ -100,7 +123,7 @@ jobs:
           OKX_PASSPHRASE: ${{ secrets.OKX_PASSPHRASE }}
         run: |
           echo "🔄 Running cancel_pending_triggers.py..."
-          python cancel_pending_triggers.py || echo "⚠️ cancel_pending_triggers.py completed with warnings"
+          source .venv/bin/activate && python cancel_pending_triggers.py || echo "⚠️ cancel_pending_triggers.py completed with warnings"
           
       - name: Run create algo triggers (nightly)
         if: (github.event_name == 'repository_dispatch' && github.event.action == 'cron' && contains(github.event.client_payload.scripts, 'create_algo_triggers'))
@@ -111,7 +134,7 @@ jobs:
           OKX_PASSPHRASE: ${{ secrets.OKX_PASSPHRASE }}
         run: |
           echo "🔄 Running create_algo_triggers.py..."
-          python create_algo_triggers.py || echo "⚠️ create_algo_triggers.py completed with warnings"
+          source .venv/bin/activate && python create_algo_triggers.py || echo "⚠️ create_algo_triggers.py completed with warnings"
           
       - name: Upload logs
         uses: actions/upload-artifact@v4

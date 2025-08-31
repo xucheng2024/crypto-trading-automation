@@ -155,7 +155,7 @@ class OKXAlgoTrigger:
         retry=retry_if_exception_type((Exception,))
     )
     def create_algo_trigger_order(self, inst_id, limit_coefficient, open_price):
-        """Create multiple trigger points to increase trigger probability"""
+        """Create single trigger order at target price"""
         try:
             # Calculate base trigger price using Decimal for precision
             if isinstance(open_price, str):
@@ -163,36 +163,29 @@ class OKXAlgoTrigger:
             else:
                 open_price_decimal = open_price
             
-            base_trigger_price = open_price_decimal * Decimal(str(limit_coefficient)) / Decimal('100')
+            trigger_price = open_price_decimal * Decimal(str(limit_coefficient)) / Decimal('100')
             
             # Calculate precision based on Decimal price value
             # For very small prices, use higher precision
-            if base_trigger_price < Decimal('0.00001'):
+            if trigger_price < Decimal('0.00001'):
                 precision = 9  # Use 9 decimal places for PEPE, SHIB, etc.
-            elif base_trigger_price < Decimal('0.01'):
+            elif trigger_price < Decimal('0.01'):
                 precision = 6  # Use 6 decimal places for small prices
             else:
                 precision = 4  # Default precision for normal prices
             
             logger.debug(f"🔧 {inst_id} using precision: {precision}")
             
-            # Calculate trigger prices with proper precision using Decimal
+            # Round trigger price to appropriate precision
             from decimal import ROUND_HALF_UP
-            
-            # Create precision context for rounding
             precision_context = Decimal('0.' + '0' * (precision - 1) + '1') if precision > 0 else Decimal('1')
+            trigger_price = trigger_price.quantize(precision_context, rounding=ROUND_HALF_UP)
             
-            trigger_prices = [
-                (base_trigger_price * Decimal('0.999')).quantize(precision_context, rounding=ROUND_HALF_UP),  # Slightly below target
-                (base_trigger_price * Decimal('1.001')).quantize(precision_context, rounding=ROUND_HALF_UP)   # Slightly above target
-            ]
+            logger.info(f"🎯 {inst_id} | Trigger: ${trigger_price} | Limit: {limit_coefficient}%")
             
-            logger.info(f"🎯 {inst_id} | Base: ${base_trigger_price} | Limit: {limit_coefficient}%")
-            logger.info(f"🔍 {inst_id} | Triggers: {[str(p) for p in trigger_prices]}")
-            
-            # Calculate token quantity based on base price using Decimal
+            # Calculate token quantity based on trigger price using Decimal
             usdt_amount = Decimal(self.order_size)
-            token_quantity = usdt_amount / base_trigger_price
+            token_quantity = usdt_amount / trigger_price
             
             # Format token quantity with appropriate precision
             if token_quantity < Decimal('0.0001'):
@@ -204,48 +197,33 @@ class OKXAlgoTrigger:
             
             logger.info(f"📊 {inst_id} | Size: {adjusted_order_size} tokens")
             
-            # Create trigger orders for each price point
-            success_count = 0
-            total_count = len(trigger_prices)
-            
-            for i, trigger_price in enumerate(trigger_prices):
-                try:
-                    # Create trigger order using OKX TradeAPI
-                    result = self.trade_api.place_algo_order(
-                        instId=inst_id,
-                        tdMode="cash",
-                        side="buy",
-                        ordType="trigger",
-                        sz=adjusted_order_size,
-                        triggerPx=str(trigger_price),      # Trigger price
-                        orderPx=str(base_trigger_price)    # Execution price uses base_price
-                    )
+            # Create single trigger order
+            try:
+                result = self.trade_api.place_algo_order(
+                    instId=inst_id,
+                    tdMode="cash",
+                    side="buy",
+                    ordType="trigger",
+                    sz=adjusted_order_size,
+                    triggerPx=str(trigger_price),      # Trigger price
+                    orderPx=str(trigger_price)         # Execution price same as trigger price
+                )
+                
+                if result.get('code') == '0':
+                    order_id = result.get('data', [{}])[0].get('ordId', 'N/A')
+                    logger.info(f"✅ {inst_id} trigger order created successfully - Order ID: {order_id}")
+                    return True
+                else:
+                    error_msg = result.get('msg', 'Unknown error')
+                    logger.error(f"❌ {inst_id} trigger order failed: {error_msg}")
+                    return False
                     
-                    if result.get('code') == '0':
-                        order_id = result.get('data', [{}])[0].get('ordId', 'N/A')
-                        logger.info(f"✅ Trigger point {i+1}: {trigger_price:.6f} - Order ID: {order_id}")
-                        success_count += 1
-                    else:
-                        error_msg = result.get('msg', 'Unknown error')
-                        logger.error(f"❌ Trigger point {i+1}: {trigger_price:.6f} - Failed: {error_msg}")
-                    
-                    # Rate limiting: OKX allows 5 requests per 2 seconds
-                    time.sleep(0.5)
-                    
-                except Exception as e:
-                    logger.error(f"❌ Trigger point {i+1}: {trigger_price:.6f} - Exception: {e}")
-                    continue
-            
-            # Summary
-            if success_count > 0:
-                logger.info(f"🎉 {inst_id} successfully created {success_count}/{total_count} trigger orders")
-                return True
-            else:
-                logger.error(f"❌ {inst_id} all trigger orders failed to create")
+            except Exception as e:
+                logger.error(f"❌ {inst_id} trigger order exception: {e}")
                 return False
                 
         except Exception as e:
-            logger.error(f"❌ Error creating multiple trigger orders for {inst_id}: {e}")
+            logger.error(f"❌ Error creating trigger order for {inst_id}: {e}")
             logger.debug(f"Traceback: {traceback.format_exc()}")
             raise  # Re-raise for retry mechanism
     
