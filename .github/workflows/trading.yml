@@ -10,10 +10,8 @@ on:
     - cron: '55 23 * * *'
     # Daily at 00:05 - Create new algo triggers
     - cron: '5 0 * * *'
-    # Every 5 minutes - Cancel pending limit orders
-    - cron: '*/5 * * * *'
 
-  # Manual trigger
+  # 手动触发
   workflow_dispatch:
 
   # External trigger support (for forks or external schedulers)
@@ -81,7 +79,7 @@ jobs:
           python cancel_pending_limits.py --side buy || echo "⚠️ cancel_pending_limits.py completed with warnings"
           
       - name: Run cancel pending triggers (nightly)
-        if: (github.event_name == 'schedule' && github.event.schedule == '55 23 * * *') || github.event_name == 'workflow_dispatch' || (github.event_name == 'repository_dispatch' && github.event.action == 'cron')
+        if: (github.event_name == 'schedule' && github.event.schedule == '55 23 * * *')
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           OKX_API_KEY: ${{ secrets.OKX_API_KEY }}
@@ -92,7 +90,7 @@ jobs:
           python cancel_pending_triggers.py || echo "⚠️ cancel_pending_triggers.py completed with warnings"
           
       - name: Run create algo triggers (nightly)
-        if: (github.event_name == 'schedule' && github.event.schedule == '5 0 * * *') || github.event_name == 'workflow_dispatch' || (github.event_name == 'repository_dispatch' && github.event.action == 'cron')
+        if: (github.event_name == 'schedule' && github.event.schedule == '5 0 * * *')
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           OKX_API_KEY: ${{ secrets.OKX_API_KEY }}
