@@ -25,12 +25,12 @@ export default {
         // 每15分钟执行: fetch_filled_orders + auto_sell_orders
         scripts = ['fetch_filled_orders', 'auto_sell_orders'];
         console.log('📅 15-minute interval: fetch_filled_orders + auto_sell_orders');
-      } else if (cron.includes('54 23')) {
-        // 每天23:54: 取消待处理触发器
+      } else if (cron.includes('55 23')) {
+        // 每天23:55: 取消待处理触发器
         scripts = ['cancel_pending_triggers'];
         console.log('🌙 Nightly: cancel_pending_triggers');
-      } else if (cron.includes('6 0')) {
-        // 每天00:06: 创建算法触发器
+      } else if (cron.includes('5 0')) {
+        // 每天00:05: 创建算法触发器
         scripts = ['create_algo_triggers'];
         console.log('🌅 Morning: create_algo_triggers');
       }
@@ -86,8 +86,8 @@ export default {
       <ul>
         <li><strong>每5分钟</strong>: monitor_delist.py + cancel_pending_limits.py</li>
         <li><strong>每15分钟</strong>: fetch_filled_orders.py + auto_sell_orders.py</li>
-        <li><strong>每天23:54</strong>: cancel_pending_triggers.py</li>
-        <li><strong>每天00:06</strong>: create_algo_triggers.py</li>
+        <li><strong>每天23:55</strong>: cancel_pending_triggers.py</li>
+        <li><strong>每天00:05</strong>: create_algo_triggers.py</li>
       </ul>
       <hr>
       <h2>🔧 执行逻辑:</h2>
