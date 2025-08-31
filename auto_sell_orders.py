@@ -235,7 +235,7 @@ class AutoSellOrders:
                 return 0.0, 0.0  # Return (balance, eqUsd)
             
             result = account_api.get_account_balance(ccy=base_ccy)
-                            self.logger.info(f"🔍 Trading account balance API returned: {result}")
+            self.logger.info(f"🔍 Trading account balance API returned: {result}")
             
             if not result or result.get('code') != '0':
                 self.logger.warning(f"⚠️ Cannot get {base_ccy} trading account balance: {result}")
@@ -247,7 +247,7 @@ class AutoSellOrders:
                 return 0.0, 0.0
             
             details = data[0].get('details', [])
-                            self.logger.info(f"📊 Trading account detail entries: {len(details)} | Returned currencies: {[d.get('ccy') for d in details][:20]}")
+            self.logger.info(f"📊 Trading account detail entries: {len(details)} | Returned currencies: {[d.get('ccy') for d in details][:20]}")
             
             for detail in details:
                 ccy = detail.get('ccy', '').upper()
@@ -270,11 +270,11 @@ class AutoSellOrders:
                     self.logger.info(f"💰 {base_ccy} trading account available: {avail_val} | USD equivalent: ${eq_usd_val}")
                     return avail_val, eq_usd_val
             
-                            self.logger.warning(f"⚠️ No balance information found for {base_ccy} in trading account details")
+            self.logger.warning(f"⚠️ No balance information found for {base_ccy} in trading account details")
             return 0.0, 0.0
             
         except Exception as e:
-                            self.logger.error(f"❌ Error getting balance for {inst_id}: {e}")
+            self.logger.error(f"❌ Error getting balance for {inst_id}: {e}")
             return 0.0, 0.0
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=10))
@@ -288,7 +288,7 @@ class AutoSellOrders:
             side="sell",
             ordType="market",
             sz=size,
-                            tgtCcy="base_ccy"  # Explicitly specify selling by base currency quantity
+            tgtCcy="base_ccy"  # Explicitly specify selling by base currency quantity
         )
         
         if not result or result.get('code') != '0':
