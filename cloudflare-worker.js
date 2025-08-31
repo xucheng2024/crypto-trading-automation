@@ -17,7 +17,7 @@ export default {
       // 根据cron频率决定触发哪些脚本
       let scripts = [];
       
-      if (cron.includes('*/7')) {
+      if (cron === '*/7 * * * *' || cron.startsWith('*/7')) {
         // 每7分钟执行: monitor_delist + cancel_pending_limits
         scripts = ['monitor_delist', 'cancel_pending_limits'];
         console.log('📅 7-minute interval: monitor_delist + cancel_pending_limits');
@@ -50,7 +50,7 @@ export default {
             source: 'cloudflare-worker',
             cron_schedule: cron,
             scripts: scripts,
-            interval: cron.includes('*/5') ? '5min' : cron.includes('*/15') ? '15min' : 'daily'
+            interval: cron.includes('*/7') ? '7min' : (cron.includes('0,15,30,45') || cron.includes('*/15')) ? '15min' : (cron.includes('55 23') || cron.includes('5 0') ? 'daily' : 'other')
           }
         })
       });
