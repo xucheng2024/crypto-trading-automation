@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """
-OKX Filled Orders Fetcher
-Fetches all filled limit orders and stores them in SQLite database
+Automated Filled Order Tracking System
+Monitors completed orders and calculates sell times for automated trading
 """
 
 import os
 import sys
-import logging
-import logging.handlers
-import traceback
-# import sqlite3  # 已迁移到PostgreSQL
 import time
+import json
+import logging
 from datetime import datetime, timedelta
 from decimal import Decimal
-from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type, RetryError
+# import sqlite3  # Migrated to PostgreSQL
+import psycopg2
+from psycopg2.extras import RealDictCursor
 
 # Load environment variables first
 try:
@@ -109,13 +109,13 @@ class OKXFilledOrdersFetcher:
     def init_database(self):
         """Initialize PostgreSQL database and create tables if they don't exist"""
         try:
-            # 使用统一的数据库连接
+            # Use unified database connection
             from lib.database import get_database_connection
             
             self.conn = get_database_connection()
             self.cursor = self.conn.cursor()
             
-            # PostgreSQL 语法
+            # PostgreSQL syntax
             self.cursor.execute('''
                 CREATE TABLE IF NOT EXISTS filled_orders (
                     instId VARCHAR(255) NOT NULL,
@@ -356,7 +356,7 @@ class OKXFilledOrdersFetcher:
             
             return True
             
-        except Exception as e:  # PostgreSQL兼容
+        except Exception as e:  # PostgreSQL compatible
             logger.warning(f"⚠️  Duplicate order ID {ord_id}: {e}")
             return False
         except Exception as e:

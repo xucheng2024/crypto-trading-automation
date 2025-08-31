@@ -7,8 +7,8 @@ import os
 import psycopg2
 
 def get_database_connection():
-    """获取PostgreSQL数据库连接"""
-    # 确保加载环境变量
+    """Get PostgreSQL database connection"""
+    # Ensure environment variables are loaded
     try:
         from dotenv import load_dotenv
         load_dotenv()
@@ -26,7 +26,7 @@ def get_database_connection():
     try:
         return psycopg2.connect(db_url)
     except Exception as e:
-        print(f"❌ PostgreSQL 连接失败: {e}")
+        print(f"❌ PostgreSQL connection failed: {e}")
         raise
 
 class Database:
@@ -56,7 +56,7 @@ class Database:
     def create_tables(self):
         """Create necessary database tables"""
         try:
-            # PostgreSQL 语法
+            # PostgreSQL syntax
             self.cursor.execute('''
                 CREATE TABLE IF NOT EXISTS okx_announcements (
                     id SERIAL PRIMARY KEY,

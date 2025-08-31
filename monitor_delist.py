@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-OKX Delist Spot 监控脚本 (重构版)
-每5分钟检查是否有今天的delist spot公告
-如果有就发出警报并执行保护操作
+OKX Delist Spot Monitoring Script (Refactored Version)
+Checks every 5 minutes for today's delist spot announcements
+If found, issues alerts and executes protection operations
 """
 
 import requests
@@ -26,56 +26,56 @@ except ImportError:
         pass
     load_dotenv()
 
-# 导入我们的模块
+# Import our modules
 from config_manager import ConfigManager
 from crypto_matcher import CryptoMatcher
 from protection_manager import ProtectionManager
 
 
 class OKXDelistMonitor:
-    """OKX Delist 监控器 (重构版)"""
+    """OKX Delist Monitor (Refactored Version)"""
     
     def __init__(self):
-        # API 配置
+        # API configuration
         self.api_key = os.environ.get('OKX_API_KEY', '')
         self.secret_key = os.environ.get('OKX_SECRET_KEY', '')
         self.passphrase = os.environ.get('OKX_PASSPHRASE', '')
         self.base_url = "https://www.okx.com/api/v5/support/announcements"
         
-        # 监控配置
-        self.check_interval = 600  # 10分钟 = 600秒 (match crontab)
-        self.known_announcements = set()  # 记录已知的公告ID
+        # Monitoring configuration
+        self.check_interval = 600  # 10 minutes = 600 seconds (match crontab)
+        self.known_announcements = set()  # Record known announcement IDs
         
-        # 设置日志
+        # Setup logging
         self.setup_logging()
         
-        # 初始化管理器
+        # Initialize managers
         self.config_manager = ConfigManager(logger=self.logger)
         self.crypto_matcher = CryptoMatcher(self.config_manager, self.logger)
         self.protection_manager = ProtectionManager(self.config_manager, logger=self.logger)
         
-        self.logger.info("🚀 OKX Delist Monitor 初始化完成")
+        self.logger.info("🚀 OKX Delist Monitor initialization completed")
     
     def setup_logging(self):
-        """设置日志系统"""
-        # 创建logs目录
+        """Setup logging system"""
+        # Create logs directory
         os.makedirs('logs', exist_ok=True)
         
-        # 设置日志文件名
+        # Set log filename
         log_filename = f"monitor_delist_{datetime.now().strftime('%Y%m%d')}.log"
         log_path = os.path.join('logs', log_filename)
         
-        # 配置日志 (带轮转)
+        # Configure logging (with rotation)
         self.logger = logging.getLogger(__name__)
         self.logger.setLevel(logging.INFO)
         
-        # 清除现有handlers
+        # Clear existing handlers
         self.logger.handlers.clear()
         
-        # 创建formatter
+        # Create formatter
         formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
         
-        # 文件handler (带轮转，最大10MB，保留5个备份)
+        # File handler (with rotation, max 10MB, keep 5 backups)
         file_handler = logging.handlers.RotatingFileHandler(
             log_path, 
             maxBytes=10*1024*1024,  # 10MB
@@ -84,16 +84,16 @@ class OKXDelistMonitor:
         )
         file_handler.setFormatter(formatter)
         
-        # 控制台handler
+        # Console handler
         console_handler = logging.StreamHandler()
         console_handler.setFormatter(formatter)
         
-        # 添加handlers
+        # Add handlers
         self.logger.addHandler(file_handler)
         self.logger.addHandler(console_handler)
     
     def generate_signature(self, timestamp: str, method: str, request_path: str, body: str = '') -> str:
-        """生成OKX API签名"""
+        """Generate OKX API signature"""
         pre_hash_string = timestamp + method + request_path + body
         signature = hmac.new(
             self.secret_key.encode('utf-8'),
@@ -103,7 +103,7 @@ class OKXDelistMonitor:
         return base64.b64encode(signature).decode('utf-8')
     
     def get_headers(self, timestamp: str, signature: str) -> Dict[str, str]:
-        """生成请求头"""
+        """Generate request headers"""
         return {
             'OK-ACCESS-KEY': self.api_key,
             'OK-ACCESS-SIGN': signature,
@@ -113,21 +113,21 @@ class OKXDelistMonitor:
         }
     
     def fetch_delist_announcements(self, page: int = 1) -> List[Dict[str, Any]]:
-        """获取delist公告"""
+        """Fetch delist announcements"""
         max_retries = 3
         base_delay = 60  # 1 minute base delay
         
         for attempt in range(max_retries):
             try:
-                # 构建请求路径
+                # Build request path
                 request_path = f'/api/v5/support/announcements?annType=announcements-delistings&page={page}'
                 
-                # 生成时间戳和签名
+                # Generate timestamp and signature
                 timestamp = datetime.utcnow().isoformat("T", "milliseconds") + 'Z'
                 signature = self.generate_signature(timestamp, 'GET', request_path)
                 headers = self.get_headers(timestamp, signature)
                 
-                # 发送请求
+                # Send request
                 response = requests.get(self.base_url, params={
                     'annType': 'announcements-delistings',
                     'page': page
@@ -165,14 +165,14 @@ class OKXDelistMonitor:
         return []
     
     def is_today_announcement(self, announcement: Dict[str, Any]) -> bool:
-        """检查是否是今天的公告"""
+        """Check if it's a today's announcement"""
         try:
-            # 解析时间戳
+            # Parse timestamp
             timestamp = int(announcement['pTime']) / 1000
             announcement_date = datetime.fromtimestamp(timestamp)
             today = datetime.now()
             
-            # 检查是否是今天
+            # Check if it's today
             return (announcement_date.year == today.year and 
                    announcement_date.month == today.month and 
                    announcement_date.day == today.day)
@@ -180,190 +180,190 @@ class OKXDelistMonitor:
             return False
     
     def send_protection_alert(self, announcement: Dict[str, Any], affected_cryptos: Set[str]):
-        """发送保护警报并执行保护操作"""
+        """Send protection alert and execute protection operations"""
         timestamp = int(announcement['pTime']) / 1000
         date = datetime.fromtimestamp(timestamp).strftime('%Y-%m-%d %H:%M:%S')
         
         print("\n" + "="*80)
-        print("🚨 警报！发现影响配置加密货币的Delist公告！")
+        print("🚨 Alert! Delist announcement affecting configured cryptocurrencies found!")
         print("="*80)
-        print(f"📅 发布时间: {date}")
-        print(f"📢 公告标题: {announcement['title']}")
-        print(f"🎯 受影响的加密货币: {sorted(affected_cryptos)}")
-        print(f"🔗 详细链接: {announcement['url']}")
-        print(f"⏰ 时间戳: {announcement['pTime']}")
+        print(f"📅 Announcement Date: {date}")
+        print(f"📢 Announcement Title: {announcement['title']}")
+        print(f"🎯 Affected Cryptocurrencies: {sorted(affected_cryptos)}")
+        print(f"🔗 Detailed Link: {announcement['url']}")
+        print(f"⏰ Timestamp: {announcement['pTime']}")
         print("="*80)
         
-        # 执行保护操作
-        self.logger.warning(f"🚨 检测到影响加密货币的Delist公告: {announcement['title']}")
-        self.logger.warning(f"🎯 受影响的加密货币: {sorted(affected_cryptos)}")
+        # Execute protection operations
+        self.logger.warning(f"🚨 Delist announcement affecting configured cryptocurrencies detected: {announcement['title']}")
+        self.logger.warning(f"🎯 Affected Cryptocurrencies: {sorted(affected_cryptos)}")
         
         results = self.protection_manager.execute_full_protection(affected_cryptos)
         self.protection_manager.print_protection_summary(results)
     
     def send_info_alert(self, announcement: Dict[str, Any]):
-        """发送信息警报（不执行保护操作）"""
+        """Send information alert (does not execute protection operations)"""
         timestamp = int(announcement['pTime']) / 1000
         date = datetime.fromtimestamp(timestamp).strftime('%Y-%m-%d %H:%M:%S')
         
         print("\n" + "="*60)
-        print("ℹ️  发现Delist Spot公告")
+        print("ℹ️  Delist Spot announcement found")
         print("="*60)
-        print(f"📅 发布时间: {date}")
-        print(f"📢 公告标题: {announcement['title']}")
-        print(f"🔗 详细链接: {announcement['url']}")
-        print(f"⏰ 时间戳: {announcement['pTime']}")
+        print(f"📅 Announcement Date: {date}")
+        print(f"📢 Announcement Title: {announcement['title']}")
+        print(f"🔗 Detailed Link: {announcement['url']}")
+        print(f"⏰ Timestamp: {announcement['pTime']}")
         print("="*60)
         
-        self.logger.info(f"ℹ️ 发现Delist Spot公告: {announcement['title']}")
+        self.logger.info(f"ℹ️ Delist Spot announcement found: {announcement['title']}")
     
     def play_alert_sound(self):
-        """播放警报声音"""
-        print("\n🔊 持续警报中... 按回车键停止警报")
+        """Play alert sound"""
+        print("\n🔊 Alert ongoing... Press Enter to stop")
         
-        # 持续播放系统提示音
+        # Continuous system sound
         alert_count = 0
         while True:
             try:
-                # 播放系统提示音（macOS）
+                # Play system sound (macOS)
                 os.system('afplay /System/Library/Sounds/Glass.aiff')
                 alert_count += 1
                 
-                # 每3次提示音后显示计数
+                # Display count every 3 alerts
                 if alert_count % 3 == 0:
-                    print(f"🔊 已播放 {alert_count} 次警报音... 按回车键停止")
+                    print(f"🔊 Played {alert_count} alert sounds... Press Enter to stop")
                 
-                # 等待0.8秒后继续
+                # Continue after 0.8 seconds
                 time.sleep(0.8)
                 
             except KeyboardInterrupt:
-                print("\n🛑 警报已停止")
+                print("\n🛑 Alert stopped")
                 break
             except Exception as e:
-                self.logger.warning(f"❌ 播放提示音失败: {e}")
+                self.logger.warning(f"❌ Failed to play sound: {e}")
                 break
         
-        print("✅ 警报结束")
+        print("✅ Alert ended")
     
     def check_for_new_announcements(self):
-        """检查新公告"""
-        self.logger.info(f"🔍 [{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 开始检查delist公告...")
+        """Check for new announcements"""
+        self.logger.info(f"🔍 [{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Starting delist announcement check...")
         
         try:
-            # 获取第1页公告
+            # Fetch announcements from page 1
             announcements = self.fetch_delist_announcements(page=1)
             
             if not announcements:
-                self.logger.error("❌ 无法获取公告数据")
+                self.logger.error("❌ Could not fetch announcement data")
                 return
             
-            # 检查是否有今天的delist spot公告
+            # Check for today's delist spot announcements
             today_spot_announcements = []
             today_affected_announcements = []
             
             for ann in announcements:
                 if self.is_today_announcement(ann):
-                    # 生成唯一ID（使用标题和时间戳）
+                    # Generate unique ID (using title and timestamp)
                     announcement_id = f"{ann['title']}_{ann['pTime']}"
                     
-                    # 检查是否是新公告
+                    # Check if it's a new announcement
                     if announcement_id not in self.known_announcements:
-                        # 检查是否是spot相关的公告
+                        # Check if it's a spot-related announcement
                         if self.crypto_matcher.is_spot_related(ann):
                             today_spot_announcements.append(ann)
                             self.known_announcements.add(announcement_id)
                             
-                            # 同时检查是否影响配置的加密货币
+                            # Also check if it affects configured cryptocurrencies
                             is_affected, affected_cryptos = self.crypto_matcher.check_announcement_impact(ann)
                             if is_affected:
                                 ann['affected_cryptos'] = affected_cryptos
                                 today_affected_announcements.append(ann)
             
-            # 对所有新的delist spot公告播放警报声
+            # Play alert sound for all new delist spot announcements
             if today_spot_announcements:
-                self.logger.warning(f"🔊 发现 {len(today_spot_announcements)} 条新的delist spot公告！")
-                # 先播放警报声
+                self.logger.warning(f"🔊 Found {len(today_spot_announcements)} new delist spot announcements!")
+                # Play alert sound first
                 self.play_alert_sound()
                 
-                # 然后处理影响配置加密货币的公告
+                # Then process announcements affecting configured cryptocurrencies
                 if today_affected_announcements:
-                    self.logger.warning(f"🎯 其中 {len(today_affected_announcements)} 条影响配置加密货币！")
+                    self.logger.warning(f"🎯 Among them {len(today_affected_announcements)} affect configured cryptocurrencies!")
                     for ann in today_affected_announcements:
                         self.send_protection_alert(ann, ann['affected_cryptos'])
                 else:
-                    self.logger.info("✅ 这些spot公告不影响你配置的加密货币")
+                    self.logger.info("✅ These spot announcements do not affect your configured cryptocurrencies")
                     for ann in today_spot_announcements:
                         self.send_info_alert(ann)
             else:
-                self.logger.info("✅ 没有发现新的delist spot公告")
+                self.logger.info("✅ No new delist spot announcements found")
                 
         except Exception as e:
-            self.logger.error(f"❌ 检查过程中出错: {e}")
+            self.logger.error(f"❌ Error during check: {e}")
     
     def run_monitor(self):
-        """运行监控（持续运行模式）"""
-        self.logger.info("🚀 OKX Delist Spot 监控启动 (持续运行模式)")
-        self.logger.info(f"⏰ 检查间隔: {self.check_interval}秒 ({self.check_interval/60:.0f}分钟)")
-        self.logger.info(f"🔑 API密钥: {'✅ 已配置' if self.api_key else '❌ 未配置'}")
-        self.logger.info(f"🔑 密钥: {'✅ 已配置' if self.secret_key else '❌ 未配置'}")
-        self.logger.info(f"🔑 密码: {'✅ 已配置' if self.passphrase else '❌ 未配置'}")
+        """Run monitoring (continuous mode)"""
+        self.logger.info("🚀 OKX Delist Spot Monitoring started (continuous mode)")
+        self.logger.info(f"⏰ Check interval: {self.check_interval} seconds ({self.check_interval/60:.0f} minutes)")
+        self.logger.info(f"🔑 API Key: {'✅ Configured' if self.api_key else '❌ Not Configured'}")
+        self.logger.info(f"🔑 Secret Key: {'✅ Configured' if self.secret_key else '❌ Not Configured'}")
+        self.logger.info(f"🔑 Passphrase: {'✅ Configured' if self.passphrase else '❌ Not Configured'}")
         
         if not all([self.api_key, self.secret_key, self.passphrase]):
-            self.logger.error("❌ 环境变量配置不完整，请检查.env文件")
+            self.logger.error("❌ Environment variables not fully configured, please check .env file")
             return
         
-        # 显示配置统计
+        # Display configuration statistics
         stats = self.config_manager.get_config_stats()
-        self.logger.info(f"📋 监控 {stats.get('total_cryptos', 0)} 个配置的加密货币")
+        self.logger.info(f"📋 Monitoring {stats.get('total_cryptos', 0)} configured cryptocurrencies")
         
-        print("\n开始监控... (按 Ctrl+C 停止)")
+        print("\nStarting monitoring... (Press Ctrl+C to stop)")
         
         try:
             while True:
                 self.check_for_new_announcements()
-                self.logger.info(f"⏳ 等待 {self.check_interval} 秒后再次检查...")
+                self.logger.info(f"⏳ Waiting {self.check_interval} seconds before next check...")
                 time.sleep(self.check_interval)
                 
         except KeyboardInterrupt:
-            self.logger.info("\n🛑 监控已停止")
+            self.logger.info("\n🛑 Monitoring stopped")
         except Exception as e:
-            self.logger.error(f"\n❌ 监控运行出错: {e}")
+            self.logger.error(f"\n❌ Monitoring error: {e}")
     
     def run_once(self):
-        """运行一次检查（适用于crontab）"""
-        self.logger.info("🚀 OKX Delist Spot 监控启动 (单次运行模式)")
-        self.logger.info(f"🔑 API密钥: {'✅ 已配置' if self.api_key else '❌ 未配置'}")
-        self.logger.info(f"🔑 密钥: {'✅ 已配置' if self.secret_key else '❌ 未配置'}")
-        self.logger.info(f"🔑 密码: {'✅ 已配置' if self.passphrase else '❌ 未配置'}")
+        """Run a single check (for crontab)"""
+        self.logger.info("🚀 OKX Delist Spot Monitoring started (single run mode)")
+        self.logger.info(f"🔑 API Key: {'✅ Configured' if self.api_key else '❌ Not Configured'}")
+        self.logger.info(f"🔑 Secret Key: {'✅ Configured' if self.secret_key else '❌ Not Configured'}")
+        self.logger.info(f"🔑 Passphrase: {'✅ Configured' if self.passphrase else '❌ Not Configured'}")
         
         if not all([self.api_key, self.secret_key, self.passphrase]):
-            self.logger.error("❌ 环境变量配置不完整，请检查.env文件")
+            self.logger.error("❌ Environment variables not fully configured, please check .env file")
             return
         
-        # 显示配置统计
+        # Display configuration statistics
         stats = self.config_manager.get_config_stats()
-        self.logger.info(f"📋 监控 {stats.get('total_cryptos', 0)} 个配置的加密货币")
+        self.logger.info(f"📋 Monitoring {stats.get('total_cryptos', 0)} configured cryptocurrencies")
         
-        # 执行一次检查
+        # Perform a single check
         self.check_for_new_announcements()
-        self.logger.info("✅ 单次检查完成，程序退出")
+        self.logger.info("✅ Single check completed, program exiting")
 
 
 def main():
-    """主函数"""
+    """Main function"""
     try:
         monitor = OKXDelistMonitor()
         
-        # 检查是否有命令行参数来切换模式
+        # Check for command line arguments to switch mode
         if len(sys.argv) > 1 and sys.argv[1] == "--continuous":
-            # 持续运行模式（手动启动时使用）
+            # Continuous run mode (use when manually started)
             monitor.run_monitor()
         else:
-            # 单次运行模式（默认，适用于crontab）
+            # Single run mode (default, for crontab)
             monitor.run_once()
             
     except Exception as e:
-        print(f"❌ 程序启动失败: {e}")
+        print(f"❌ Program startup failed: {e}")
         sys.exit(1)
 
 

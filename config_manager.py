@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-配置管理模块
-负责加载、清理和备份 limits.json 配置文件
+Configuration Management Module
+Responsible for loading, cleaning, and backing up limits.json configuration files
 """
 
 import json
@@ -12,19 +12,19 @@ from typing import Set, Dict, Any, Optional
 
 
 class ConfigManager:
-    """配置文件管理器"""
+    """Configuration File Manager"""
     
     def __init__(self, config_file: str = 'limits.json', logger: Optional[logging.Logger] = None):
         self.config_file = config_file
         self.logger = logger or logging.getLogger(__name__)
     
     def load_configured_cryptos(self) -> Set[str]:
-        """从 limits.json 加载配置的加密货币列表"""
+        """Load configured cryptocurrency list from limits.json"""
         try:
             with open(self.config_file, 'r', encoding='utf-8') as f:
                 data = json.load(f)
             
-            # 提取所有加密货币对，去掉 -USDT 后缀得到基础货币符号
+            # Extract all cryptocurrency pairs, remove -USDT suffix to get base currency symbol
             crypto_pairs = list(data.get('crypto_configs', {}).keys())
             base_cryptos = set()
             
@@ -33,47 +33,47 @@ class ConfigManager:
                     base_crypto = pair.replace('-USDT', '')
                     base_cryptos.add(base_crypto)
             
-            self.logger.info(f"📋 加载了 {len(base_cryptos)} 个配置的加密货币: {sorted(base_cryptos)}")
+            self.logger.info(f"📋 Loaded {len(base_cryptos)} configured cryptocurrencies: {sorted(base_cryptos)}")
             return base_cryptos
             
         except FileNotFoundError:
-            self.logger.warning(f"⚠️ {self.config_file} 文件未找到，将监控所有 delist 公告")
+            self.logger.warning(f"⚠️ {self.config_file} file not found, will monitor all delist announcements")
             return set()
         except json.JSONDecodeError as e:
-            self.logger.error(f"❌ {self.config_file} 格式错误: {e}")
+            self.logger.error(f"❌ {self.config_file} format error: {e}")
             return set()
         except Exception as e:
-            self.logger.error(f"❌ 加载 {self.config_file} 失败: {e}")
+            self.logger.error(f"❌ Failed to load {self.config_file}: {e}")
             return set()
     
     def backup_config(self) -> str:
-        """备份配置文件，返回备份文件名"""
+        """Backup configuration file, return backup filename"""
         backup_filename = f"limits_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
         try:
             shutil.copy(self.config_file, backup_filename)
-            self.logger.info(f"📋 已备份原始配置到: {backup_filename}")
+            self.logger.info(f"📋 Original configuration backed up to: {backup_filename}")
             return backup_filename
         except Exception as e:
-            self.logger.error(f"❌ 备份配置文件失败: {e}")
+            self.logger.error(f"❌ Failed to backup configuration file: {e}")
             raise
     
     def remove_cryptos_from_config(self, affected_cryptos: Set[str]) -> bool:
-        """从配置中移除受影响的加密货币"""
+        """Remove affected cryptocurrencies from configuration"""
         if not affected_cryptos:
             return True
         
         try:
-            # 备份原始配置文件
+            # Backup original configuration file
             self.backup_config()
             
-            # 读取当前配置
+            # Read current configuration
             with open(self.config_file, 'r', encoding='utf-8') as f:
                 limits_config = json.load(f)
             
-            # 统计移除前的配置数量
+            # Count configurations before removal
             original_count = len(limits_config.get('crypto_configs', {}))
             
-            # 移除受影响的加密货币配置
+            # Remove affected cryptocurrency configurations
             removed_cryptos = []
             crypto_configs = limits_config.get('crypto_configs', {})
             
@@ -82,9 +82,9 @@ class ConfigManager:
                 if pair_key in crypto_configs:
                     del crypto_configs[pair_key]
                     removed_cryptos.append(crypto)
-                    self.logger.info(f"🗑️  已从配置中移除: {pair_key}")
+                    self.logger.info(f"🗑️  Removed from configuration: {pair_key}")
             
-            # 更新配置并保存
+            # Update configuration and save
             if removed_cryptos:
                 limits_config['crypto_configs'] = crypto_configs
                 
@@ -92,20 +92,20 @@ class ConfigManager:
                     json.dump(limits_config, f, indent=2, ensure_ascii=False)
                 
                 new_count = len(crypto_configs)
-                self.logger.info(f"✅ 配置清理完成: {original_count} -> {new_count} ({len(removed_cryptos)} 个已移除)")
-                self.logger.info(f"📋 已移除的加密货币: {removed_cryptos}")
+                self.logger.info(f"✅ Configuration cleanup completed: {original_count} -> {new_count} ({len(removed_cryptos)} removed)")
+                self.logger.info(f"📋 Removed cryptocurrencies: {removed_cryptos}")
                 
                 return True
             else:
-                self.logger.info("ℹ️ 配置中没有找到需要移除的加密货币")
+                self.logger.info("ℹ️ No cryptocurrencies found in configuration that need to be removed")
                 return True
                 
         except Exception as e:
-            self.logger.error(f"❌ 清理配置文件失败: {e}")
+            self.logger.error(f"❌ Failed to clean configuration file: {e}")
             return False
     
     def get_config_stats(self) -> Dict[str, Any]:
-        """获取配置文件统计信息"""
+        """Get configuration file statistics"""
         try:
             with open(self.config_file, 'r', encoding='utf-8') as f:
                 data = json.load(f)
@@ -118,16 +118,16 @@ class ConfigManager:
                 'generated_at': data.get('generated_at', 'Unknown')
             }
         except Exception as e:
-            self.logger.error(f"❌ 获取配置统计信息失败: {e}")
+            self.logger.error(f"❌ Failed to get configuration statistics: {e}")
             return {}
 
 
 def test_config_manager():
-    """测试配置管理器功能"""
+    """Test configuration manager functionality"""
     import tempfile
     import os
     
-    # 创建临时测试配置
+    # Create temporary test configuration
     test_config = {
         "strategy_name": "test",
         "crypto_configs": {
@@ -142,39 +142,39 @@ def test_config_manager():
         test_file = f.name
     
     try:
-        # 测试配置管理器
+        # Test configuration manager
         config_manager = ConfigManager(test_file)
         
-        print("🧪 测试配置管理器")
+        print("🧪 Testing configuration manager")
         print("="*50)
         
-        # 测试加载配置
+        # Test loading configuration
         cryptos = config_manager.load_configured_cryptos()
-        print(f"📋 加载的加密货币: {sorted(cryptos)}")
+        print(f"📋 Loaded cryptocurrencies: {sorted(cryptos)}")
         
-        # 测试统计信息
+        # Test statistics
         stats = config_manager.get_config_stats()
-        print(f"📊 配置统计: {stats}")
+        print(f"📊 Configuration statistics: {stats}")
         
-        # 测试移除配置
+        # Test removing configuration
         affected = {'BTC', 'XRP'}
         success = config_manager.remove_cryptos_from_config(affected)
-        print(f"🗑️  移除操作成功: {success}")
+        print(f"🗑️  Removal operation successful: {success}")
         
-        # 验证移除结果
+        # Verify removal result
         remaining_cryptos = config_manager.load_configured_cryptos()
-        print(f"📋 剩余加密货币: {sorted(remaining_cryptos)}")
+        print(f"📋 Remaining cryptocurrencies: {sorted(remaining_cryptos)}")
         
         if remaining_cryptos == {'ETH'}:
-            print("✅ 测试通过")
+            print("✅ Test passed")
         else:
-            print("❌ 测试失败")
+            print("❌ Test failed")
             
     finally:
-        # 清理测试文件
+        # Clean up test file
         if os.path.exists(test_file):
             os.remove(test_file)
-        # 清理可能的备份文件
+        # Clean up possible backup files
         for file in os.listdir('.'):
             if file.startswith('limits_backup_') and file.endswith('.json'):
                 os.remove(file)

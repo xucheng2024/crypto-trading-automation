@@ -1,23 +1,29 @@
 # Crypto Trading Automation System
 
-A comprehensive automated crypto trading system with OKX exchange integration, featuring modular architecture, algorithmic trading strategies, intelligent delisting protection, automated order management, and high-precision trading algorithms.
+A comprehensive automated crypto trading system with OKX exchange integration, featuring modular architecture, algorithmic trading strategies, intelligent delisting protection, automated order management, and high-precision trading algorithms. **Now deployed on GitHub Actions with PostgreSQL database.**
 
 ## 🚀 Quick Start
 
 ```bash
-# Install Python dependencies
+# Install Python dependencies (includes python-okx==0.4.0)
 pip install -r requirements.txt
 
-# Setup environment variables
+# Setup environment variables (locally you can use .env, CI uses GitHub Secrets)
 cp .env.example .env.local
-# Fill in your OKX API credentials
+# Fill in your OKX API credentials and DATABASE_URL
 
 # Test the system
 python create_algo_triggers.py
 python monitor_delist.py
 ```
 
-## 🏗️ Modular Architecture
+## 🏗️ Modern Cloud Architecture
+
+### Cloud Deployment ⭐
+- **GitHub Actions** - Automated script execution with scheduled workflows
+- **PostgreSQL Database** - Cloud-hosted database (Neon) for scalability
+- **Environment Secrets** - Secure credential management via GitHub Secrets
+- **Automated Logging** - Centralized log collection and retention
 
 ### Core Trading System ⭐
 - **`monitor_delist.py`** - Intelligent delisting protection with automated response (277 lines)
@@ -27,16 +33,15 @@ python monitor_delist.py
 - **`fetch_filled_orders.py`** - Automated filled order tracking with sell_time calculation
 - **`auto_sell_orders.py`** - Automated market sell orders based on sell_time
 
-### Modular Components (New!) 🆕
+### Modular Components 🆕
 - **`config_manager.py`** - Configuration file management and backup (184 lines)
 - **`crypto_matcher.py`** - Smart cryptocurrency matching and detection (119 lines)
 - **`okx_client.py`** - Universal OKX API client for all scripts (210 lines) ⭐
 - **`protection_manager.py`** - Automated protection operations orchestration (232 lines)
 
 ### Database & Utilities
-- **`lib/database.py`** - SQLite database integration for order tracking
-- **`database.db`** - Main trading database
-- **`filled_orders.db`** - SQLite database for order tracking with sell_time and sold_status
+- **`lib/database.py`** - PostgreSQL database integration with unified connection management
+- **`.github/workflows/trading.yml`** - GitHub Actions workflow for automated execution
 - **`backups/`** - Automatic configuration backups
 
 ## 🤖 Automated Trading System ⭐
@@ -55,26 +60,25 @@ python monitor_delist.py
 - **⚙️ Configuration Management** - Automated backup and cleanup of trading configurations
 - **🔧 Universal OKX Client** - Single OKX API client shared across all scripts, eliminating code duplication
 - **📊 Better Maintainability** - 59% code reduction in main script, improved testability and debugging
+- **☁️ Cloud Migration** - Migrated from local SQLite to PostgreSQL with GitHub Actions automation
+ - **📦 SDK Update** - Switched to `python-okx==0.4.0` with new submodule imports (`okx.Trade`, `okx.Funding`, etc.)
+ - **🗄️ DB Migration Guard** - Auto-create `sold_status` column in `filled_orders` on startup (PostgreSQL)
+ - **🧪 CI Compatibility** - `cancel_pending_triggers.py` runs without `.env` in Actions (uses Secrets)
+ - **🕛 Workflow Control** - Nightly cancel/create steps also runnable via manual workflow dispatch
 
-### Cron Job Schedule
-```bash
-# Daily at 11:00 PM - Restart monitoring service
-0 23 * * * cd /Users/mac/Downloads/projects/crypto && ./restart_monitor.sh >> /Users/mac/Downloads/projects/crypto/cron_restart.log 2>&1
+### GitHub Actions Schedule
+```yaml
+# Every 5 minutes - Monitoring and auto sell orders
+- cron: '*/5 * * * *'
 
-# Daily at 11:55 PM - Cancel pending trigger orders
-55 23 * * * cd /Users/mac/Downloads/projects/crypto && /Users/mac/miniconda3/bin/python cancel_pending_triggers.py >> /Users/mac/Downloads/projects/crypto/cron_cancel.log 2>&1
+# Every 15 minutes - Fetch filled orders
+- cron: '*/15 * * * *'
 
-# Daily at 12:05 AM - Create new trigger orders
-5 0 * * * cd /Users/mac/Downloads/projects/crypto && /Users/mac/miniconda3/bin/python create_algo_triggers.py >> /Users/mac/Downloads/projects/crypto/cron_create.log 2>&1
+# Daily at 23:55 - Cancel pending trigger orders
+- cron: '55 23 * * *'
 
-# Every 5 minutes - Cancel pending buy limit orders
-*/5 * * * * cd /Users/mac/Downloads/projects/crypto && /Users/mac/miniconda3/bin/python cancel_pending_limits.py --side buy >> /Users/mac/Downloads/projects/crypto/cron_cancel_limits.log 2>&1
-
-# Every 15 minutes - Fetch and track filled orders
-*/15 * * * * cd /Users/mac/Downloads/projects/crypto && /Users/mac/miniconda3/bin/python fetch_filled_orders.py >> /Users/mac/Downloads/projects/crypto/cron_fetch_orders.log 2>&1
-
-# Every 5 minutes - Execute auto sell orders based on sell_time
-*/5 * * * * cd /Users/mac/Downloads/projects/crypto && /Users/mac/miniconda3/bin/python auto_sell_orders.py >> /Users/mac/Downloads/projects/crypto/cron_auto_sell.log 2>&1
+# Daily at 00:05 - Create new algo triggers
+- cron: '5 0 * * *'
 ```
 
 ### Automation Scripts
@@ -122,7 +126,7 @@ python monitor_delist.py
 - **Features**:
   - **Sell Time Calculation**: Automatically calculates sell_time as ts + 20 hours
   - **Real-time Monitoring**: Continuous order status monitoring
-  - **Database Storage**: SQLite database for order history
+  - **Database Storage**: PostgreSQL database for order history
   - **Configurable Intervals**: Adjustable monitoring frequency
   - **Order Statistics**: Comprehensive order analytics and reporting
   - **Buy-only Storage**: Filters to side='buy' before saving
@@ -135,7 +139,7 @@ python monitor_delist.py
   - **Audio Notifications**: 10-second continuous beep sound for successful sells
   - **Duplicate Prevention**: Tracks sold_status to avoid re-processing
   - **Processing Lock**: Marks rows as PROCESSING before sell to prevent overlaps
-  - **Strict Selection**: Only processes rows where sold_status IS NULL; sell_time cast to INTEGER
+  - **Strict Selection**: Only processes rows where sold_status IS NULL; sell_time cast to Integer
   - **Detailed Logging**: Includes ordId in scan and processing logs for auditability
   - **Market Order Execution**: Uses market orders for immediate execution
   - **Comprehensive Logging**: Detailed transaction logging and error handling
@@ -178,23 +182,20 @@ python monitor_delist.py
 
 ### Configuration Files
 - **`limits.json`** - Trading limits and trigger price coefficients for 29 crypto pairs
-- **`filled_orders.db`** - SQLite database for order tracking with sell_time and sold_status
-- **`database.db`** - Main trading database
+- **`.env`** - Environment variables including DATABASE_URL for PostgreSQL
 - **`backups/limits_*.json`** - Automatic configuration backups with timestamps
 
 ### Log Files
-- **`cron_restart.log`** - Monitor restart logs
-- **`cron_cancel.log`** - Trigger order cancellation logs
-- **`cron_create.log`** - Trigger order creation logs
-- **`cron_cancel_limits.log`** - Limit order management logs
-- **`cron_fetch_orders.log`** - Filled order tracking logs
-- **`cron_auto_sell.log`** - Auto sell order execution logs
-- **`monitor_*.log`** - Daily monitoring logs
-- **`algo_triggers_*.log`** - Trigger order creation logs
+- **GitHub Actions Logs** - Centralized logging via GitHub Actions artifacts
+- **`logs/`** - Local log files (if running locally)
+- **`*.log`** - Various operation logs
 
 ## 🔧 Environment Variables
 
 ```env
+# PostgreSQL Database (required)
+DATABASE_URL=postgresql://username:password@host:port/database
+
 # OKX Production API (required for private endpoints)
 OKX_API_KEY=your_production_api_key
 OKX_SECRET_KEY=your_production_secret_key
@@ -207,7 +208,7 @@ OKX_TESTNET=false
 ## 🤖 Trading Strategy
 
 ### Core Functions
-1. **Automated Monitoring** - 24/7 system monitoring and management
+1. **Automated Monitoring** - 24/7 system monitoring and management via GitHub Actions
 2. **Smart Order Management** - Intelligent order creation and cancellation
 3. **High-Precision Trading** - Decimal arithmetic for accurate price calculations
 4. **Time-based Execution** - Automated selling based on calculated sell times
@@ -237,36 +238,42 @@ OKX_TESTNET=false
 
 ## 🚀 Deployment
 
+### Cloud Deployment (Recommended) ⭐
+```bash
+# 1. Fork this repository to your GitHub account
+# 2. Set up GitHub Secrets:
+#    - DATABASE_URL: Your PostgreSQL connection string
+#    - OKX_API_KEY: Your OKX API key
+#    - OKX_SECRET_KEY: Your OKX secret key
+#    - OKX_PASSPHRASE: Your OKX passphrase
+
+# 3. Enable GitHub Actions in your repository
+# 4. The system will automatically run on schedule
+# 5. You can manually trigger nightly steps (cancel/create) via "Run workflow"
+```
+
 ### Local Development
 ```bash
-# Test automation scripts
+# Test automation scripts locally
 python monitor_delist.py
 python create_algo_triggers.py
 python fetch_filled_orders.py
 python auto_sell_orders.py
 ```
 
-### Automation Setup
+### Database Setup
 ```bash
-# Install crontab for automated trading
-crontab -e
+# Initialize PostgreSQL database
+python lib/database.py
 
-# Add the cron jobs (see Cron Job Schedule section above)
-
-# Check crontab status
-crontab -l
-
-# Monitor automation logs
-tail -f cron_fetch_orders.log
-tail -f cron_create.log
-tail -f cron_cancel.log
-tail -f cron_auto_sell.log
+# Test database connection
+python -c "from lib.database import Database; db = Database(); print('Connected:', db.connect())"
 ```
 
 ## 🔒 Security Features
 
 - OKX API authentication with HMAC-SHA256 signatures
-- Environment variable protection
+- Environment variable protection via GitHub Secrets
 - Private endpoint authentication for sensitive data
 - Input validation and comprehensive error handling
 - Secure timestamp generation and signature verification
@@ -288,40 +295,41 @@ python auto_sell_orders.py
 python lib/database.py
 ```
 
-## 📊 Modular Project Structure
+## 📊 Modern Project Structure
 
 ```
-crypto/
-├── lib/                    # Utility libraries
-│   └── database.py        # SQLite database integration
-├── backups/               # Automatic configuration backups 🆕
-│   └── limits_*.json     # Timestamped configuration backups
-├── logs/                  # Detailed operation logs
-│   └── *.log             # Daily monitoring and operation logs
-├── requirements.txt        # Python dependencies
-├── limits.json            # Trading limits for 29 crypto pairs
-├── filled_orders.db       # SQLite database for order tracking
-├── database.db            # Main SQLite database
+crypto_remote/
+├── .github/                 # GitHub Actions workflows
+│   └── workflows/
+│       └── trading.yml      # Automated trading workflow
+├── lib/                     # Utility libraries
+│   └── database.py         # PostgreSQL database integration
+├── backups/                # Automatic configuration backups
+│   └── limits_*.json      # Timestamped configuration backups
+├── logs/                   # Detailed operation logs
+│   └── *.log              # Daily monitoring and operation logs
+├── requirements.txt         # Python dependencies
+├── limits.json             # Trading limits for 29 crypto pairs
+├── .env                    # Environment variables (local)
 │
 ├── # Core Trading System
-├── monitor_delist.py      # Main delisting protection (277 lines) ⭐
+├── monitor_delist.py       # Main delisting protection (277 lines) ⭐
 ├── create_algo_triggers.py # Automated trigger order creation ⭐
 ├── cancel_pending_triggers.py # Automated trigger order cancellation ⭐
 ├── cancel_pending_limits.py # Automated limit order management
-├── fetch_filled_orders.py # Automated filled order tracking ⭐
-├── auto_sell_orders.py    # Automated market sell orders ⭐
+├── fetch_filled_orders.py  # Automated filled order tracking ⭐
+├── auto_sell_orders.py     # Automated market sell orders ⭐
 │
-├── # Modular Components (New!) 🆕
-├── config_manager.py      # Configuration management (184 lines)
-├── crypto_matcher.py      # Smart crypto detection (119 lines)
-├── okx_client.py          # Universal OKX API client (210 lines) ⭐
-├── protection_manager.py  # Protection workflow (232 lines)
+├── # Modular Components
+├── config_manager.py       # Configuration management (184 lines)
+├── crypto_matcher.py       # Smart crypto detection (119 lines)
+├── okx_client.py           # Universal OKX API client (210 lines) ⭐
+├── protection_manager.py   # Protection workflow (232 lines)
 │
-├── # Documentation & Scripts
-├── restart_monitor.sh     # Monitor restart script
-├── ALGO_TRIGGER_README.md # Detailed algo trigger documentation
-├── MONITOR_README.md      # Detailed monitoring documentation
-└── cron_*.log            # Automation logs
+├── # Documentation
+├── ALGO_TRIGGER_README.md  # Detailed algo trigger documentation
+├── MONITOR_README.md       # Detailed monitoring documentation
+└── SETUP.md                # Setup and configuration guide
 ```
 
 ## 🎯 System Status ✅
@@ -334,6 +342,7 @@ crypto/
 - **Price Precision**: High-precision Decimal arithmetic working perfectly
 - **Configuration Management**: Automatic backup and cleanup functionality
 - **Error Resolution**: All previous API issues resolved with enhanced error handling
+- **Cloud Migration**: Successfully migrated to PostgreSQL and GitHub Actions
 
 ### Architecture Benefits
 - **Maintainability**: Clean separation of concerns across 5 specialized modules
@@ -342,6 +351,7 @@ crypto/
 - **Extensibility**: Easy to add new protection features or API integrations
 - **Reliability**: Robust error handling and logging throughout all modules
 - **Performance**: Optimized API calls and efficient resource management
+- **Scalability**: Cloud-based deployment with PostgreSQL database
 
 ### Supported Crypto Pairs
 All 29 pairs in `limits.json` are fully supported:
@@ -401,4 +411,4 @@ if affected:
 This project is for educational and personal use. Please ensure compliance with OKX API terms and local trading regulations.
 
 ---
-**System Architecture**: Modular • **Total Lines**: 1,120+ (5 modules) • **Main Script**: 277 lines • **Code Reduction**: 59% • **API Unification**: 6 scripts share 1 OKX client • **Last Updated**: 2025-01-27
+**System Architecture**: Modular + Cloud • **Total Lines**: 1,120+ (5 modules) • **Main Script**: 277 lines • **Code Reduction**: 59% • **API Unification**: 6 scripts share 1 OKX client • **Database**: PostgreSQL (Neon) • **Deployment**: GitHub Actions • **Last Updated**: 2025-01-31

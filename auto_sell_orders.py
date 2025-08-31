@@ -9,7 +9,7 @@ import os
 import sys
 import logging
 import logging.handlers
-# import sqlite3  # 已迁移到PostgreSQL
+# import sqlite3  # Migrated to PostgreSQL
 import time
 from datetime import datetime, timedelta
 from decimal import Decimal, getcontext
@@ -103,13 +103,13 @@ class AutoSellOrders:
     def init_database(self):
         """Initialize PostgreSQL database connection"""
         try:
-            # 使用统一的数据库连接
+            # Use unified database connection
             from lib.database import get_database_connection
             
             self.conn = get_database_connection()
             self.cursor = self.conn.cursor()
             
-            # 确保filled_orders表存在
+            # Ensure filled_orders table exists
             self.cursor.execute('''
                 CREATE TABLE IF NOT EXISTS filled_orders (
                     instId VARCHAR(255) NOT NULL,
@@ -133,7 +133,7 @@ class AutoSellOrders:
                 )
             ''')
 
-            # 确保 sold_status 列存在（兼容旧数据库）；出错时回滚再尝试ALTER
+            # Ensure sold_status column exists (compatible with old database); rollback and retry ALTER on error
             try:
                 self.cursor.execute("SELECT sold_status FROM filled_orders LIMIT 1")
             except Exception:
@@ -226,33 +226,33 @@ class AutoSellOrders:
     def get_available_balance(self, inst_id):
         """Get available balance for a specific instrument"""
         try:
-            # 从inst_id中提取币种代码 (例如: NMR-USDT -> NMR)
+            # Extract cryptocurrency code from inst_id (e.g., NMR-USDT -> NMR)
             base_ccy = inst_id.split('-')[0].upper()
             
             account_api = self.okx_client.get_account_api()
             if not account_api:
-                self.logger.warning(f"⚠️ Account API 未初始化，无法获取 {base_ccy} 交易账户余额")
+                self.logger.warning(f"⚠️ Account API not initialized, cannot get {base_ccy} trading account balance")
                 return 0.0, 0.0  # Return (balance, eqUsd)
             
             result = account_api.get_account_balance(ccy=base_ccy)
-            self.logger.info(f"🔍 交易账户余额API返回: {result}")
+                            self.logger.info(f"🔍 Trading account balance API returned: {result}")
             
             if not result or result.get('code') != '0':
-                self.logger.warning(f"⚠️ 无法获取 {base_ccy} 交易账户余额: {result}")
+                self.logger.warning(f"⚠️ Cannot get {base_ccy} trading account balance: {result}")
                 return 0.0, 0.0
             
             data = result.get('data', [])
             if not data:
-                self.logger.warning(f"⚠️ 交易账户余额返回空数据: {result}")
+                self.logger.warning(f"⚠️ Trading account balance returned empty data: {result}")
                 return 0.0, 0.0
             
             details = data[0].get('details', [])
-            self.logger.info(f"📊 交易账户详情条目: {len(details)} | 返回币种: {[d.get('ccy') for d in details][:20]}")
+                            self.logger.info(f"📊 Trading account detail entries: {len(details)} | Returned currencies: {[d.get('ccy') for d in details][:20]}")
             
             for detail in details:
                 ccy = detail.get('ccy', '').upper()
                 if ccy == base_ccy:
-                    # 优先使用 availBal；若缺失或为0，回退到 availEq（交易账户可用权益）
+                    # Prioritize availBal; if missing or 0, fall back to availEq (trading account available equity)
                     avail_str = detail.get('availBal')
                     avail_val = float(avail_str) if avail_str is not None else 0.0
                     if avail_val <= 0:
@@ -263,18 +263,18 @@ class AutoSellOrders:
                             except Exception:
                                 pass
                     
-                    # 获取 eqUsd 值（USD等值）
+                    # Get eqUsd value (USD equivalent)
                     eq_usd_str = detail.get('eqUsd', '0')
                     eq_usd_val = float(eq_usd_str) if eq_usd_str else 0.0
                     
-                    self.logger.info(f"💰 {base_ccy} 交易账户可用: {avail_val} | USD等值: ${eq_usd_val}")
+                    self.logger.info(f"💰 {base_ccy} trading account available: {avail_val} | USD equivalent: ${eq_usd_val}")
                     return avail_val, eq_usd_val
             
-            self.logger.warning(f"⚠️ 未在交易账户详情中找到 {base_ccy} 的余额信息")
+                            self.logger.warning(f"⚠️ No balance information found for {base_ccy} in trading account details")
             return 0.0, 0.0
             
         except Exception as e:
-            self.logger.error(f"❌ 获取 {inst_id} 余额时出错: {e}")
+                            self.logger.error(f"❌ Error getting balance for {inst_id}: {e}")
             return 0.0, 0.0
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=10))
@@ -288,26 +288,26 @@ class AutoSellOrders:
             side="sell",
             ordType="market",
             sz=size,
-            tgtCcy="base_ccy"  # 明确指定按基础货币数量卖出
+                            tgtCcy="base_ccy"  # Explicitly specify selling by base currency quantity
         )
         
         if not result or result.get('code') != '0':
             error_msg = result.get('msg', 'Unknown error') if result else 'Empty response'
             
-            # 检查是否是余额不足导致的失败
+            # Check if failure is due to insufficient balance
             if "insufficient" in error_msg.lower() or "balance" in error_msg.lower() or "all operations failed" in error_msg.lower():
-                self.logger.warning(f"⚠️ 检测到可能的余额不足，尝试获取实际余额...")
+                self.logger.warning(f"⚠️ Detected possible insufficient balance, trying to get actual balance...")
                 actual_balance, eq_usd = self.get_available_balance(inst_id)
                 
-                # 使用 eqUsd 判断是否值得卖出（如果USD等值小于配置的阈值，认为不值得卖出）
+                # Use eqUsd to determine if it's worth selling (if USD equivalent is less than configured threshold, consider it not worth selling)
                 if eq_usd < self.min_usd_value:
-                    self.logger.warning(f"💰 {inst_id} USD等值过小 (${eq_usd:.4f}) < ${self.min_usd_value}，不值得卖出，标记为已处理")
-                    # 即使不卖出，也标记为已处理，避免重复检查
+                    self.logger.warning(f"💰 {inst_id} USD equivalent too small (${eq_usd:.4f}) < ${self.min_usd_value}, not worth selling, marking as processed")
+                    # Even if not selling, mark as processed to avoid repeated checks
                     return "INSUFFICIENT_VALUE"
                 
-                if actual_balance > 0:  # 移除 0.0001 限制，只要有余额就尝试卖出
-                    self.logger.info(f"🔄 余额不足，按实际余额卖出: {actual_balance} tokens (USD等值: ${eq_usd:.4f})")
-                    # 按实际余额重新下单
+                if actual_balance > 0:  # Remove 0.0001 limit, try to sell as long as there's balance
+                    self.logger.info(f"🔄 Insufficient balance, selling by actual balance: {actual_balance} tokens (USD equivalent: ${eq_usd:.4f})")
+                    # Re-order with actual balance
                     result = self.trade_api.place_order(
                         instId=inst_id,
                         tdMode="cash",
@@ -319,14 +319,14 @@ class AutoSellOrders:
                     
                     if result and result.get('code') == '0':
                         okx_order_id = result.get('data', [{}])[0].get('ordId', 'Unknown')
-                        self.logger.info(f"✅ 按实际余额卖出成功: {inst_id} | Size: {actual_balance} | USD等值: ${eq_usd:.4f} | Order: {okx_order_id}")
+                        self.logger.info(f"✅ Successfully sold with actual balance: {inst_id} | Size: {actual_balance} | USD equivalent: ${eq_usd:.4f} | Order: {okx_order_id}")
                         return True
                     else:
-                        self.logger.error(f"❌ 按实际余额卖出也失败: {result.get('msg', 'Unknown error')}")
+                        self.logger.error(f"❌ Selling with actual balance also failed: {result.get('msg', 'Unknown error')}")
                         return False
                 else:
-                    # 余额为0，无法卖出
-                    self.logger.warning(f"💰 {inst_id} 余额为0，无法卖出")
+                    # Balance is 0, cannot sell
+                    self.logger.warning(f"💰 {inst_id} Balance is 0, cannot sell")
                     return False
             
             self.logger.error(f"❌ Sell failed for {inst_id}: {error_msg}")
@@ -394,20 +394,20 @@ class AutoSellOrders:
                 
                 sell_result = self.place_market_sell_order(inst_id, fill_sz, ord_id)
                 
-                if sell_result == True:  # 成功卖出
+                if sell_result == True:  # Successfully sold
                     if self.mark_order_as_sold(ord_id):
                         successful_sells += 1
                     else:
                         self.logger.warning(f"⚠️  Order {ord_id} sold but failed to update database")
                         successful_sells += 1
-                elif sell_result == "INSUFFICIENT_VALUE":  # USD等值过小，标记为已处理
+                elif sell_result == "INSUFFICIENT_VALUE":  # USD equivalent too small, mark as processed
                     if self.mark_order_as_sold(ord_id):
                         self.logger.info(f"✅ Order {ord_id} marked as sold (insufficient USD value)")
                         successful_sells += 1
                     else:
                         self.logger.warning(f"⚠️  Order {ord_id} insufficient value but failed to update database")
                         failed_sells += 1
-                else:  # 卖出失败
+                else:  # Selling failed
                     # Clear PROCESSING to allow future retry
                     self.clear_order_processing(ord_id)
                     failed_sells += 1

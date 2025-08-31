@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-保护操作管理模块
-负责执行完整的保护流程：取消订单、卖出余额、清理配置、重新创建触发订单
+Protection Operation Management Module
+Responsible for executing complete protection workflow: cancel orders, sell balances, clean configuration, recreate trigger orders
 """
 
 import subprocess
@@ -13,7 +13,7 @@ from okx_client import OKXClient
 
 
 class ProtectionManager:
-    """保护操作管理器"""
+    """Protection Operation Manager"""
     
     def __init__(self, 
                  config_manager: Optional[ConfigManager] = None, 
@@ -24,121 +24,121 @@ class ProtectionManager:
         self.logger = logger or logging.getLogger(__name__)
     
     def execute_cancellation_scripts(self) -> bool:
-        """执行取消订单脚本"""
-        self.logger.info("🚨 开始执行自动取消订单...")
+        """Execute order cancellation scripts"""
+        self.logger.info("🚨 Starting automatic order cancellation...")
         
-        # 脚本路径
+        # Script paths
         scripts = [
-            ("cancel_pending_triggers.py", "取消所有待处理的触发订单"),
-            ("cancel_pending_limits.py", "取消所有待处理的限价订单")
+            ("cancel_pending_triggers.py", "Cancel all pending trigger orders"),
+            ("cancel_pending_limits.py", "Cancel all pending limit orders")
         ]
         
         success_count = 0
         
         for script_name, description in scripts:
             try:
-                self.logger.info(f"执行脚本: {script_name} - {description}")
+                self.logger.info(f"Executing script: {script_name} - {description}")
                 
-                # 执行脚本
+                # Execute script
                 result = subprocess.run(
                     [sys.executable, script_name],
                     capture_output=True,
                     text=True,
-                    timeout=300  # 5分钟超时
+                    timeout=300  # 5 minute timeout
                 )
                 
                 if result.returncode == 0:
-                    self.logger.info(f"✅ {script_name} 执行成功")
+                    self.logger.info(f"✅ {script_name} executed successfully")
                     if result.stdout:
-                        self.logger.debug(f"脚本输出: {result.stdout}")
+                        self.logger.debug(f"Script output: {result.stdout}")
                     success_count += 1
                 else:
-                    self.logger.error(f"❌ {script_name} 执行失败 (退出码: {result.returncode})")
+                    self.logger.error(f"❌ {script_name} execution failed (exit code: {result.returncode})")
                     if result.stderr:
-                        self.logger.error(f"错误信息: {result.stderr}")
+                        self.logger.error(f"Error message: {result.stderr}")
                     if result.stdout:
-                        self.logger.debug(f"脚本输出: {result.stdout}")
+                        self.logger.debug(f"Script output: {result.stdout}")
                         
             except subprocess.TimeoutExpired:
-                self.logger.error(f"⏰ {script_name} 执行超时 (超过5分钟)")
+                self.logger.error(f"⏰ {script_name} execution timeout (exceeded 5 minutes)")
             except FileNotFoundError:
-                self.logger.error(f"❌ 找不到脚本文件: {script_name}")
+                self.logger.error(f"❌ Script file not found: {script_name}")
             except Exception as e:
-                self.logger.error(f"❌ 执行 {script_name} 时发生错误: {e}")
+                self.logger.error(f"❌ Error occurred while executing {script_name}: {e}")
         
-        self.logger.info(f"📊 取消订单脚本执行完成: {success_count}/{len(scripts)} 成功")
+        self.logger.info(f"📊 Order cancellation script execution completed: {success_count}/{len(scripts)} successful")
         
         if success_count == len(scripts):
-            self.logger.info("✅ 所有订单取消脚本已成功执行")
+            self.logger.info("✅ All order cancellation scripts executed successfully")
         else:
-            self.logger.warning("⚠️ 部分订单取消脚本执行失败，请检查日志")
+            self.logger.warning("⚠️ Some order cancellation scripts failed, please check logs")
         
         return success_count == len(scripts)
     
     def handle_affected_balances(self, affected_cryptos: Set[str]) -> Tuple[int, int]:
-        """处理受影响的余额，返回(成功数量, 总数量)"""
+        """Handle affected balances, return (successful sells, total sells)"""
         if not self.okx_client.is_available() or not affected_cryptos:
             return 0, 0
         
-        # 检查受影响的余额
+        # Check affected balances
         affected_balances = self.okx_client.get_affected_balances(affected_cryptos)
         
         if not affected_balances:
-            self.logger.info("✅ 受影响的加密货币均无余额，无需卖出")
+            self.logger.info("✅ No balances found for affected cryptocurrencies, no selling needed")
             return 0, 0
         
-        self.logger.info(f"🎯 发现 {len(affected_balances)} 个受影响的加密货币有余额，开始市价卖出...")
+        self.logger.info(f"🎯 Found {len(affected_balances)} affected cryptocurrencies with balances, starting market sell...")
         
-        # 执行批量卖出
+        # Execute batch selling
         successful_sells, total_sells = self.okx_client.sell_affected_balances(affected_balances)
         
-        self.logger.info(f"📊 市价卖出完成: {successful_sells}/{total_sells} 成功")
+        self.logger.info(f"📊 Market sell completed: {successful_sells}/{total_sells} successful")
         
         return successful_sells, total_sells
     
     def recreate_algo_triggers(self) -> bool:
-        """重新运行 create_algo_triggers.py 脚本"""
+        """Re-run create_algo_triggers.py script"""
         try:
-            self.logger.info("🔄 开始重新创建算法触发订单...")
+            self.logger.info("🔄 Starting to re-create algorithm trigger orders...")
             
-            # 执行 create_algo_triggers.py 脚本
+            # Execute create_algo_triggers.py script
             result = subprocess.run(
                 [sys.executable, 'create_algo_triggers.py'],
                 capture_output=True,
                 text=True,
-                timeout=300  # 5分钟超时
+                timeout=300  # 5 minute timeout
             )
             
             if result.returncode == 0:
-                self.logger.info("✅ create_algo_triggers.py 执行成功")
+                self.logger.info("✅ create_algo_triggers.py executed successfully")
                 if result.stdout:
-                    self.logger.debug(f"脚本输出: {result.stdout}")
+                    self.logger.debug(f"Script output: {result.stdout}")
                 return True
             else:
-                self.logger.error(f"❌ create_algo_triggers.py 执行失败 (退出码: {result.returncode})")
+                self.logger.error(f"❌ create_algo_triggers.py execution failed (exit code: {result.returncode})")
                 if result.stderr:
-                    self.logger.error(f"错误信息: {result.stderr}")
+                    self.logger.error(f"Error message: {result.stderr}")
                 if result.stdout:
-                    self.logger.debug(f"脚本输出: {result.stdout}")
+                    self.logger.debug(f"Script output: {result.stdout}")
                 return False
                 
         except subprocess.TimeoutExpired:
-            self.logger.error("⏰ create_algo_triggers.py 执行超时 (超过5分钟)")
+            self.logger.error("⏰ create_algo_triggers.py execution timeout (exceeded 5 minutes)")
             return False
         except FileNotFoundError:
-            self.logger.error("❌ 找不到脚本文件: create_algo_triggers.py")
+            self.logger.error("❌ Script file not found: create_algo_triggers.py")
             return False
         except Exception as e:
-            self.logger.error(f"❌ 执行 create_algo_triggers.py 时发生错误: {e}")
+            self.logger.error(f"❌ Error occurred while executing create_algo_triggers.py: {e}")
             return False
     
     def execute_full_protection(self, affected_cryptos: Set[str]) -> dict:
-        """执行完整的保护流程"""
+        """Execute complete protection workflow"""
         if not affected_cryptos:
-            self.logger.info("ℹ️ 无受影响的加密货币，跳过保护操作")
+            self.logger.info("ℹ️ No affected cryptocurrencies, skipping protection operations")
             return {'status': 'skipped', 'reason': 'no_affected_cryptos'}
         
-        self.logger.warning(f"🚨 开始执行完整保护流程，受影响的加密货币: {sorted(affected_cryptos)}")
+        self.logger.warning(f"🚨 Starting complete protection workflow, affected cryptocurrencies: {sorted(affected_cryptos)}")
         
         results = {
             'status': 'completed',
@@ -150,82 +150,82 @@ class ProtectionManager:
         }
         
         try:
-            # 步骤1: 取消所有待处理订单
-            self.logger.info("📋 步骤1: 取消所有待处理订单")
+            # Step 1: Cancel all pending orders
+            self.logger.info("📋 Step 1: Cancel all pending orders")
             results['cancellation_success'] = self.execute_cancellation_scripts()
             
-            # 步骤2: 检查并卖出受影响的余额
-            self.logger.info("💰 步骤2: 检查并卖出受影响的余额")
+            # Step 2: Check and sell affected balances
+            self.logger.info("💰 Step 2: Check and sell affected balances")
             successful_sells, total_sells = self.handle_affected_balances(affected_cryptos)
             results['sell_results'] = {'successful': successful_sells, 'total': total_sells}
             
-            # 步骤3: 清理配置并重新创建触发订单
-            self.logger.info("🧹 步骤3: 清理配置并重新创建触发订单")
+            # Step 3: Clean configuration and recreate trigger orders
+            self.logger.info("🧹 Step 3: Clean configuration and recreate trigger orders")
             
-            # 清理 limits.json 配置
+            # Clean up limits.json configuration
             results['cleanup_success'] = self.config_manager.remove_cryptos_from_config(affected_cryptos)
             
             if results['cleanup_success']:
-                # 重新创建算法触发订单
+                # Recreate algorithm trigger orders
                 results['recreate_success'] = self.recreate_algo_triggers()
             
-            self.logger.info("🎉 完整保护流程执行完成")
+            self.logger.info("🎉 Complete protection workflow executed")
             
         except Exception as e:
-            self.logger.error(f"❌ 保护流程执行失败: {e}")
+            self.logger.error(f"❌ Protection workflow failed: {e}")
             results['status'] = 'failed'
             results['error'] = str(e)
         
         return results
     
     def print_protection_summary(self, results: dict):
-        """打印保护操作摘要"""
+        """Print protection operation summary"""
         print("\n" + "="*80)
-        print("📊 保护操作执行摘要")
+        print("📊 Protection Operation Execution Summary")
         print("="*80)
         
         if results['status'] == 'skipped':
-            print("ℹ️ 跳过保护操作 - 无受影响的加密货币")
+            print("ℹ️ Protection skipped - no affected cryptocurrencies")
             return
         
-        print(f"🎯 受影响的加密货币: {results['affected_cryptos']}")
-        print(f"📋 订单取消: {'✅ 成功' if results['cancellation_success'] else '❌ 失败'}")
+        print(f"🎯 Affected cryptocurrencies: {results['affected_cryptos']}")
+        print(f"�� Order cancellation: {'✅ Successful' if results['cancellation_success'] else '❌ Failed'}")
         
         sell_results = results['sell_results']
         if sell_results['total'] > 0:
-            print(f"💰 余额卖出: {sell_results['successful']}/{sell_results['total']} 成功")
+            print(f"�� Balance selling: {sell_results['successful']}/{sell_results['total']} successful")
         else:
-            print("💰 余额卖出: ✅ 无需卖出")
+            print("💰 Balance selling: ✅ No selling needed")
         
-        print(f"🧹 配置清理: {'✅ 成功' if results['cleanup_success'] else '❌ 失败'}")
-        print(f"🔄 重新创建触发订单: {'✅ 成功' if results['recreate_success'] else '❌ 失败'}")
+        print(f"🧹 Configuration cleanup: {'✅ Successful' if results['cleanup_success'] else '❌ Failed'}")
+        print(f"🔄 Recreate trigger orders: {'✅ Successful' if results['recreate_success'] else '❌ Failed'}")
         
         if results['status'] == 'failed':
-            print(f"❌ 执行失败: {results.get('error', 'Unknown error')}")
+            print(f"❌ Execution failed: {results.get('error', 'Unknown error')}")
         else:
-            print("🎉 保护流程执行完成")
+            print("🎉 Protection workflow executed")
         
         print("="*80)
 
 
 def test_protection_manager():
-    """测试保护管理器（不实际执行操作）"""
-    print("🧪 测试保护管理器")
+    """Test protection manager (does not perform actual operations)"""
+    print("🧪 Testing protection manager")
     print("="*50)
     
     manager = ProtectionManager()
     
-    print(f"📋 配置管理器: {'可用' if manager.config_manager else '不可用'}")
-    print(f"🔗 OKX 客户端: {'可用' if manager.okx_client.is_available() else '不可用'}")
+    print(f"📋 Config Manager: {'Available' if manager.config_manager else 'Unavailable'}")
+    print(f"🔗 OKX Client: {'Available' if manager.okx_client.is_available() else 'Unavailable'}")
     
-    # 模拟受影响的加密货币
+    # Simulate affected cryptocurrencies
     affected_cryptos = {'BTC', 'ETH'}
-    print(f"🎯 模拟受影响的加密货币: {sorted(affected_cryptos)}")
+    print(f"🎯 Simulate affected cryptocurrencies: {sorted(affected_cryptos)}")
     
-    # 注意：这里不实际执行保护操作，只测试结构
-    print("ℹ️ 在测试环境中不执行实际的保护操作")
+    # Note: Protection operations are not actually executed here, only the structure is tested
+    print("ℹ️ In a test environment, actual protection operations are not executed")
     
-    print("✅ 测试完成")
+    print("✅ Test completed")
 
 
 if __name__ == "__main__":

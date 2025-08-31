@@ -1,65 +1,65 @@
 # OKX Algo Trigger Order Creator
 
-这个脚本会读取 `limits.json` 文件，获取所有加密货币对和它们的最佳限制系数，然后创建 OKX 的 algo trigger 订单（每个币种2个触发点）。
+This script reads the `limits.json` file to get all cryptocurrency pairs and their optimal limit coefficients, then creates OKX algo trigger orders (2 trigger points per cryptocurrency).
 
-## 功能
+## Features
 
-- 📊 读取 `limits.json` 中的所有加密货币配置
-- 🎯 获取每个币种的当日开盘价
-- ⚡ 计算触发价格：`开盘价 * limit系数 / 100`
-- 📝 创建 OKX algo trigger 订单
+- 📊 Read all cryptocurrency configurations from `limits.json`
+- 🎯 Get daily opening price for each cryptocurrency
+- ⚡ Calculate trigger price: `opening price * limit coefficient / 100`
+- 📝 Create OKX algo trigger orders
 
-## 使用方法
+## Usage
 
-### 1. 设置环境变量
+### 1. Set Environment Variables
 
-创建 `.env` 文件并填入你的 OKX API 凭据：
+Create a `.env` file and fill in your OKX API credentials:
 
 ```bash
-# OKX Production API (交易必需)
+# OKX Production API (required for trading)
 OKX_API_KEY=your_production_api_key_here
 OKX_SECRET_KEY=your_production_secret_key_here
 OKX_PASSPHRASE=your_production_passphrase_here
 ```
 
-### 2. 安装依赖
+### 2. Install Dependencies
 
 ```bash
 pip install requests python-dotenv
 ```
 
-### 3. 运行脚本
+### 3. Run Script
 
 ```bash
 python create_algo_triggers.py
 ```
 
-## 脚本逻辑
+## Script Logic
 
-1. **读取配置**: 从 `limits.json` 读取所有加密货币对和 `best_limit` 值
-2. **获取开盘价**: 调用 OKX API 获取每个币种的当日开盘价
-3. **计算触发价**: `触发价格 = 开盘价 × limit系数 ÷ 100`
-4. **创建订单**: 为每个币种创建 algo trigger 订单
+1. **Read Configuration**: Read all cryptocurrency pairs and `best_limit` values from `limits.json`
+2. **Get Opening Price**: Call OKX API to get daily opening price for each cryptocurrency
+3. **Calculate Trigger Price**: `Trigger Price = Opening Price × Limit Coefficient ÷ 100`
+4. **Create Orders**: Create algo trigger orders for each cryptocurrency
 
-## 订单参数
+## Order Parameters
 
-- **订单类型**: `conditional` (条件订单)
-- **交易模式**: `cash` (现货)
-- **方向**: `buy` (买入)
-- **数量**: `0.001` (默认，可调整)
-- **触发价格**: 根据 limit 系数计算
-- **止盈模式**: `partial` (部分止盈)
-- **止盈比例**: `50%`
+- **Order Type**: `conditional` (conditional order)
+- **Trading Mode**: `cash` (spot)
+- **Direction**: `buy` (buy)
+- **Quantity**: `0.001` (default, adjustable)
+- **Trigger Price**: Calculated based on limit coefficient
+- **Take Profit Mode**: `partial` (partial take profit)
+- **Take Profit Ratio**: `50%`
 
-## 注意事项
+## Important Notes
 
-⚠️ **重要提醒**:
-- 这是实盘交易脚本，请确保 API 凭据正确
-- 脚本会为 limits.json 中的每个币种创建订单
-- 默认订单数量为 0.001，请根据你的资金情况调整
-- 建议先在测试环境验证
+⚠️ **Important Reminder**:
+- This is a live trading script, please ensure API credentials are correct
+- The script will create orders for each cryptocurrency in limits.json
+- Default order quantity is 0.001, please adjust based on your capital
+- It's recommended to verify in test environment first
 
-## 输出示例
+## Output Example
 
 ```
 🚀 OKX Algo Trigger Order Creator
@@ -83,18 +83,18 @@ python create_algo_triggers.py
 📊 Summary: 29/29 orders created successfully
 ```
 
-## 错误处理
+## Error Handling
 
-脚本包含完整的错误处理：
-- API 凭据验证
-- 网络请求重试
-- 订单创建状态检查
-- 详细的日志输出
+The script includes complete error handling:
+- API credential validation
+- Network request retry
+- Order creation status check
+- Detailed log output
 
-## 自定义
+## Customization
 
-你可以修改脚本中的以下参数：
-- 订单数量 (`sz`)
-- 止盈比例 (`tpSlVal`)
-- 请求间隔时间 (rate limiting)
-- 订单类型和参数
+You can modify the following parameters in the script:
+- Order quantity (`sz`)
+- Take profit ratio (`tpSlVal`)
+- Request interval time (rate limiting)
+- Order type and parameters
