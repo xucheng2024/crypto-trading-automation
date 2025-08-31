@@ -1,27 +1,48 @@
 #!/usr/bin/env python3
 """
-SQLite Database Configuration
-Simple local database setup for the crypto trading application
+Database Configuration - PostgreSQL only
 """
 
-import sqlite3
 import os
-from pathlib import Path
+import psycopg2
+
+def get_database_connection():
+    """获取PostgreSQL数据库连接"""
+    # 确保加载环境变量
+    try:
+        from dotenv import load_dotenv
+        load_dotenv()
+    except ImportError:
+        pass
+    
+    db_url = os.getenv('DATABASE_URL')
+    
+    if not db_url:
+        raise ValueError("DATABASE_URL environment variable is required")
+    
+    if not db_url.startswith('postgresql://'):
+        raise ValueError("DATABASE_URL must be a PostgreSQL connection string")
+    
+    try:
+        return psycopg2.connect(db_url)
+    except Exception as e:
+        print(f"❌ PostgreSQL 连接失败: {e}")
+        raise
 
 class Database:
-    def __init__(self, db_path="database.db"):
+    def __init__(self):
         """Initialize database connection"""
-        self.db_path = db_path
         self.conn = None
         self.cursor = None
         
     def connect(self):
-        """Connect to SQLite database"""
+        """Connect to PostgreSQL database"""
         try:
-            self.conn = sqlite3.connect(self.db_path)
+            self.conn = get_database_connection()
             self.cursor = self.conn.cursor()
-            print(f"✅ Connected to SQLite database: {self.db_path}")
+            print("✅ Connected to PostgreSQL database")
             return True
+            
         except Exception as e:
             print(f"❌ Database connection failed: {e}")
             return False
@@ -35,36 +56,34 @@ class Database:
     def create_tables(self):
         """Create necessary database tables"""
         try:
-            # Table for storing OKX announcements
+            # PostgreSQL 语法
             self.cursor.execute('''
                 CREATE TABLE IF NOT EXISTS okx_announcements (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    ann_type TEXT NOT NULL,
+                    id SERIAL PRIMARY KEY,
+                    ann_type VARCHAR(255) NOT NULL,
                     title TEXT NOT NULL,
                     url TEXT NOT NULL,
-                    p_time TEXT NOT NULL,
+                    p_time VARCHAR(255) NOT NULL,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
             
-            # Table for storing trading history
             self.cursor.execute('''
                 CREATE TABLE IF NOT EXISTS trading_history (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    inst_id TEXT NOT NULL,
-                    side TEXT NOT NULL,
+                    id SERIAL PRIMARY KEY,
+                    inst_id VARCHAR(255) NOT NULL,
+                    side VARCHAR(50) NOT NULL,
                     amount TEXT NOT NULL,
                     price TEXT,
-                    status TEXT DEFAULT 'pending',
+                    status VARCHAR(50) DEFAULT 'pending',
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
             
-            # Table for storing monitoring logs
             self.cursor.execute('''
                 CREATE TABLE IF NOT EXISTS monitoring_logs (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    event_type TEXT NOT NULL,
+                    id SERIAL PRIMARY KEY,
+                    event_type VARCHAR(255) NOT NULL,
                     message TEXT NOT NULL,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
@@ -83,7 +102,7 @@ class Database:
         try:
             self.cursor.execute('''
                 INSERT INTO okx_announcements (ann_type, title, url, p_time)
-                VALUES (?, ?, ?, ?)
+                VALUES (%s, %s, %s, %s)
             ''', (ann_type, title, url, p_time))
             self.conn.commit()
             return True
@@ -97,7 +116,7 @@ class Database:
             self.cursor.execute('''
                 SELECT * FROM okx_announcements 
                 ORDER BY created_at DESC 
-                LIMIT ?
+                LIMIT %s
             ''', (limit,))
             return self.cursor.fetchall()
         except Exception as e:
@@ -109,7 +128,7 @@ class Database:
         try:
             self.cursor.execute('''
                 INSERT INTO monitoring_logs (event_type, message)
-                VALUES (?, ?)
+                VALUES (%s, %s)
             ''', (event_type, message))
             self.conn.commit()
             return True

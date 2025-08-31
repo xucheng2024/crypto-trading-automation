@@ -107,27 +107,29 @@ class OKXFilledOrdersFetcher:
             raise
 
     def init_database(self):
-        """Initialize SQLite database and create tables if they don't exist"""
+        """Initialize PostgreSQL database and create tables if they don't exist"""
         try:
-            self.db_path = 'filled_orders.db'
-            self.conn = sqlite3.connect(self.db_path)
+            # 使用统一的数据库连接
+            from lib.database import get_database_connection
+            
+            self.conn = get_database_connection()
             self.cursor = self.conn.cursor()
             
-            # Create filled orders table
+            # PostgreSQL 语法
             self.cursor.execute('''
                 CREATE TABLE IF NOT EXISTS filled_orders (
-                    instId TEXT NOT NULL,
-                    ordId TEXT PRIMARY KEY UNIQUE,
+                    instId VARCHAR(255) NOT NULL,
+                    ordId VARCHAR(255) PRIMARY KEY,
                     fillPx TEXT NOT NULL,
                     fillSz TEXT NOT NULL,
-                    side TEXT NOT NULL,
+                    side VARCHAR(50) NOT NULL,
                     ts TEXT NOT NULL,
-                    ordType TEXT,
+                    ordType VARCHAR(50),
                     avgPx TEXT,
                     accFillSz TEXT,
                     fee TEXT,
-                    feeCcy TEXT,
-                    tradeId TEXT,
+                    feeCcy VARCHAR(50),
+                    tradeId VARCHAR(255),
                     fillTime TEXT,
                     cTime TEXT,
                     uTime TEXT,
@@ -136,13 +138,7 @@ class OKXFilledOrdersFetcher:
                 )
             ''')
             
-            # Add sell_time column if it doesn't exist (for existing databases)
-            try:
-                self.cursor.execute('ALTER TABLE filled_orders ADD COLUMN sell_time TEXT')
-                logger.info("✅ Added sell_time column to existing table")
-            except sqlite3.OperationalError:
-                # Column already exists
-                pass
+            logger.info("✅ Connected to PostgreSQL database")
             
             # Create index for better query performance
             self.cursor.execute('''
@@ -156,7 +152,6 @@ class OKXFilledOrdersFetcher:
             ''')
             
             self.conn.commit()
-            logger.info(f"🗄️  Database: {self.db_path}")
             
             # Update existing orders with sell_time if missing
             self.update_existing_orders_sell_time()
