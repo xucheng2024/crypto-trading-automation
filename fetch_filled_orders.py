@@ -10,11 +10,31 @@ import time
 import json
 import logging
 import logging.handlers
+import traceback
 from datetime import datetime, timedelta
 from decimal import Decimal
 # import sqlite3  # Migrated to PostgreSQL
 import psycopg2
 from psycopg2.extras import RealDictCursor
+
+# Import tenacity for retry functionality
+try:
+    from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+except ImportError:
+    # Fallback if tenacity is not available
+    def retry(*args, **kwargs):
+        def decorator(func):
+            return func
+        return decorator
+    
+    def stop_after_attempt(*args, **kwargs):
+        pass
+    
+    def wait_exponential(*args, **kwargs):
+        pass
+    
+    def retry_if_exception_type(*args, **kwargs):
+        pass
 
 # Load environment variables first
 try:
