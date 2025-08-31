@@ -74,7 +74,7 @@ jobs:
           python cancel_pending_limits.py --side buy || echo "⚠️ cancel_pending_limits.py completed with warnings"
           
       - name: Run cancel pending triggers (nightly)
-        if: github.event.schedule == '55 23 * * *'
+        if: (github.event_name == 'schedule' && github.event.schedule == '55 23 * * *') || github.event_name == 'workflow_dispatch'
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           OKX_API_KEY: ${{ secrets.OKX_API_KEY }}
@@ -85,7 +85,7 @@ jobs:
           python cancel_pending_triggers.py || echo "⚠️ cancel_pending_triggers.py completed with warnings"
           
       - name: Run create algo triggers (nightly)
-        if: github.event.schedule == '5 0 * * *'
+        if: (github.event_name == 'schedule' && github.event.schedule == '5 0 * * *') || github.event_name == 'workflow_dispatch'
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           OKX_API_KEY: ${{ secrets.OKX_API_KEY }}
