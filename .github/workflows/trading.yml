@@ -5,9 +5,9 @@ on:
     # Every 5 minutes - Monitoring and auto sell orders (avoiding peak hours)
     - cron: '2,7,12,17,22,27,32,37,42,47,52,57 * * * *'
     # Daily at 23:55 - Cancel pending trigger orders
-    - cron: '55 23 * * *'
+    - cron: '54 23 * * *'
     # Daily at 00:05 - Create new algo triggers
-    - cron: '5 0 * * *'
+    - cron: '6 0 * * *'
 
   # 手动触发
   workflow_dispatch:
