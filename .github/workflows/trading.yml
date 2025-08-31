@@ -24,6 +24,13 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
         
+      - name: Log execution time
+        run: |
+          echo "🕐 Workflow started at: $(date -u)"
+          echo "🕐 UTC time: $(date -u +%Y-%m-%d\ %H:%M:%S\ UTC)"
+          echo "🕐 Cron schedule: ${{ github.event.schedule || 'manual' }}"
+          echo "🕐 Event type: ${{ github.event_name }}"
+        
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
@@ -32,10 +39,13 @@ jobs:
       - name: Cache uv
         uses: actions/cache@v4
         with:
-          path: ~/.cache/uv
+          path: |
+            ~/.cache/uv
+            ~/.local/bin/uv
           key: uv-${{ runner.os }}-py311-${{ hashFiles('requirements.txt') }}
           restore-keys: |
             uv-${{ runner.os }}-py311-
+            uv-${{ runner.os }}-
 
       - name: Install uv
         run: curl -LsSf https://astral.sh/uv/install.sh | sh
@@ -63,12 +73,6 @@ jobs:
           OKX_SECRET_KEY: ${{ secrets.OKX_SECRET_KEY }}
           OKX_PASSPHRASE: ${{ secrets.OKX_PASSPHRASE }}
         run: |
-          MIN=$(date -u +%M)
-          echo "UTC minute=${MIN}"
-          if [ "${{ github.event_name }}" = "schedule" ] && [ $((10#$MIN % 15)) -ne 0 ]; then
-            echo "⏭️ Skipping auto_sell_orders on non-quarter-hour tick"
-            exit 0
-          fi
           echo "🔄 Running auto_sell_orders.py..."
           python auto_sell_orders.py || echo "⚠️ auto_sell_orders.py completed with warnings"
           
@@ -80,12 +84,6 @@ jobs:
           OKX_SECRET_KEY: ${{ secrets.OKX_SECRET_KEY }}
           OKX_PASSPHRASE: ${{ secrets.OKX_PASSPHRASE }}
         run: |
-          MIN=$(date -u +%M)
-          echo "UTC minute=${MIN}"
-          if [ "${{ github.event_name }}" = "schedule" ] && [ $((10#$MIN % 15)) -ne 0 ]; then
-            echo "⏭️ Skipping fetch_filled_orders on non-quarter-hour tick"
-            exit 0
-          fi
           echo "🔄 Running fetch_filled_orders.py..."
           python fetch_filled_orders.py || echo "⚠️ fetch_filled_orders.py completed with warnings"
           
