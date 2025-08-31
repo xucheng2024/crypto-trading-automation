@@ -1,6 +1,6 @@
 # Crypto Trading Automation System
 
-A comprehensive automated crypto trading system with OKX exchange integration, featuring modular architecture, algorithmic trading strategies, intelligent delisting protection, automated order management, and high-precision trading algorithms. **Now deployed on GitHub Actions with PostgreSQL database.**
+A comprehensive automated crypto trading system with OKX exchange integration, featuring modular architecture, algorithmic trading strategies, intelligent delisting protection, automated order management, and high-precision trading algorithms. **Now deployed on Cloudflare Workers + GitHub Actions with PostgreSQL database.**
 
 ## 🚀 Quick Start
 
@@ -20,7 +20,8 @@ python monitor_delist.py
 ## 🏗️ Modern Cloud Architecture
 
 ### Cloud Deployment ⭐
-- **GitHub Actions** - Automated script execution with scheduled workflows
+- **Cloudflare Workers Cron** - Precise minute-level scheduling with 99.9% uptime
+- **GitHub Actions** - Automated script execution triggered by Cloudflare Workers
 - **PostgreSQL Database** - Cloud-hosted database (Neon) for scalability
 - **Environment Secrets** - Secure credential management via GitHub Secrets
 - **Automated Logging** - Centralized log collection and retention
@@ -61,18 +62,19 @@ python monitor_delist.py
 - **🔧 Universal OKX Client** - Single OKX API client shared across all scripts, eliminating code duplication
 - **📊 Better Maintainability** - 59% code reduction in main script, improved testability and debugging
 - **☁️ Cloud Migration** - Migrated from local SQLite to PostgreSQL with GitHub Actions automation
- - **📦 SDK Update** - Switched to `python-okx==0.4.0` with new submodule imports (`okx.Trade`, `okx.Funding`, etc.)
- - **🗄️ DB Migration Guard** - Auto-create `sold_status` column in `filled_orders` on startup (PostgreSQL)
- - **🧪 CI Compatibility** - `cancel_pending_triggers.py` runs without `.env` in Actions (uses Secrets)
- - **🕛 Workflow Control** - Nightly cancel/create steps also runnable via manual workflow dispatch
+- **⏰ Precise Scheduling** - Replaced GitHub Actions cron with Cloudflare Workers for minute-level accuracy
+- **📦 SDK Update** - Switched to `python-okx==0.4.0` with new submodule imports (`okx.Trade`, `okx.Funding`, etc.)
+- **🗄️ DB Migration Guard** - Auto-create `sold_status` column in `filled_orders` on startup (PostgreSQL)
+- **🧪 CI Compatibility** - `cancel_pending_triggers.py` runs without `.env` in Actions (uses Secrets)
+- **🕛 Workflow Control** - Nightly cancel/create steps also runnable via manual workflow dispatch
 
-### GitHub Actions Schedule
+### Cloudflare Workers Cron Schedule ⭐
 ```yaml
-# Every 5 minutes - Monitoring and auto sell orders
-- cron: '*/5 * * * *'
+# Every 5 minutes (staggered) - Monitoring and protection
+- cron: '2,7,12,17,22,27,32,37,42,47,52,57 * * * *'
 
-# Every 15 minutes - Fetch filled orders
-- cron: '*/15 * * * *'
+# Every 15 minutes - Fetch filled orders + Auto sell orders
+- cron: '0,15,30,45 * * * *'
 
 # Daily at 23:55 - Cancel pending trigger orders
 - cron: '55 23 * * *'
@@ -80,6 +82,11 @@ python monitor_delist.py
 # Daily at 00:05 - Create new algo triggers
 - cron: '5 0 * * *'
 ```
+
+### Execution Strategy
+- **5-Minute Tasks**: `monitor_delist.py` + `cancel_pending_limits.py`
+- **15-Minute Tasks**: `fetch_filled_orders.py` + `auto_sell_orders.py`
+- **Daily Tasks**: `cancel_pending_triggers.py` (23:55) + `create_algo_triggers.py` (00:05)
 
 ### Automation Scripts
 
@@ -247,9 +254,15 @@ OKX_TESTNET=false
 #    - OKX_SECRET_KEY: Your OKX secret key
 #    - OKX_PASSPHRASE: Your OKX passphrase
 
-# 3. Enable GitHub Actions in your repository
-# 4. The system will automatically run on schedule
-# 5. You can manually trigger nightly steps (cancel/create) via "Run workflow"
+# 3. Deploy Cloudflare Worker:
+#    - Install Wrangler CLI: npm install -g wrangler
+#    - Login: wrangler login
+#    - Deploy: wrangler deploy
+#    - Set GITHUB_TOKEN in Cloudflare Dashboard
+
+# 4. Enable GitHub Actions in your repository
+# 5. The system will automatically run on precise schedule via Cloudflare Workers
+# 6. You can manually trigger nightly steps (cancel/create) via "Run workflow"
 ```
 
 ### Local Development
@@ -301,7 +314,7 @@ python lib/database.py
 crypto_remote/
 ├── .github/                 # GitHub Actions workflows
 │   └── workflows/
-│       └── trading.yml      # Automated trading workflow
+│       └── trading.yml      # Automated trading workflow (triggered by Cloudflare Workers)
 ├── lib/                     # Utility libraries
 │   └── database.py         # PostgreSQL database integration
 ├── backups/                # Automatic configuration backups
@@ -311,6 +324,8 @@ crypto_remote/
 ├── requirements.txt         # Python dependencies
 ├── limits.json             # Trading limits for 29 crypto pairs
 ├── .env                    # Environment variables (local)
+├── wrangler.toml           # Cloudflare Worker configuration
+├── cloudflare-worker.js    # Cloudflare Worker cron scheduler
 │
 ├── # Core Trading System
 ├── monitor_delist.py       # Main delisting protection (277 lines) ⭐
@@ -329,6 +344,7 @@ crypto_remote/
 ├── # Documentation
 ├── ALGO_TRIGGER_README.md  # Detailed algo trigger documentation
 ├── MONITOR_README.md       # Detailed monitoring documentation
+├── CLOUDFLARE_SETUP.md     # Cloudflare Worker deployment guide
 └── SETUP.md                # Setup and configuration guide
 ```
 
@@ -343,6 +359,7 @@ crypto_remote/
 - **Configuration Management**: Automatic backup and cleanup functionality
 - **Error Resolution**: All previous API issues resolved with enhanced error handling
 - **Cloud Migration**: Successfully migrated to PostgreSQL and GitHub Actions
+- **Precise Scheduling**: Cloudflare Workers provide minute-level accuracy (99.9% uptime)
 
 ### Architecture Benefits
 - **Maintainability**: Clean separation of concerns across 5 specialized modules
@@ -352,6 +369,7 @@ crypto_remote/
 - **Reliability**: Robust error handling and logging throughout all modules
 - **Performance**: Optimized API calls and efficient resource management
 - **Scalability**: Cloud-based deployment with PostgreSQL database
+- **Scheduling Precision**: Cloudflare Workers eliminate GitHub Actions cron inconsistencies
 
 ### Supported Crypto Pairs
 All 29 pairs in `limits.json` are fully supported:
@@ -411,4 +429,4 @@ if affected:
 This project is for educational and personal use. Please ensure compliance with OKX API terms and local trading regulations.
 
 ---
-**System Architecture**: Modular + Cloud • **Total Lines**: 1,120+ (5 modules) • **Main Script**: 277 lines • **Code Reduction**: 59% • **API Unification**: 6 scripts share 1 OKX client • **Database**: PostgreSQL (Neon) • **Deployment**: GitHub Actions • **Last Updated**: 2025-01-31
+**System Architecture**: Modular + Cloud • **Total Lines**: 1,120+ (5 modules) • **Main Script**: 277 lines • **Code Reduction**: 59% • **API Unification**: 6 scripts share 1 OKX client • **Database**: PostgreSQL (Neon) • **Deployment**: Cloudflare Workers + GitHub Actions • **Scheduling**: Precise minute-level cron via Cloudflare Workers • **Last Updated**: 2025-01-31

@@ -87,7 +87,10 @@ class AutoSellOrders:
         self.trade_api = self.okx_client.get_trade_api()
         
         # Initialize database
-        self.connect_database()
+        from lib.database import get_database_connection
+        self.conn = get_database_connection()
+        self.cursor = self.conn.cursor()
+        self.logger.info("✅ Connected to PostgreSQL database")
         
         self.logger.info(f"🚀 Auto Sell Orders - {'Demo' if self.testnet else 'Live'} mode | Min USD: ${self.min_usd_value}")
 
@@ -100,24 +103,7 @@ class AutoSellOrders:
         except:
             return price_str
 
-    def connect_database(self):
-        """Connect to PostgreSQL database (assumes tables already exist)"""
-        try:
-            # Use unified database connection
-            from lib.database import get_database_connection
-            
-            self.conn = get_database_connection()
-            self.cursor = self.conn.cursor()
-            
-            # Simple connection test
-            self.cursor.execute("SELECT 1")
-            self.cursor.fetchone()
-            
-            self.logger.info("✅ Connected to PostgreSQL database")
-            
-        except Exception as e:
-            self.logger.error(f"❌ Failed to connect to database: {e}")
-            raise
+
 
     def load_auto_sell_config(self):
         """Load auto-sell configuration from limits.json"""

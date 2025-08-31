@@ -117,7 +117,10 @@ class OKXFilledOrdersFetcher:
             self.trade_api = self.okx_client.get_trade_api()
             
             # Initialize database
-            self.connect_database()
+            from lib.database import get_database_connection
+            self.conn = get_database_connection()
+            self.cursor = self.conn.cursor()
+            logger.info("✅ Connected to PostgreSQL database")
             
             logger.info(f"🚀 OKX Filled Orders Fetcher - {'Demo' if self.testnet else 'Live'}")
             logger.info(f"🔑 API: {self.api_key[:8]}...{self.api_key[-4:] if len(self.api_key) > 12 else '***'}")
@@ -127,25 +130,7 @@ class OKXFilledOrdersFetcher:
             logger.debug(f"Traceback: {traceback.format_exc()}")
             raise
 
-    def connect_database(self):
-        """Connect to PostgreSQL database (assumes tables already exist)"""
-        try:
-            # Use unified database connection
-            from lib.database import get_database_connection
-            
-            self.conn = get_database_connection()
-            self.cursor = self.conn.cursor()
-            
-            # Simple connection test
-            self.cursor.execute("SELECT 1")
-            self.cursor.fetchone()
-            
-            logger.info("✅ Connected to PostgreSQL database")
-            
-        except Exception as e:
-            logger.error(f"❌ Failed to connect to database: {e}")
-            logger.debug(f"Traceback: {traceback.format_exc()}")
-            raise
+
 
     def get_latest_order_ts(self):
         """Get latest saved order timestamp (ms) from DB, or None"""
