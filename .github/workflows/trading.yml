@@ -3,6 +3,11 @@ name: Crypto Trading Automation
 on:
   # 手动触发
   workflow_dispatch:
+    inputs:
+      scripts:
+        description: 'Comma-separated scripts to run (e.g., cancel_pending_triggers,create_algo_triggers)'
+        required: false
+        default: 'monitor_delist,cancel_pending_limits,fetch_filled_orders,auto_sell_orders'
 
   # Cloudflare Worker 触发
   repository_dispatch:
@@ -73,7 +78,7 @@ jobs:
           echo "✅ Virtual environment activated"
           
       - name: Run monitoring and protection
-        if: github.event_name == 'workflow_dispatch' || (github.event_name == 'repository_dispatch' && github.event.action == 'cron' && contains(toJSON(github.event.client_payload.scripts), 'monitor_delist'))
+        if: (github.event_name == 'workflow_dispatch' && contains(github.event.inputs.scripts, 'monitor_delist')) || (github.event_name == 'repository_dispatch' && github.event.action == 'cron' && contains(toJSON(github.event.client_payload.scripts), 'monitor_delist'))
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           OKX_API_KEY: ${{ secrets.OKX_API_KEY }}
@@ -84,7 +89,7 @@ jobs:
           source .venv/bin/activate && python monitor_delist.py || echo "⚠️ monitor_delist.py completed with warnings"
           
       - name: Run auto sell orders
-        if: github.event_name == 'workflow_dispatch' || (github.event_name == 'repository_dispatch' && github.event.action == 'cron' && contains(github.event.client_payload.scripts, 'auto_sell_orders'))
+        if: (github.event_name == 'workflow_dispatch' && contains(github.event.inputs.scripts, 'auto_sell_orders')) || (github.event_name == 'repository_dispatch' && github.event.action == 'cron' && contains(github.event.client_payload.scripts, 'auto_sell_orders'))
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           OKX_API_KEY: ${{ secrets.OKX_API_KEY }}
@@ -95,7 +100,7 @@ jobs:
           source .venv/bin/activate && python auto_sell_orders.py || echo "⚠️ auto_sell_orders.py completed with warnings"
           
       - name: Run fetch filled orders
-        if: github.event_name == 'workflow_dispatch' || (github.event_name == 'repository_dispatch' && github.event.action == 'cron' && contains(github.event.client_payload.scripts, 'fetch_filled_orders'))
+        if: (github.event_name == 'workflow_dispatch' && contains(github.event.inputs.scripts, 'fetch_filled_orders')) || (github.event_name == 'repository_dispatch' && github.event.action == 'cron' && contains(github.event.client_payload.scripts, 'fetch_filled_orders'))
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           OKX_API_KEY: ${{ secrets.OKX_API_KEY }}
@@ -106,7 +111,7 @@ jobs:
           source .venv/bin/activate && python fetch_filled_orders.py || echo "⚠️ fetch_filled_orders.py completed with warnings"
           
       - name: Run cancel pending limits
-        if: github.event_name == 'workflow_dispatch' || (github.event_name == 'repository_dispatch' && github.event.action == 'cron' && contains(toJSON(github.event.client_payload.scripts), 'cancel_pending_limits'))
+        if: (github.event_name == 'workflow_dispatch' && contains(github.event.inputs.scripts, 'cancel_pending_limits')) || (github.event_name == 'repository_dispatch' && github.event.action == 'cron' && contains(toJSON(github.event.client_payload.scripts), 'cancel_pending_limits'))
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           OKX_API_KEY: ${{ secrets.OKX_API_KEY }}
@@ -117,7 +122,7 @@ jobs:
           source .venv/bin/activate && python cancel_pending_limits.py --side buy || echo "⚠️ cancel_pending_limits.py completed with warnings"
           
       - name: Run cancel pending triggers (nightly)
-        if: (github.event_name == 'repository_dispatch' && github.event.action == 'cron' && contains(github.event.client_payload.scripts, 'cancel_pending_triggers'))
+        if: (github.event_name == 'workflow_dispatch' && contains(github.event.inputs.scripts, 'cancel_pending_triggers')) || (github.event_name == 'repository_dispatch' && github.event.action == 'cron' && contains(github.event.client_payload.scripts, 'cancel_pending_triggers'))
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           OKX_API_KEY: ${{ secrets.OKX_API_KEY }}
@@ -128,7 +133,7 @@ jobs:
           source .venv/bin/activate && python cancel_pending_triggers.py || echo "⚠️ cancel_pending_triggers.py completed with warnings"
           
       - name: Run create algo triggers (nightly)
-        if: (github.event_name == 'repository_dispatch' && github.event.action == 'cron' && contains(github.event.client_payload.scripts, 'create_algo_triggers'))
+        if: (github.event_name == 'workflow_dispatch' && contains(github.event.inputs.scripts, 'create_algo_triggers')) || (github.event_name == 'repository_dispatch' && github.event.action == 'cron' && contains(github.event.client_payload.scripts, 'create_algo_triggers'))
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           OKX_API_KEY: ${{ secrets.OKX_API_KEY }}
