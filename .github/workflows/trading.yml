@@ -4,8 +4,6 @@ on:
   schedule:
     # Every 5 minutes - Monitoring and auto sell orders
     - cron: '*/5 * * * *'
-    # Every 15 minutes - Fetch filled orders  
-    - cron: '*/15 * * * *'
     # Daily at 23:55 - Cancel pending trigger orders
     - cron: '55 23 * * *'
     # Daily at 00:05 - Create new algo triggers
@@ -42,13 +40,14 @@ jobs:
             uv-${{ runner.os }}-py311-
 
       - name: Install uv
-        run: curl -LsSf https://astral.sh/uv/install.sh | sh -s -- --yes
+        run: curl -LsSf https://astral.sh/uv/install.sh | sh
 
       - name: Install dependencies
         run: |
           ~/.local/bin/uv pip install --system -r requirements.txt
           
       - name: Run monitoring and protection
+        if: (github.event_name == 'schedule' && github.event.schedule == '*/5 * * * *') || github.event_name == 'workflow_dispatch' || (github.event_name == 'repository_dispatch' && github.event.action == 'cron')
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           OKX_API_KEY: ${{ secrets.OKX_API_KEY }}
@@ -59,28 +58,41 @@ jobs:
           python monitor_delist.py || echo "⚠️ monitor_delist.py completed with warnings"
           
       - name: Run auto sell orders
-        if: (github.event_name == 'schedule' && github.event.schedule == '*/15 * * * *') || github.event_name == 'workflow_dispatch' || (github.event_name == 'repository_dispatch' && github.event.action == 'cron')
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'repository_dispatch' && github.event.action == 'cron')
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           OKX_API_KEY: ${{ secrets.OKX_API_KEY }}
           OKX_SECRET_KEY: ${{ secrets.OKX_SECRET_KEY }}
           OKX_PASSPHRASE: ${{ secrets.OKX_PASSPHRASE }}
         run: |
+          MIN=$(date -u +%M)
+          echo "UTC minute=${MIN}"
+          if [ "${{ github.event_name }}" = "schedule" ] && [ $((10#$MIN % 15)) -ne 0 ]; then
+            echo "⏭️ Skipping auto_sell_orders on non-quarter-hour tick"
+            exit 0
+          fi
           echo "🔄 Running auto_sell_orders.py..."
           python auto_sell_orders.py || echo "⚠️ auto_sell_orders.py completed with warnings"
           
       - name: Run fetch filled orders
-        if: (github.event_name == 'schedule' && github.event.schedule == '*/15 * * * *') || github.event_name == 'workflow_dispatch' || (github.event_name == 'repository_dispatch' && github.event.action == 'cron')
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'repository_dispatch' && github.event.action == 'cron')
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           OKX_API_KEY: ${{ secrets.OKX_API_KEY }}
           OKX_SECRET_KEY: ${{ secrets.OKX_SECRET_KEY }}
           OKX_PASSPHRASE: ${{ secrets.OKX_PASSPHRASE }}
         run: |
+          MIN=$(date -u +%M)
+          echo "UTC minute=${MIN}"
+          if [ "${{ github.event_name }}" = "schedule" ] && [ $((10#$MIN % 15)) -ne 0 ]; then
+            echo "⏭️ Skipping fetch_filled_orders on non-quarter-hour tick"
+            exit 0
+          fi
           echo "🔄 Running fetch_filled_orders.py..."
           python fetch_filled_orders.py || echo "⚠️ fetch_filled_orders.py completed with warnings"
           
       - name: Run cancel pending limits
+        if: (github.event_name == 'schedule' && github.event.schedule == '*/5 * * * *') || github.event_name == 'workflow_dispatch' || (github.event_name == 'repository_dispatch' && github.event.action == 'cron')
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           OKX_API_KEY: ${{ secrets.OKX_API_KEY }}
