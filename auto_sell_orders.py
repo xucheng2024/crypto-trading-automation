@@ -132,7 +132,17 @@ class AutoSellOrders:
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
-            
+
+            # 确保 sold_status 列存在（兼容旧数据库）；出错时回滚再尝试ALTER
+            try:
+                self.cursor.execute("SELECT sold_status FROM filled_orders LIMIT 1")
+            except Exception:
+                try:
+                    self.conn.rollback()
+                except Exception:
+                    pass
+                self.cursor.execute("ALTER TABLE filled_orders ADD COLUMN sold_status TEXT DEFAULT NULL")
+
             self.conn.commit()
             self.logger.info("✅ Connected to PostgreSQL database")
             

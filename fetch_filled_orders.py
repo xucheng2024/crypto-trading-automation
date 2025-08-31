@@ -139,10 +139,14 @@ class OKXFilledOrdersFetcher:
                 )
             ''')
 
-            # Ensure sold_status column exists for older DBs
+            # Ensure sold_status column exists for older DBs (safe with rollback)
             try:
                 self.cursor.execute("SELECT sold_status FROM filled_orders LIMIT 1")
             except Exception:
+                try:
+                    self.conn.rollback()
+                except Exception:
+                    pass
                 self.cursor.execute("ALTER TABLE filled_orders ADD COLUMN sold_status TEXT DEFAULT NULL")
             
             logger.info("✅ Connected to PostgreSQL database")
