@@ -11,28 +11,41 @@ const GITHUB_TOKEN = 'YOUR_GITHUB_TOKEN'; // 需要设置环境变量
 export default {
   async scheduled(event, env, ctx) {
     const cron = event.cron;
-    console.log(`🕐 Cron triggered: ${cron}`);
+    const scheduledTime = event.scheduledTime || new Date();
+    console.log(`🕐 Cron triggered: ${cron} at ${scheduledTime}`);
     
     try {
       // 根据cron频率决定触发哪些脚本
       let scripts = [];
       
-      if (cron === '*/7 * * * *') {
-        // 每7分钟执行: monitor_delist + cancel_pending_limits
+      // 检查当前时间，用于确定具体触发哪些脚本
+      const now = new Date(scheduledTime);
+      const minute = now.getUTCMinutes();
+      const hour = now.getUTCHours();
+      
+      // 判断是否是7分钟间隔的触发 (0, 7, 14, 21, 28, 35, 42, 49, 56)
+      if (minute % 7 === 0) {
         scripts = ['monitor_delist', 'cancel_pending_limits'];
         console.log('📅 7-minute interval: monitor_delist + cancel_pending_limits');
-      } else if (cron === '0,15,30,45 * * * *') {
-        // 每15分钟执行: fetch_filled_orders + auto_sell_orders (整点)
+      }
+      // 判断是否是15分钟间隔的触发 (0, 15, 30, 45)
+      else if (minute % 15 === 0) {
         scripts = ['fetch_filled_orders', 'auto_sell_orders'];
         console.log('📅 15-minute interval: fetch_filled_orders + auto_sell_orders');
-      } else if (cron === '55 23 * * *') {
-        // 每天23:55: 取消待处理触发器
+      }
+      // 每天23:55: 取消待处理触发器
+      else if (hour === 23 && minute === 55) {
         scripts = ['cancel_pending_triggers'];
         console.log('🌙 Nightly: cancel_pending_triggers');
-      } else if (cron === '5 0 * * *') {
-        // 每天00:05: 创建算法触发器
+      }
+      // 每天00:05: 创建算法触发器
+      else if (hour === 0 && minute === 5) {
         scripts = ['create_algo_triggers'];
         console.log('🌅 Morning: create_algo_triggers');
+      }
+      else {
+        console.log(`⚠️ No scripts matched for cron: ${cron}, time: ${hour}:${minute}`);
+        return new Response('No scripts to run', { status: 200 });
       }
       
       // 触发 GitHub repository_dispatch
@@ -50,7 +63,7 @@ export default {
             source: 'cloudflare-worker',
             cron_schedule: cron,
             scripts: scripts,
-            interval: cron === '*/7 * * * *' ? '7min' : cron === '0,15,30,45 * * * *' ? '15min' : (cron === '55 23 * * *' || cron === '5 0 * * *' ? 'daily' : 'other')
+            interval: (minute % 7 === 0 && minute % 15 !== 0) ? '7min' : (minute % 15 === 0) ? '15min' : ((hour === 23 && minute === 55) || (hour === 0 && minute === 5)) ? 'daily' : 'other'
           }
         })
       });
@@ -84,10 +97,10 @@ export default {
       <hr>
       <h2>📅 Cron Schedule:</h2>
       <ul>
-        <li><strong>每7分钟</strong>: monitor_delist.py + cancel_pending_limits.py</li>
-        <li><strong>每15分钟</strong>: fetch_filled_orders.py + auto_sell_orders.py</li>
-        <li><strong>每天23:55</strong>: cancel_pending_triggers.py</li>
-        <li><strong>每天00:05</strong>: create_algo_triggers.py</li>
+        <li><strong>每7分钟 (*/7 * * * *)</strong>: monitor_delist.py + cancel_pending_limits.py</li>
+        <li><strong>每15分钟 (0,15,30,45 * * * *)</strong>: fetch_filled_orders.py + auto_sell_orders.py</li>
+        <li><strong>每天23:55 (55 23 * * *)</strong>: cancel_pending_triggers.py</li>
+        <li><strong>每天00:05 (5 0 * * *)</strong>: create_algo_triggers.py</li>
       </ul>
       <hr>
       <h2>🔧 执行逻辑:</h2>
