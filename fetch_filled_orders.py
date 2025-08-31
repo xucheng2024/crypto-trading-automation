@@ -134,9 +134,16 @@ class OKXFilledOrdersFetcher:
                     cTime TEXT,
                     uTime TEXT,
                     sell_time TEXT,
+                    sold_status TEXT DEFAULT NULL,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
+
+            # Ensure sold_status column exists for older DBs
+            try:
+                self.cursor.execute("SELECT sold_status FROM filled_orders LIMIT 1")
+            except Exception:
+                self.cursor.execute("ALTER TABLE filled_orders ADD COLUMN sold_status TEXT DEFAULT NULL")
             
             logger.info("✅ Connected to PostgreSQL database")
             
@@ -164,7 +171,7 @@ class OKXFilledOrdersFetcher:
     def get_latest_order_ts(self):
         """Get latest saved order timestamp (ms) from DB, or None"""
         try:
-            self.cursor.execute("SELECT MAX(CAST(ts AS INTEGER)) FROM filled_orders")
+            self.cursor.execute("SELECT MAX(CAST(ts AS BIGINT)) FROM filled_orders")
             row = self.cursor.fetchone()
             if row and row[0]:
                 return int(row[0])
@@ -194,7 +201,7 @@ class OKXFilledOrdersFetcher:
                     sell_time = str(int(sell_time_datetime.timestamp() * 1000))
                     
                     # Update the order
-                    self.cursor.execute("UPDATE filled_orders SET sell_time = ? WHERE ordId = ?", (sell_time, ord_id))
+                    self.cursor.execute("UPDATE filled_orders SET sell_time = %s WHERE ordId = %s", (sell_time, ord_id))
                     updated_count += 1
                     
                 except (ValueError, TypeError) as e:
@@ -320,9 +327,10 @@ class OKXFilledOrdersFetcher:
             
             # Insert new order; ignore if ordId already exists to preserve sold_status
             self.cursor.execute('''
-                INSERT OR IGNORE INTO filled_orders 
+                INSERT INTO filled_orders 
                 (instId, ordId, fillPx, fillSz, side, ts, ordType, avgPx, accFillSz, fee, feeCcy, tradeId, fillTime, cTime, uTime, sell_time)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (ordId) DO NOTHING
             ''', (
                 data['instId'], data['ordId'], data['fillPx'], data['fillSz'], data['side'], data['ts'],
                 data['ordType'], data['avgPx'], data['accFillSz'], data['fee'], data['feeCcy'],

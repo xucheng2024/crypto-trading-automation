@@ -163,10 +163,10 @@ class AutoSellOrders:
             SELECT instId, ordId, fillSz, side, ts, sell_time, fillPx
             FROM filled_orders 
             WHERE sell_time IS NOT NULL 
-            AND sold_status IS NULL
-            AND CAST(sell_time AS INTEGER) <= ? 
-            AND side = 'buy'
-            ORDER BY CAST(sell_time AS INTEGER) ASC
+              AND sold_status IS NULL
+              AND CAST(sell_time AS BIGINT) <= %s 
+              AND side = 'buy'
+            ORDER BY CAST(sell_time AS BIGINT) ASC
         ''', (current_time,))
         
         orders = self.cursor.fetchall()
@@ -187,7 +187,7 @@ class AutoSellOrders:
             self.cursor.execute('''
                 UPDATE filled_orders 
                 SET sold_status = 'PROCESSING'
-                WHERE ordId = ? AND sold_status IS NULL
+                WHERE ordId = %s AND sold_status IS NULL
             ''', (order_id,))
             self.conn.commit()
             if self.cursor.rowcount == 1:
@@ -206,7 +206,7 @@ class AutoSellOrders:
             self.cursor.execute('''
                 UPDATE filled_orders 
                 SET sold_status = NULL
-                WHERE ordId = ? AND sold_status = 'PROCESSING'
+                WHERE ordId = %s AND sold_status = 'PROCESSING'
             ''', (order_id,))
             self.conn.commit()
             self.logger.info(f"🔓 Cleared processing lock: {order_id}")
@@ -332,7 +332,7 @@ class AutoSellOrders:
             self.cursor.execute('''
                 UPDATE filled_orders 
                 SET sold_status = 'SOLD'
-                WHERE ordId = ?
+                WHERE ordId = %s
             ''', (order_id,))
             
             self.conn.commit()
