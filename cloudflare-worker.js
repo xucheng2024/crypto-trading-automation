@@ -17,12 +17,12 @@ export default {
       // 根据cron频率决定触发哪些脚本
       let scripts = [];
       
-      if (cron.includes('*/5')) {
-        // 每5分钟执行: monitor_delist + cancel_pending_limits
+      if (cron.includes('2,7,12,17,22,27,32,37,42,47,52,57')) {
+        // 每5分钟执行: monitor_delist + cancel_pending_limits (避开整点)
         scripts = ['monitor_delist', 'cancel_pending_limits'];
         console.log('📅 5-minute interval: monitor_delist + cancel_pending_limits');
-      } else if (cron.includes('*/15')) {
-        // 每15分钟执行: fetch_filled_orders + auto_sell_orders
+      } else if (cron.includes('0,15,30,45')) {
+        // 每15分钟执行: fetch_filled_orders + auto_sell_orders (整点)
         scripts = ['fetch_filled_orders', 'auto_sell_orders'];
         console.log('📅 15-minute interval: fetch_filled_orders + auto_sell_orders');
       } else if (cron.includes('55 23')) {
