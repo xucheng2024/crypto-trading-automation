@@ -28,6 +28,7 @@ jobs:
           echo "🕐 Cron schedule: ${{ github.event.schedule || 'manual' }}"
           echo "🕐 Event type: ${{ github.event_name }}"
           echo "🧰 Scripts payload: ${{ toJSON(github.event.client_payload.scripts) }}"
+          echo "🧰 Manual input scripts: ${{ github.event.inputs.scripts }}"
         
       - name: Set up Python
         uses: actions/setup-python@v4
@@ -122,7 +123,17 @@ jobs:
           source .venv/bin/activate && python cancel_pending_limits.py --side buy || echo "⚠️ cancel_pending_limits.py completed with warnings"
           
       - name: Run cancel pending triggers (nightly)
-        if: (github.event_name == 'workflow_dispatch' && contains(github.event.inputs.scripts, 'cancel_pending_triggers')) || (github.event_name == 'repository_dispatch' && github.event.action == 'cron' && contains(toJSON(github.event.client_payload.scripts), 'cancel_pending_triggers'))
+        if: (
+              github.event_name == 'workflow_dispatch' && (
+                contains(github.event.inputs.scripts, 'cancel_pending_triggers') ||
+                contains(github.event.inputs.scripts, 'cancel_triggers') ||
+                contains(github.event.inputs.scripts, 'cancel_trigger') ||
+                contains(github.event.inputs.scripts, 'cancel') ||
+                contains(github.event.inputs.scripts, 'nightly')
+              )
+            ) || (
+              github.event_name == 'repository_dispatch' && github.event.action == 'cron' && contains(toJSON(github.event.client_payload.scripts), 'cancel_pending_triggers')
+            )
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           OKX_API_KEY: ${{ secrets.OKX_API_KEY }}
@@ -133,7 +144,17 @@ jobs:
           source .venv/bin/activate && python cancel_pending_triggers.py || echo "⚠️ cancel_pending_triggers.py completed with warnings"
           
       - name: Run create algo triggers (nightly)
-        if: (github.event_name == 'workflow_dispatch' && contains(github.event.inputs.scripts, 'create_algo_triggers')) || (github.event_name == 'repository_dispatch' && github.event.action == 'cron' && contains(toJSON(github.event.client_payload.scripts), 'create_algo_triggers'))
+        if: (
+              github.event_name == 'workflow_dispatch' && (
+                contains(github.event.inputs.scripts, 'create_algo_triggers') ||
+                contains(github.event.inputs.scripts, 'create_triggers') ||
+                contains(github.event.inputs.scripts, 'create_trigger') ||
+                contains(github.event.inputs.scripts, 'create') ||
+                contains(github.event.inputs.scripts, 'nightly')
+              )
+            ) || (
+              github.event_name == 'repository_dispatch' && github.event.action == 'cron' && contains(toJSON(github.event.client_payload.scripts), 'create_algo_triggers')
+            )
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           OKX_API_KEY: ${{ secrets.OKX_API_KEY }}
