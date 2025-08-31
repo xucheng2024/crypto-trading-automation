@@ -9,7 +9,7 @@ import os
 import sys
 import logging
 import logging.handlers
-import sqlite3
+# import sqlite3  # 已迁移到PostgreSQL
 import time
 from datetime import datetime, timedelta
 from decimal import Decimal, getcontext
@@ -101,22 +101,44 @@ class AutoSellOrders:
             return price_str
 
     def init_database(self):
-        """Initialize database connection and ensure required columns exist"""
-        self.db_path = 'filled_orders.db'
-        if not os.path.exists(self.db_path):
-            raise FileNotFoundError(f"Database not found: {self.db_path}")
-        
-        self.conn = sqlite3.connect(self.db_path)
-        self.cursor = self.conn.cursor()
-        
-        # Ensure sold_status column exists
+        """Initialize PostgreSQL database connection"""
         try:
-            self.cursor.execute("ALTER TABLE filled_orders ADD COLUMN sold_status TEXT DEFAULT NULL")
-            self.logger.info("✅ Added sold_status column to database")
-        except sqlite3.OperationalError:
-            pass  # Column already exists
-        
-        self.logger.info(f"🗄️  Database: {self.db_path}")
+            # 使用统一的数据库连接
+            from lib.database import get_database_connection
+            
+            self.conn = get_database_connection()
+            self.cursor = self.conn.cursor()
+            
+            # 确保filled_orders表存在
+            self.cursor.execute('''
+                CREATE TABLE IF NOT EXISTS filled_orders (
+                    instId VARCHAR(255) NOT NULL,
+                    ordId VARCHAR(255) PRIMARY KEY,
+                    fillPx TEXT NOT NULL,
+                    fillSz TEXT NOT NULL,
+                    side VARCHAR(50) NOT NULL,
+                    ts TEXT NOT NULL,
+                    ordType VARCHAR(50),
+                    avgPx TEXT,
+                    accFillSz TEXT,
+                    fee TEXT,
+                    feeCcy VARCHAR(50),
+                    tradeId VARCHAR(255),
+                    fillTime TEXT,
+                    cTime TEXT,
+                    uTime TEXT,
+                    sell_time TEXT,
+                    sold_status TEXT DEFAULT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            
+            self.conn.commit()
+            self.logger.info("✅ Connected to PostgreSQL database")
+            
+        except Exception as e:
+            self.logger.error(f"❌ Failed to initialize database: {e}")
+            raise
 
     def load_auto_sell_config(self):
         """Load auto-sell configuration from limits.json"""

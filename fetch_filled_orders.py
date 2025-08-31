@@ -9,7 +9,7 @@ import sys
 import logging
 import logging.handlers
 import traceback
-import sqlite3
+# import sqlite3  # 已迁移到PostgreSQL
 import time
 from datetime import datetime, timedelta
 from decimal import Decimal
@@ -344,7 +344,7 @@ class OKXFilledOrdersFetcher:
             
             return True
             
-        except sqlite3.IntegrityError as e:
+        except Exception as e:  # PostgreSQL兼容
             logger.warning(f"⚠️  Duplicate order ID {ord_id}: {e}")
             return False
         except Exception as e:
