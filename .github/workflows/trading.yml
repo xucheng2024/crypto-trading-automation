@@ -48,6 +48,7 @@ jobs:
           python monitor_delist.py || echo "⚠️ monitor_delist.py completed with warnings"
           
       - name: Run auto sell orders
+        if: (github.event_name == 'schedule' && github.event.schedule == '*/15 * * * *') || github.event_name == 'workflow_dispatch' || (github.event_name == 'repository_dispatch' && github.event.action == 'cron')
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           OKX_API_KEY: ${{ secrets.OKX_API_KEY }}
