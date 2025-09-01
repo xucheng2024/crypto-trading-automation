@@ -23,10 +23,10 @@ export default {
       const minute = now.getUTCMinutes();
       const hour = now.getUTCHours();
       
-      // 判断是否是7分钟间隔的触发 (0, 7, 14, 21, 28, 35, 42, 49, 56)
-      if (minute % 7 === 0) {
+      // 判断是否是7分钟间隔的触发 (2, 9, 16, 23, 30, 37, 44, 51, 58) - 错开整点避免冲突
+      if ([2, 9, 16, 23, 30, 37, 44, 51, 58].includes(minute)) {
         scripts = ['monitor_delist', 'cancel_pending_limits'];
-        console.log('📅 7-minute interval: monitor_delist + cancel_pending_limits');
+        console.log('📅 7-minute interval (staggered): monitor_delist + cancel_pending_limits');
       }
       // 判断是否是15分钟间隔的触发 (0, 15, 30, 45)
       else if (minute % 15 === 0) {
@@ -97,7 +97,7 @@ export default {
       <hr>
       <h2>📅 Cron Schedule:</h2>
       <ul>
-        <li><strong>每7分钟 (*/7 * * * *)</strong>: monitor_delist.py + cancel_pending_limits.py</li>
+        <li><strong>每7分钟 (2,9,16,23,30,37,44,51,58 * * * *)</strong>: monitor_delist.py + cancel_pending_limits.py</li>
         <li><strong>每15分钟 (0,15,30,45 * * * *)</strong>: fetch_filled_orders.py + auto_sell_orders.py</li>
         <li><strong>每天23:55 (55 23 * * *)</strong>: cancel_pending_triggers.py</li>
         <li><strong>每天00:05 (5 0 * * *)</strong>: create_algo_triggers.py</li>
