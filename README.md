@@ -69,6 +69,9 @@ python monitor_delist.py
 - **🕛 Workflow Control** - Nightly cancel/create steps also runnable via manual workflow dispatch
 - **🕐 Timezone Fix** - Fixed UTC/local time issues in `fetch_filled_orders.py` and `auto_sell_orders.py`
 - **⚡ Cron Optimization** - Staggered 7-minute schedule to eliminate double execution at minute 0
+- **🔧 Multi-Fill Order Fix** - Fixed `accFillSz` handling for orders with multiple fills (2025-09-02)
+- **📊 Smart Update Strategy** - Added intelligent order update detection and data discrepancy resolution
+- **🛡️ Data Integrity** - Enhanced database update logic to preserve critical status fields during updates
 
 ### Cloudflare Workers Cron Schedule ⭐
 ```yaml
@@ -139,7 +142,10 @@ python monitor_delist.py
   - **Real-time Monitoring**: Continuous order status monitoring
   - **Database Storage**: PostgreSQL database for order history
   - **Buy-only Storage**: Filters to side='buy' before saving
-  - **Preserve Status**: Uses INSERT OR IGNORE so existing SOLD status is not reset
+  - **Smart Update Strategy**: Uses ON CONFLICT DO UPDATE to handle multi-fill orders correctly
+  - **Data Integrity**: Preserves sell_time and sold_status during updates
+  - **Discrepancy Detection**: Automatically checks and fixes data differences between DB and API
+  - **Multi-Fill Support**: Correctly handles orders that fill across multiple transactions
 
 #### `auto_sell_orders.py` ⭐
 - **Purpose**: Automatically execute market sell orders based on sell_time
@@ -153,6 +159,8 @@ python monitor_delist.py
   - **Detailed Logging**: Includes ordId in scan and processing logs for auditability
   - **Market Order Execution**: Uses market orders for immediate execution
   - **Timezone Display**: Shows sell times with "UTC" label for clarity
+  - **Accumulated Fill Size**: Uses accFillSz instead of fillSz for correct sell quantities
+  - **Multi-Fill Support**: Correctly sells total accumulated quantity for orders with multiple fills
 
 ### New Modular Components 🆕
 
@@ -363,6 +371,9 @@ crypto_remote/
 - **Error Resolution**: All previous API issues resolved with enhanced error handling
 - **Cloud Migration**: Successfully migrated to PostgreSQL and GitHub Actions
 - **Precise Scheduling**: Cloudflare Workers provide minute-level accuracy (99.9% uptime)
+- **Multi-Fill Order Handling**: Fixed accFillSz processing for orders with multiple fills (2025-09-02)
+- **Data Integrity**: Smart update strategy preserves critical status fields during database updates
+- **Discrepancy Detection**: Automatic detection and resolution of data differences between database and API
 
 ### Architecture Benefits
 - **Maintainability**: Clean separation of concerns across 5 specialized modules
@@ -432,4 +443,4 @@ if affected:
 This project is for educational and personal use. Please ensure compliance with OKX API terms and local trading regulations.
 
 ---
-**System Architecture**: Modular + Cloud • **Total Lines**: 1,120+ (5 modules) • **Main Script**: 277 lines • **Code Reduction**: 59% • **API Unification**: 6 scripts share 1 OKX client • **Database**: PostgreSQL (Neon) • **Deployment**: Cloudflare Workers + GitHub Actions • **Scheduling**: Precise minute-level cron via Cloudflare Workers • **Last Updated**: 2025-01-31
+**System Architecture**: Modular + Cloud • **Total Lines**: 1,120+ (5 modules) • **Main Script**: 277 lines • **Code Reduction**: 59% • **API Unification**: 6 scripts share 1 OKX client • **Database**: PostgreSQL (Neon) • **Deployment**: Cloudflare Workers + GitHub Actions • **Scheduling**: Precise minute-level cron via Cloudflare Workers • **Multi-Fill Fix**: accFillSz handling for orders with multiple fills • **Last Updated**: 2025-09-02
