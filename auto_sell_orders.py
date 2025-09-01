@@ -122,7 +122,8 @@ class AutoSellOrders:
 
     def get_orders_ready_to_sell(self):
         """Get all orders that are ready to sell (sell_time < current_time)"""
-        current_time = int(datetime.now().timestamp() * 1000)
+        # Use UTC time to match sell_time calculation in fetch_filled_orders.py
+        current_time = int(datetime.utcnow().timestamp() * 1000)
         
         self.cursor.execute('''
             SELECT instId, ordId, fillSz, side, ts, sell_time, fillPx
@@ -140,7 +141,8 @@ class AutoSellOrders:
             self.logger.info(f"🔍 Found {len(orders)} orders ready to sell")
             for order in orders:
                 inst_id, ord_id, fill_sz, side, ts, sell_time, fill_px = order
-                sell_time_str = datetime.fromtimestamp(int(sell_time)/1000).strftime('%H:%M:%S')
+                # Display sell_time in UTC for consistency
+                sell_time_str = datetime.utcfromtimestamp(int(sell_time)/1000).strftime('%H:%M:%S UTC')
                 buy_price = self.format_price(fill_px)
                 self.logger.info(f"   📋 {inst_id} | ordId: {ord_id} | Size: {fill_sz} | Buy: ${buy_price} | Sell: {sell_time_str}")
         

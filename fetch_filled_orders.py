@@ -223,8 +223,8 @@ class OKXFilledOrdersFetcher:
             sell_time = None
             if ts:
                 try:
-                    # Convert timestamp to datetime and add 20 hours
-                    ts_datetime = datetime.fromtimestamp(int(ts) / 1000)
+                    # Convert timestamp to UTC datetime and add 20 hours
+                    ts_datetime = datetime.utcfromtimestamp(int(ts) / 1000)
                     sell_time_datetime = ts_datetime + timedelta(hours=20)
                     sell_time = str(int(sell_time_datetime.timestamp() * 1000))
                 except (ValueError, TypeError) as e:
@@ -331,20 +331,24 @@ class OKXFilledOrdersFetcher:
     def fetch_and_save_filled_orders(self, minutes=None):
         """Fetch filled orders with minutes parameter"""
         try:
-            # Calculate time range based on minutes
-            end_time = datetime.now()
+            # Calculate time range based on minutes (use UTC to match OKX API timestamps)
+            end_time = datetime.utcnow()
             begin_time = end_time - timedelta(minutes=minutes or 15)  # Default to 15 minutes
 
             # Use DB watermark if more recent than computed begin_time (with small overlap)
             latest_ts_ms = self.get_latest_order_ts()
             if latest_ts_ms:
-                latest_dt = datetime.fromtimestamp(latest_ts_ms / 1000)
+                # Convert timestamp to UTC datetime to match end_time
+                latest_dt = datetime.utcfromtimestamp(latest_ts_ms / 1000)
                 adjusted_begin = latest_dt + timedelta(milliseconds=1)
                 if adjusted_begin > begin_time:
-                    logger.info(f"🧭 Using DB watermark (+1ms). Adjust begin from {begin_time.strftime('%H:%M:%S')} to {adjusted_begin.strftime('%H:%M:%S')}")
+                    logger.info(f"🧭 Using DB watermark (+1ms). Latest ts: {latest_dt.strftime('%H:%M:%S.%f')[:-3]} UTC")
+                    logger.info(f"🧭 Adjusted begin: {begin_time.strftime('%H:%M:%S')} → {adjusted_begin.strftime('%H:%M:%S.%f')[:-3]} UTC")
                     begin_time = adjusted_begin
+                else:
+                    logger.info(f"🧭 DB watermark {latest_dt.strftime('%H:%M:%S.%f')[:-3]} UTC is older than {begin_time.strftime('%H:%M:%S')} UTC, using time-based range")
             
-            logger.info(f"🔍 Fetching orders: {begin_time.strftime('%H:%M')} → {end_time.strftime('%H:%M')}")
+            logger.info(f"🔍 Fetching orders: {begin_time.strftime('%H:%M:%S.%f')[:-3]} → {end_time.strftime('%H:%M:%S')}")
             
             # Get filled orders
             orders = self.get_filled_orders(begin_time, end_time)

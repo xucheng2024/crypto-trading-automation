@@ -22,6 +22,10 @@ crons = [
 [env.production]
 name = "crypto-trading-cron-prod"
 
+[env.production.vars]
+GITHUB_OWNER = "xucheng2024"
+GITHUB_REPO = "crypto-trading-automation"
+
 [env.staging]
 name = "crypto-trading-cron-staging"
 
