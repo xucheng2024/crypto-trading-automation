@@ -160,6 +160,7 @@ jobs:
           OKX_API_KEY: ${{ secrets.OKX_API_KEY }}
           OKX_SECRET_KEY: ${{ secrets.OKX_SECRET_KEY }}
           OKX_PASSPHRASE: ${{ secrets.OKX_PASSPHRASE }}
+          OKX_ORDER_SIZE: ${{ secrets.OKX_ORDER_SIZE }}
         run: |
           echo "🔄 Running create_algo_triggers.py..."
           source .venv/bin/activate && python create_algo_triggers.py || echo "⚠️ create_algo_triggers.py completed with warnings"
