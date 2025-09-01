@@ -8,7 +8,6 @@ import subprocess
 import sys
 import logging
 from typing import Set, Optional, Tuple
-from config_manager import ConfigManager
 from okx_client import OKXClient
 
 
@@ -16,10 +15,8 @@ class ProtectionManager:
     """Protection Operation Manager"""
     
     def __init__(self, 
-                 config_manager: Optional[ConfigManager] = None, 
                  okx_client: Optional[OKXClient] = None, 
                  logger: Optional[logging.Logger] = None):
-        self.config_manager = config_manager or ConfigManager()
         self.okx_client = okx_client or OKXClient()
         self.logger = logger or logging.getLogger(__name__)
     
@@ -96,41 +93,7 @@ class ProtectionManager:
         
         return successful_sells, total_sells
     
-    def recreate_algo_triggers(self) -> bool:
-        """Re-run create_algo_triggers.py script"""
-        try:
-            self.logger.info("🔄 Starting to re-create algorithm trigger orders...")
-            
-            # Execute create_algo_triggers.py script
-            result = subprocess.run(
-                [sys.executable, 'create_algo_triggers.py'],
-                capture_output=True,
-                text=True,
-                timeout=300  # 5 minute timeout
-            )
-            
-            if result.returncode == 0:
-                self.logger.info("✅ create_algo_triggers.py executed successfully")
-                if result.stdout:
-                    self.logger.debug(f"Script output: {result.stdout}")
-                return True
-            else:
-                self.logger.error(f"❌ create_algo_triggers.py execution failed (exit code: {result.returncode})")
-                if result.stderr:
-                    self.logger.error(f"Error message: {result.stderr}")
-                if result.stdout:
-                    self.logger.debug(f"Script output: {result.stdout}")
-                return False
-                
-        except subprocess.TimeoutExpired:
-            self.logger.error("⏰ create_algo_triggers.py execution timeout (exceeded 5 minutes)")
-            return False
-        except FileNotFoundError:
-            self.logger.error("❌ Script file not found: create_algo_triggers.py")
-            return False
-        except Exception as e:
-            self.logger.error(f"❌ Error occurred while executing create_algo_triggers.py: {e}")
-            return False
+
     
     def execute_full_protection(self, affected_cryptos: Set[str]) -> dict:
         """Execute complete protection workflow"""
@@ -144,9 +107,7 @@ class ProtectionManager:
             'status': 'completed',
             'affected_cryptos': list(affected_cryptos),
             'cancellation_success': False,
-            'sell_results': {'successful': 0, 'total': 0},
-            'cleanup_success': False,
-            'recreate_success': False
+            'sell_results': {'successful': 0, 'total': 0}
         }
         
         try:
@@ -158,16 +119,6 @@ class ProtectionManager:
             self.logger.info("💰 Step 2: Check and sell affected balances")
             successful_sells, total_sells = self.handle_affected_balances(affected_cryptos)
             results['sell_results'] = {'successful': successful_sells, 'total': total_sells}
-            
-            # Step 3: Clean configuration and recreate trigger orders
-            self.logger.info("🧹 Step 3: Clean configuration and recreate trigger orders")
-            
-            # Clean up limits.json configuration
-            results['cleanup_success'] = self.config_manager.remove_cryptos_from_config(affected_cryptos)
-            
-            if results['cleanup_success']:
-                # Recreate algorithm trigger orders
-                results['recreate_success'] = self.recreate_algo_triggers()
             
             self.logger.info("🎉 Complete protection workflow executed")
             
@@ -189,16 +140,13 @@ class ProtectionManager:
             return
         
         print(f"🎯 Affected cryptocurrencies: {results['affected_cryptos']}")
-        print(f"�� Order cancellation: {'✅ Successful' if results['cancellation_success'] else '❌ Failed'}")
+        print(f"📋 Order cancellation: {'✅ Successful' if results['cancellation_success'] else '❌ Failed'}")
         
         sell_results = results['sell_results']
         if sell_results['total'] > 0:
-            print(f"�� Balance selling: {sell_results['successful']}/{sell_results['total']} successful")
+            print(f"💰 Balance selling: {sell_results['successful']}/{sell_results['total']} successful")
         else:
             print("💰 Balance selling: ✅ No selling needed")
-        
-        print(f"🧹 Configuration cleanup: {'✅ Successful' if results['cleanup_success'] else '❌ Failed'}")
-        print(f"🔄 Recreate trigger orders: {'✅ Successful' if results['recreate_success'] else '❌ Failed'}")
         
         if results['status'] == 'failed':
             print(f"❌ Execution failed: {results.get('error', 'Unknown error')}")
@@ -215,7 +163,6 @@ def test_protection_manager():
     
     manager = ProtectionManager()
     
-    print(f"📋 Config Manager: {'Available' if manager.config_manager else 'Unavailable'}")
     print(f"🔗 OKX Client: {'Available' if manager.okx_client.is_available() else 'Unavailable'}")
     
     # Simulate affected cryptocurrencies

@@ -32,11 +32,20 @@ class CryptoMatcher:
         
         for crypto in self.configured_cryptos:
             crypto_upper = crypto.upper()
-            # Check if cryptocurrency symbol is in the text
-            if crypto_upper in announcement_upper:
+            # Use word boundary matching to avoid partial matches
+            # This prevents "BTC" from matching "WBTC" or "BTCB"
+            if self._is_exact_match(crypto_upper, announcement_upper):
                 affected_cryptos.add(crypto)
         
         return affected_cryptos
+    
+    def _is_exact_match(self, crypto: str, text: str) -> bool:
+        """Check if cryptocurrency appears as a complete word in text"""
+        # Split text into words and check for exact match
+        # Handle punctuation by stripping common punctuation marks
+        import re
+        words = re.findall(r'\b\w+\b', text)
+        return crypto in words
     
     def check_announcement_impact(self, announcement: dict) -> Tuple[bool, Set[str]]:
         """Check if announcement affects configured cryptocurrencies"""
