@@ -26,6 +26,7 @@ except ImportError:
     load_dotenv()
 
 from okx_client import OKXClient
+from blacklist_manager import BlacklistManager
 
 # Set Decimal precision to handle very small prices
 getcontext().prec = 28
@@ -95,6 +96,9 @@ class OKXAlgoTrigger:
         self.okx_client = OKXClient()
         self.trade_api = self.okx_client.get_trade_api()
         self.market_api = self.okx_client.get_market_api()
+        
+        # Initialize Blacklist Manager
+        self.blacklist_manager = BlacklistManager(logger)
     
     @retry(
         stop=stop_after_attempt(3),
@@ -236,16 +240,36 @@ class OKXAlgoTrigger:
             
             crypto_configs = limits_data.get('crypto_configs', {})
             logger.info(f"📋 Found {len(crypto_configs)} crypto pairs in {limits_file}")
+            
+            # Load blacklisted cryptocurrencies
+            blacklisted_cryptos = self.blacklist_manager.get_blacklisted_cryptos()
+            if blacklisted_cryptos:
+                logger.info(f"🚫 Blacklisted cryptocurrencies: {sorted(blacklisted_cryptos)}")
+            else:
+                logger.info("✅ No blacklisted cryptocurrencies found")
+            
             logger.info("=" * 60)
             
             success_count = 0
             total_count = len(crypto_configs)
             failed_pairs = []
+            skipped_blacklist = 0
             
             for inst_id, config in crypto_configs.items():
                 best_limit = config.get('best_limit')
                 if best_limit is None:
                     logger.warning(f"⚠️  Skipping {inst_id}: no best_limit found")
+                    continue
+                
+                # Extract base currency from inst_id (e.g., "BTC-USDT" -> "BTC")
+                base_currency = inst_id.split('-')[0] if '-' in inst_id else inst_id
+                
+                # Check if cryptocurrency is blacklisted
+                if base_currency in blacklisted_cryptos:
+                    reason = self.blacklist_manager.get_blacklist_reason(base_currency)
+                    logger.warning(f"🚫 Skipping {inst_id}: blacklisted ({reason})")
+                    failed_pairs.append((inst_id, f"Blacklisted: {reason}"))
+                    skipped_blacklist += 1
                     continue
                 
                 logger.info(f"\n🔄 Processing {inst_id}...")
@@ -280,6 +304,9 @@ class OKXAlgoTrigger:
             
             logger.info("\n" + "=" * 60)
             logger.info(f"📊 Summary: {success_count}/{total_count} orders created successfully")
+            
+            if skipped_blacklist > 0:
+                logger.info(f"🚫 Skipped due to blacklist: {skipped_blacklist}")
             
             if failed_pairs:
                 logger.warning(f"⚠️  Failed pairs: {len(failed_pairs)}")
