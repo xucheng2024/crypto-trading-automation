@@ -12,16 +12,18 @@ export default {
   async scheduled(event, env, ctx) {
     const cron = event.cron;
     const scheduledTime = event.scheduledTime || new Date();
+    
+    // 检查当前时间，用于确定具体触发哪些脚本
+    const now = new Date(scheduledTime);
+    const minute = now.getUTCMinutes();
+    const hour = now.getUTCHours();
+    
     console.log(`🕐 Cron triggered: ${cron} at ${scheduledTime}`);
+    console.log(`🕐 Trigger details: minute=${minute}, hour=${hour}, UTC time=${scheduledTime}`);
     
     try {
       // 根据cron频率决定触发哪些脚本
       let scripts = [];
-      
-      // 检查当前时间，用于确定具体触发哪些脚本
-      const now = new Date(scheduledTime);
-      const minute = now.getUTCMinutes();
-      const hour = now.getUTCHours();
       
       // 判断是否是7分钟间隔的触发 (2, 9, 16, 23, 30, 37, 44, 51, 58) - 错开整点避免冲突
       if ([2, 9, 16, 23, 30, 37, 44, 51, 58].includes(minute)) {

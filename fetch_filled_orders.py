@@ -335,18 +335,17 @@ class OKXFilledOrdersFetcher:
             end_time = datetime.utcnow()
             begin_time = end_time - timedelta(minutes=minutes or 15)  # Default to 15 minutes
 
-            # Use DB watermark if more recent than computed begin_time (with small overlap)
+            # Always use DB watermark if available to ensure continuity
             latest_ts_ms = self.get_latest_order_ts()
             if latest_ts_ms:
                 # Convert timestamp to UTC datetime to match end_time
                 latest_dt = datetime.utcfromtimestamp(latest_ts_ms / 1000)
                 adjusted_begin = latest_dt + timedelta(milliseconds=1)
-                if adjusted_begin > begin_time:
-                    logger.info(f"🧭 Using DB watermark (+1ms). Latest ts: {latest_dt.strftime('%H:%M:%S.%f')[:-3]} UTC")
-                    logger.info(f"🧭 Adjusted begin: {begin_time.strftime('%H:%M:%S')} → {adjusted_begin.strftime('%H:%M:%S.%f')[:-3]} UTC")
-                    begin_time = adjusted_begin
-                else:
-                    logger.info(f"🧭 DB watermark {latest_dt.strftime('%H:%M:%S.%f')[:-3]} UTC is older than {begin_time.strftime('%H:%M:%S')} UTC, using time-based range")
+                logger.info(f"🧭 Using DB watermark (+1ms). Latest ts: {latest_dt.strftime('%H:%M:%S.%f')[:-3]} UTC")
+                logger.info(f"🧭 Query from: {adjusted_begin.strftime('%H:%M:%S.%f')[:-3]} UTC (DB+1ms) to {end_time.strftime('%H:%M:%S')} UTC")
+                begin_time = adjusted_begin
+            else:
+                logger.info(f"🧭 No DB watermark found, using time-based range: {begin_time.strftime('%H:%M:%S')} UTC")
             
             logger.info(f"🔍 Fetching orders: {begin_time.strftime('%H:%M:%S.%f')[:-3]} → {end_time.strftime('%H:%M:%S')}")
             
