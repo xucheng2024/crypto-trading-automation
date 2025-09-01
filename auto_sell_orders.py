@@ -126,7 +126,7 @@ class AutoSellOrders:
         current_time = int(datetime.utcnow().timestamp() * 1000)
         
         self.cursor.execute('''
-            SELECT instId, ordId, fillSz, side, ts, sell_time, fillPx
+            SELECT instId, ordId, accFillSz, side, ts, sell_time, fillPx
             FROM filled_orders 
             WHERE sell_time IS NOT NULL 
               AND sold_status IS NULL
@@ -140,11 +140,11 @@ class AutoSellOrders:
         if orders:
             self.logger.info(f"🔍 Found {len(orders)} orders ready to sell")
             for order in orders:
-                inst_id, ord_id, fill_sz, side, ts, sell_time, fill_px = order
+                inst_id, ord_id, acc_fill_sz, side, ts, sell_time, fill_px = order
                 # Display sell_time in UTC for consistency
                 sell_time_str = datetime.utcfromtimestamp(int(sell_time)/1000).strftime('%H:%M:%S UTC')
                 buy_price = self.format_price(fill_px)
-                self.logger.info(f"   📋 {inst_id} | ordId: {ord_id} | Size: {fill_sz} | Buy: ${buy_price} | Sell: {sell_time_str}")
+                self.logger.info(f"   📋 {inst_id} | ordId: {ord_id} | Total: {acc_fill_sz} | Buy: ${buy_price} | Sell: {sell_time_str}")
         
         return orders
 
@@ -316,17 +316,17 @@ class AutoSellOrders:
         failed_sells = 0
         
         for order in orders:
-            inst_id, ord_id, fill_sz, side, ts, sell_time, fill_px = order
+            inst_id, ord_id, acc_fill_sz, side, ts, sell_time, fill_px = order
             
             try:
                 formatted_price = self.format_price(fill_px)
-                self.logger.info(f"🔄 Processing: {inst_id} | ordId: {ord_id} | Buy: ${formatted_price}")
+                self.logger.info(f"🔄 Processing: {inst_id} | ordId: {ord_id} | Buy: ${formatted_price} | Total: {acc_fill_sz}")
                 
                 # Lock this order to prevent duplicate processing (intra-run or concurrent)
                 if not self.mark_order_processing(ord_id):
                     continue
                 
-                sell_result = self.place_market_sell_order(inst_id, fill_sz, ord_id)
+                sell_result = self.place_market_sell_order(inst_id, acc_fill_sz, ord_id)
                 
                 if sell_result == True:  # Successfully sold
                     if self.mark_order_as_sold(ord_id):

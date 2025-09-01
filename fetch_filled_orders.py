@@ -255,30 +255,51 @@ class OKXFilledOrdersFetcher:
                 'sell_time': sell_time
             }
             
-            # Insert new order; ignore if ordId already exists to preserve sold_status
+            # Insert new order; update existing order but preserve sell_time and sold_status
             self.cursor.execute('''
                 INSERT INTO filled_orders 
                 (instId, ordId, fillPx, fillSz, side, ts, ordType, avgPx, accFillSz, fee, feeCcy, tradeId, fillTime, cTime, uTime, sell_time)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT (ordId) DO NOTHING
+                ON CONFLICT (ordId) DO UPDATE SET
+                    fillPx = EXCLUDED.fillPx,
+                    fillSz = EXCLUDED.fillSz,
+                    avgPx = EXCLUDED.avgPx,
+                    accFillSz = EXCLUDED.accFillSz,
+                    fee = EXCLUDED.fee,
+                    feeCcy = EXCLUDED.feeCcy,
+                    tradeId = EXCLUDED.tradeId,
+                    fillTime = EXCLUDED.fillTime,
+                    uTime = EXCLUDED.uTime
+                    -- sell_time and sold_status are preserved (not updated)
             ''', (
                 data['instId'], data['ordId'], data['fillPx'], data['fillSz'], data['side'], data['ts'],
                 data['ordType'], data['avgPx'], data['accFillSz'], data['fee'], data['feeCcy'],
                 data['tradeId'], data['fillTime'], data['cTime'], data['uTime'], data['sell_time']
             ))
 
-            # Log when a duplicate ordId is ignored (rowcount == 0)
-            if self.cursor.rowcount == 0:
-                logger.debug(f"🔁 Duplicate order ignored (preserved sold_status): {ord_id}")
+            # Log the result of insert/update
+            if self.cursor.rowcount == 1:
+                logger.debug(f"✅ Order inserted/updated: {ord_id}")
+            else:
+                logger.debug(f"⚠️  Unexpected rowcount: {self.cursor.rowcount} for order: {ord_id}")
                 return False
             
             # If order is newly saved and it's a buy order, create trigger sell order
-            if self.cursor.rowcount == 1 and side == 'buy' and fill_px and fill_sz:
-                logger.info(f"💰 Buy order saved: {inst_id} @ {fill_px} x {fill_sz}")
-                try:
-                    self.create_trigger_sell_order(inst_id, fill_px, fill_sz, ord_id)
-                except Exception as e:
-                    logger.warning(f"⚠️  Failed to create trigger sell order for {ord_id}: {e}")
+            # Check if this is a new order (not an update) by checking if sell_time was just set
+            if self.cursor.rowcount == 1 and side == 'buy' and fill_px and fill_sz and sell_time:
+                # Check if this order already has a sell_time (meaning it was updated, not inserted)
+                self.cursor.execute('SELECT sell_time FROM filled_orders WHERE ordId = %s', (ord_id,))
+                existing_sell_time = self.cursor.fetchone()
+                
+                if existing_sell_time and existing_sell_time[0] == sell_time:
+                    # This is a new order, create trigger sell order
+                    logger.info(f"💰 New buy order saved: {inst_id} @ {fill_px} x {fill_sz}")
+                    try:
+                        self.create_trigger_sell_order(inst_id, fill_px, fill_sz, ord_id)
+                    except Exception as e:
+                        logger.warning(f"⚠️  Failed to create trigger sell order for {ord_id}: {e}")
+                else:
+                    logger.debug(f"🔄 Buy order updated: {inst_id} @ {fill_px} x {fill_sz} (trigger order already exists)")
             
             return True
             
@@ -376,6 +397,9 @@ class OKXFilledOrdersFetcher:
             if failed_saves > 0:
                 logger.warning(f"⚠️  Failed: {failed_saves}")
             
+            # Check for updates to existing orders
+            self.check_and_update_existing_orders()
+            
         except Exception as e:
             logger.error(f"❌ Error in fetch_and_save_filled_orders: {e}")
             logger.debug(f"Traceback: {traceback.format_exc()}")
@@ -384,6 +408,78 @@ class OKXFilledOrdersFetcher:
 
 
 
+
+    def check_and_update_existing_orders(self):
+        """Check for updates to existing orders by comparing with API data"""
+        try:
+            logger.info("🔍 Checking for updates to existing orders...")
+            
+            # Get all unsold orders from database
+            self.cursor.execute('''
+                SELECT ordId, instId, accFillSz, side, ts
+                FROM filled_orders 
+                WHERE sold_status IS NULL AND side = 'buy'
+                ORDER BY CAST(ts AS BIGINT) DESC
+            ''')
+            
+            db_orders = self.cursor.fetchall()
+            
+            if not db_orders:
+                logger.info("📭 No unsold orders found in database")
+                return
+            
+            logger.info(f"📊 Found {len(db_orders)} unsold orders in database")
+            
+            # Get recent orders from API (last 7 days to cover all possible updates)
+            recent_orders = self.get_filled_orders(limit=100)
+            
+            if not recent_orders:
+                logger.info("📭 No recent orders found from API")
+                return
+            
+            # Create a dictionary of API orders by ordId
+            api_orders_dict = {}
+            for order in recent_orders:
+                ord_id = order.get('ordId', '')
+                if ord_id:
+                    api_orders_dict[ord_id] = order
+            
+            updates_needed = 0
+            
+            # Compare database orders with API data
+            for db_order in db_orders:
+                ord_id, inst_id, db_acc_fill_sz, side, ts = db_order
+                
+                if ord_id in api_orders_dict:
+                    api_order = api_orders_dict[ord_id]
+                    api_acc_fill_sz = api_order.get('accFillSz', '')
+                    
+                    # Compare accFillSz
+                    if db_acc_fill_sz != api_acc_fill_sz:
+                        logger.info(f"🔄 Update needed for {inst_id} | ordId: {ord_id}")
+                        logger.info(f"   DB accFillSz: {db_acc_fill_sz}")
+                        logger.info(f"   API accFillSz: {api_acc_fill_sz}")
+                        
+                        # Update the order with latest API data
+                        if self.save_order_to_db(api_order):
+                            updates_needed += 1
+                            logger.info(f"✅ Updated {inst_id} | ordId: {ord_id}")
+                        else:
+                            logger.warning(f"⚠️  Failed to update {inst_id} | ordId: {ord_id}")
+                    else:
+                        logger.debug(f"✅ {inst_id} | ordId: {ord_id} is up to date")
+                else:
+                    logger.debug(f"⚠️  Order {ord_id} not found in recent API data")
+            
+            if updates_needed > 0:
+                self.conn.commit()
+                logger.info(f"📊 Updated {updates_needed} orders with latest data")
+            else:
+                logger.info("✅ All orders are up to date")
+                
+        except Exception as e:
+            logger.error(f"❌ Error checking existing orders: {e}")
+            logger.debug(f"Traceback: {traceback.format_exc()}")
 
     def close(self):
         """Close database connection"""
