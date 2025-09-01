@@ -114,10 +114,10 @@ python monitor_delist.py
   - **Database Integration**: Order tracking and management
 
 #### `cancel_pending_triggers.py` ⭐
-- **Purpose**: Cancel expired or unnecessary trigger orders
+- **Purpose**: Cancel expired or unnecessary buy trigger orders
 - **Features**:
-  - **Direction Agnostic**: Cancels trigger orders regardless of buy/sell direction
-  - **Automatic Cleanup**: Removes old trigger orders efficiently
+  - **Buy Orders Only**: Cancels only buy trigger orders, preserves sell orders
+  - **Automatic Cleanup**: Removes old buy trigger orders efficiently
   - **Smart Cancellation**: Order status verification before cancellation
   - **Comprehensive Logging**: Detailed logging and monitoring
   - **Rate Limiting**: Respects OKX API limits (5 requests/2 seconds)

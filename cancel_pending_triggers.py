@@ -208,9 +208,9 @@ class OKXOrderManager:
             raise  # Re-raise for retry mechanism
     
     def cancel_all_pending_triggers(self):
-        """Cancel all pending trigger orders"""
+        """Cancel all pending buy trigger orders"""
         try:
-            logger.info("🚀 OKX Pending Trigger Order Canceller")
+            logger.info("🚀 OKX Pending Buy Trigger Order Canceller")
             logger.info("=" * 60)
             
             # Get all pending algo orders
@@ -223,26 +223,57 @@ class OKXOrderManager:
             logger.info("\n📋 Pending Orders Details:")
             logger.info("=" * 60)
             
-            # Filter for trigger orders and display details
-            trigger_orders = []
+            # First, show all orders for debugging
+            buy_orders = []
+            sell_orders = []
+            other_orders = []
+            
             for order in pending_orders:
                 ord_type = order.get('ordType', '')
+                side = order.get('side', '')
                 if ord_type == 'trigger':
-                    trigger_orders.append(order)
-                    logger.info(f"🔍 {order.get('instId', 'N/A')} - {ord_type}")
-                    logger.info(f"   Order ID: {order.get('algoId', 'N/A')}")
-                    logger.info(f"   Side: {order.get('side', 'N/A')}")
-                    logger.info(f"   Size: {order.get('sz', 'N/A')}")
-                    logger.info(f"   Trigger Price: {order.get('triggerPx', 'N/A')}")
-                    logger.info(f"   Order Price: {order.get('orderPx', 'N/A')}")
-                    logger.info(f"   Status: {order.get('state', 'N/A')}")
+                    if side == 'buy':
+                        buy_orders.append(order)
+                    elif side == 'sell':
+                        sell_orders.append(order)
+                    else:
+                        other_orders.append(order)
+            
+            logger.info(f"📊 Order Summary:")
+            logger.info(f"   Buy trigger orders: {len(buy_orders)}")
+            logger.info(f"   Sell trigger orders: {len(sell_orders)}")
+            logger.info(f"   Other orders: {len(other_orders)}")
+            logger.info("=" * 60)
+            
+            # Show sell orders (for verification that they exist)
+            if sell_orders:
+                logger.info("\n🔍 Sell Trigger Orders (will be preserved):")
+                for order in sell_orders:
+                    logger.info(f"   📈 {order.get('instId', 'N/A')} - {order.get('ordType', 'N/A')} ({order.get('side', 'N/A')})")
+                    logger.info(f"      Order ID: {order.get('algoId', 'N/A')}")
+                    logger.info(f"      Size: {order.get('sz', 'N/A')}")
+                    logger.info(f"      Trigger Price: {order.get('triggerPx', 'N/A')}")
+                    logger.info("-" * 40)
+            
+            # Filter for buy trigger orders and display details
+            trigger_orders = buy_orders  # Only process buy orders
+            if buy_orders:
+                logger.info("\n🔍 Buy Trigger Orders (will be cancelled):")
+                for order in buy_orders:
+                    logger.info(f"   📉 {order.get('instId', 'N/A')} - {order.get('ordType', 'N/A')} ({order.get('side', 'N/A')})")
+                    logger.info(f"      Order ID: {order.get('algoId', 'N/A')}")
+                    logger.info(f"      Side: {order.get('side', 'N/A')}")
+                    logger.info(f"      Size: {order.get('sz', 'N/A')}")
+                    logger.info(f"      Trigger Price: {order.get('triggerPx', 'N/A')}")
+                    logger.info(f"      Order Price: {order.get('orderPx', 'N/A')}")
+                    logger.info(f"      Status: {order.get('state', 'N/A')}")
                     logger.info("-" * 40)
             
             if not trigger_orders:
-                logger.info("✅ No pending trigger orders found")
+                logger.info("✅ No pending buy trigger orders found")
                 return
             
-            logger.info(f"\n🎯 Found {len(trigger_orders)} pending trigger orders")
+            logger.info(f"\n🎯 Found {len(trigger_orders)} pending buy trigger orders")
             
             logger.info("\n🔄 Starting cancellation process...")
             logger.info("=" * 60)
@@ -306,15 +337,15 @@ class OKXOrderManager:
                     
                     try:
                         remaining_pending = self.get_pending_algo_orders()
-                        remaining_trigger_orders = [order for order in remaining_pending if order.get('ordType') == 'trigger']
+                        remaining_trigger_orders = [order for order in remaining_pending if order.get('ordType') == 'trigger' and order.get('side') == 'buy']
                         
                         if remaining_trigger_orders:
-                            logger.warning(f"⚠️  {len(remaining_trigger_orders)} orders still pending after attempt {attempt}")
+                            logger.warning(f"⚠️  {len(remaining_trigger_orders)} buy orders still pending after attempt {attempt}")
                             # Update remaining_orders for next attempt
                             remaining_orders = remaining_trigger_orders
                             attempt += 1
                         else:
-                            logger.info("✅ All orders successfully cancelled!")
+                            logger.info("✅ All buy orders successfully cancelled!")
                             break
                     except Exception as e:
                         logger.error(f"❌ Error verifying cancellation results: {e}")
@@ -323,8 +354,8 @@ class OKXOrderManager:
                 else:
                     # Last attempt completed
                     if remaining_orders:
-                        logger.error(f"❌ Failed to cancel all orders after {max_attempts} attempts")
-                        logger.error(f"   {len(remaining_orders)} orders remain uncancelled")
+                        logger.error(f"❌ Failed to cancel all buy orders after {max_attempts} attempts")
+                        logger.error(f"   {len(remaining_orders)} buy orders remain uncancelled")
                     break
             
             logger.info("\n" + "=" * 60)
@@ -346,7 +377,7 @@ def main():
         if not os.path.exists(".env"):
             logger.info("ℹ️ .env not found; using environment variables from environment/CI")
         
-        logger.info("🚀 Starting OKX Order Cancellation Process")
+        logger.info("🚀 Starting OKX Buy Trigger Order Cancellation Process")
         logger.info(f"⏰ Start time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         
         # Create OKX client and cancel pending triggers
