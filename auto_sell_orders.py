@@ -236,61 +236,52 @@ class AutoSellOrders:
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=10))
     def place_market_sell_order(self, inst_id, size, order_id):
-        """Place market sell order with retry mechanism"""
-        self.logger.info(f"📤 Selling {inst_id}: {size} tokens")
+        """Place market sell order - check balance first, then decide sell amount"""
+        self.logger.info(f"📤 Processing {inst_id}: requested size={size}")
+        
+        # Step 1: Check current balance first
+        actual_balance, eq_usd = self.get_available_balance(inst_id)
+        
+        # Step 2: Check if balance is worth selling
+        if eq_usd < self.min_usd_value:
+            self.logger.warning(f"💰 {inst_id} USD equivalent too small (${eq_usd:.4f}) < ${self.min_usd_value}, not worth selling")
+            return "INSUFFICIENT_VALUE"
+        
+        if actual_balance <= 0:
+            self.logger.warning(f"💰 {inst_id} Balance is 0, cannot sell")
+            return False
+        
+        # Step 3: Determine sell amount - use requested size if available, otherwise use full balance
+        from decimal import Decimal
+        requested_size = Decimal(str(size))
+        available_balance = Decimal(str(actual_balance))
+        
+        if available_balance >= requested_size:
+            sell_amount = str(requested_size)
+            self.logger.info(f"💰 {inst_id} Sufficient balance ({actual_balance}) >= requested ({size}), selling requested amount")
+        else:
+            sell_amount = str(available_balance)
+            self.logger.info(f"💰 {inst_id} Insufficient balance ({actual_balance}) < requested ({size}), selling full balance")
+        
+        # Step 4: Execute the sell order
+        self.logger.info(f"📤 Selling {inst_id}: {sell_amount} tokens (USD equivalent: ${eq_usd:.4f})")
         
         result = self.trade_api.place_order(
             instId=inst_id,
             tdMode="cash",
             side="sell",
             ordType="market",
-            sz=size,
+            sz=sell_amount,
             tgtCcy="base_ccy"  # Explicitly specify selling by base currency quantity
         )
         
         if not result or result.get('code') != '0':
             error_msg = result.get('msg', 'Unknown error') if result else 'Empty response'
-            
-            # Check if failure is due to insufficient balance
-            if "insufficient" in error_msg.lower() or "balance" in error_msg.lower() or "all operations failed" in error_msg.lower():
-                self.logger.warning(f"⚠️ Detected possible insufficient balance, trying to get actual balance...")
-                actual_balance, eq_usd = self.get_available_balance(inst_id)
-                
-                # Use eqUsd to determine if it's worth selling (if USD equivalent is less than configured threshold, consider it not worth selling)
-                if eq_usd < self.min_usd_value:
-                    self.logger.warning(f"💰 {inst_id} USD equivalent too small (${eq_usd:.4f}) < ${self.min_usd_value}, not worth selling, marking as processed")
-                    # Even if not selling, mark as processed to avoid repeated checks
-                    return "INSUFFICIENT_VALUE"
-                
-                if actual_balance > 0:  # Remove 0.0001 limit, try to sell as long as there's balance
-                    self.logger.info(f"🔄 Insufficient balance, selling by actual balance: {actual_balance} tokens (USD equivalent: ${eq_usd:.4f})")
-                    # Re-order with actual balance
-                    result = self.trade_api.place_order(
-                        instId=inst_id,
-                        tdMode="cash",
-                        side="sell",
-                        ordType="market",
-                        sz=str(actual_balance),
-                        tgtCcy="base_ccy"
-                    )
-                    
-                    if result and result.get('code') == '0':
-                        okx_order_id = result.get('data', [{}])[0].get('ordId', 'Unknown')
-                        self.logger.info(f"✅ Successfully sold with actual balance: {inst_id} | Size: {actual_balance} | USD equivalent: ${eq_usd:.4f} | Order: {okx_order_id}")
-                        return True
-                    else:
-                        self.logger.error(f"❌ Selling with actual balance also failed: {result.get('msg', 'Unknown error')}")
-                        return False
-                else:
-                    # Balance is 0, cannot sell
-                    self.logger.warning(f"💰 {inst_id} Balance is 0, cannot sell")
-                    return False
-            
             self.logger.error(f"❌ Sell failed for {inst_id}: {error_msg}")
             return False
         
         okx_order_id = result.get('data', [{}])[0].get('ordId', 'Unknown')
-        self.logger.info(f"✅ Sold {inst_id} | Size: {size} | Order: {okx_order_id}")
+        self.logger.info(f"✅ Sold {inst_id} | Size: {sell_amount} | USD equivalent: ${eq_usd:.4f} | Order: {okx_order_id}")
         return True
 
     def mark_order_as_sold(self, order_id):
