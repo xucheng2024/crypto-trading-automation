@@ -132,15 +132,15 @@ class OKXFilledOrdersFetcher:
 
 
 
-    def get_latest_order_ts(self):
-        """Get latest saved order timestamp (ms) from DB, or None"""
+    def get_latest_order_utime(self):
+        """Get latest saved order uTime (ms) from DB, or None"""
         try:
-            self.cursor.execute("SELECT MAX(CAST(ts AS BIGINT)) FROM filled_orders")
+            self.cursor.execute("SELECT MAX(CAST(utime AS BIGINT)) FROM filled_orders WHERE utime IS NOT NULL AND utime != ''")
             row = self.cursor.fetchone()
             if row and row[0]:
                 return int(row[0])
         except Exception as e:
-            logger.warning(f"⚠️  Failed to get latest ts from DB: {e}")
+            logger.warning(f"⚠️  Failed to get latest uTime from DB: {e}")
         return None
 
 
@@ -356,17 +356,23 @@ class OKXFilledOrdersFetcher:
             end_time = datetime.utcnow()
             begin_time = end_time - timedelta(minutes=minutes or 15)  # Default to 15 minutes
 
-            # Always use DB watermark if available to ensure continuity
-            latest_ts_ms = self.get_latest_order_ts()
-            if latest_ts_ms:
-                # Convert timestamp to UTC datetime to match end_time
-                latest_dt = datetime.utcfromtimestamp(latest_ts_ms / 1000)
-                adjusted_begin = latest_dt + timedelta(milliseconds=1)
-                logger.info(f"🧭 Using DB watermark (+1ms). Latest ts: {latest_dt.strftime('%H:%M:%S.%f')[:-3]} UTC")
-                logger.info(f"🧭 Query from: {adjusted_begin.strftime('%H:%M:%S.%f')[:-3]} UTC (DB+1ms) to {end_time.strftime('%H:%M:%S')} UTC")
-                begin_time = adjusted_begin
+            # Use DB watermark based on uTime (update time) for better accuracy
+            latest_utime_ms = self.get_latest_order_utime()
+            if latest_utime_ms:
+                # Convert uTime to UTC datetime to match end_time
+                latest_dt = datetime.utcfromtimestamp(latest_utime_ms / 1000)
+                
+                # Use the later of: (latest_uTime + 1ms) OR (now - 1 hour)
+                # uTime represents update time, so we can be more precise
+                watermark_begin = latest_dt + timedelta(milliseconds=1)
+                safety_begin = end_time - timedelta(hours=1)  # Look back 1 hour for updates
+                
+                begin_time = max(watermark_begin, safety_begin)
+                
+                logger.info(f"🧭 Using uTime watermark. Latest uTime: {latest_dt.strftime('%H:%M:%S.%f')[:-3]} UTC")
+                logger.info(f"🧭 Query from: {begin_time.strftime('%H:%M:%S.%f')[:-3]} UTC (uTime-based) to {end_time.strftime('%H:%M:%S')} UTC")
             else:
-                logger.info(f"🧭 No DB watermark found, using time-based range: {begin_time.strftime('%H:%M:%S')} UTC")
+                logger.info(f"🧭 No uTime watermark found, using time-based range: {begin_time.strftime('%H:%M:%S')} UTC")
             
             logger.info(f"🔍 Fetching orders: {begin_time.strftime('%H:%M:%S.%f')[:-3]} → {end_time.strftime('%H:%M:%S')}")
             
