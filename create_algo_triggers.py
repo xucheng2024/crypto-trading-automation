@@ -73,7 +73,7 @@ def setup_logging():
 logger = setup_logging()
 
 class OKXAlgoTrigger:
-    def __init__(self, order_size="1000"):
+    def __init__(self, order_size="100"):
         self.api_key = os.getenv('OKX_API_KEY')
         self.secret_key = os.getenv('OKX_SECRET_KEY')
         self.passphrase = os.getenv('OKX_PASSPHRASE')
@@ -305,7 +305,7 @@ def main():
             sys.exit(1)
         
         # Use default order size or get from environment variable
-        order_size = os.getenv('OKX_ORDER_SIZE', '170')
+        order_size = os.getenv('OKX_ORDER_SIZE', '100')
         logger.info(f"📊 Using order size: {order_size} USDT")
         logger.info("=" * 60)
         
