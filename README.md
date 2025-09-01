@@ -67,11 +67,13 @@ python monitor_delist.py
 - **🗄️ DB Migration Guard** - Auto-create `sold_status` column in `filled_orders` on startup (PostgreSQL)
 - **🧪 CI Compatibility** - `cancel_pending_triggers.py` runs without `.env` in Actions (uses Secrets)
 - **🕛 Workflow Control** - Nightly cancel/create steps also runnable via manual workflow dispatch
+- **🕐 Timezone Fix** - Fixed UTC/local time issues in `fetch_filled_orders.py` and `auto_sell_orders.py`
+- **⚡ Cron Optimization** - Staggered 7-minute schedule to eliminate double execution at minute 0
 
 ### Cloudflare Workers Cron Schedule ⭐
 ```yaml
-# Every 5 minutes (staggered) - Monitoring and protection
-- cron: '2,7,12,17,22,27,32,37,42,47,52,57 * * * *'
+# Every 7 minutes (staggered to avoid overlap) - Monitoring and protection
+- cron: '2,9,16,23,30,37,44,51,58 * * * *'
 
 # Every 15 minutes - Fetch filled orders + Auto sell orders
 - cron: '0,15,30,45 * * * *'
@@ -84,7 +86,7 @@ python monitor_delist.py
 ```
 
 ### Execution Strategy
-- **5-Minute Tasks**: `monitor_delist.py` + `cancel_pending_limits.py`
+- **7-Minute Tasks (Staggered)**: `monitor_delist.py` + `cancel_pending_limits.py`
 - **15-Minute Tasks**: `fetch_filled_orders.py` + `auto_sell_orders.py`
 - **Daily Tasks**: `cancel_pending_triggers.py` (23:55) + `create_algo_triggers.py` (00:05)
 
@@ -131,25 +133,26 @@ python monitor_delist.py
 #### `fetch_filled_orders.py` ⭐
 - **Purpose**: Track completed orders and calculate sell times
 - **Features**:
-  - **Sell Time Calculation**: Automatically calculates sell_time as ts + 20 hours
+  - **Sell Time Calculation**: Automatically calculates sell_time as ts + 20 hours (UTC-based)
+  - **Smart Watermarking**: Uses database timestamp +1ms as query start point (not fixed 15-min window)
+  - **Timezone Consistency**: All time calculations use UTC to match OKX API timestamps
   - **Real-time Monitoring**: Continuous order status monitoring
   - **Database Storage**: PostgreSQL database for order history
-  - **Configurable Intervals**: Adjustable monitoring frequency
-  - **Order Statistics**: Comprehensive order analytics and reporting
   - **Buy-only Storage**: Filters to side='buy' before saving
   - **Preserve Status**: Uses INSERT OR IGNORE so existing SOLD status is not reset
 
 #### `auto_sell_orders.py` ⭐
 - **Purpose**: Automatically execute market sell orders based on sell_time
 - **Features**:
-  - **Time-based Selling**: Executes sells when sell_time < current_time and > (current_time - 15 minutes)
+  - **UTC Time Comparison**: Uses UTC timestamps to match sell_time calculation consistency
+  - **Time-based Selling**: Executes sells when sell_time < current_time (UTC-based)
   - **Audio Notifications**: 10-second continuous beep sound for successful sells
   - **Duplicate Prevention**: Tracks sold_status to avoid re-processing
   - **Processing Lock**: Marks rows as PROCESSING before sell to prevent overlaps
   - **Strict Selection**: Only processes rows where sold_status IS NULL; sell_time cast to Integer
   - **Detailed Logging**: Includes ordId in scan and processing logs for auditability
   - **Market Order Execution**: Uses market orders for immediate execution
-  - **Comprehensive Logging**: Detailed transaction logging and error handling
+  - **Timezone Display**: Shows sell times with "UTC" label for clarity
 
 ### New Modular Components 🆕
 
