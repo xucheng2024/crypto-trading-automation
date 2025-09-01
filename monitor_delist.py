@@ -30,6 +30,7 @@ except ImportError:
 from config_manager import ConfigManager
 from crypto_matcher import CryptoMatcher
 from protection_manager import ProtectionManager
+from blacklist_manager import BlacklistManager
 
 
 class OKXDelistMonitor:
@@ -44,7 +45,6 @@ class OKXDelistMonitor:
         
         # Monitoring configuration
         self.check_interval = 600  # 10 minutes = 600 seconds (match crontab)
-        self.known_announcements = set()  # Record known announcement IDs
         self._found_announcements = False  # Track if announcements were found
         
         # Setup logging
@@ -54,6 +54,7 @@ class OKXDelistMonitor:
         self.config_manager = ConfigManager(logger=self.logger)
         self.crypto_matcher = CryptoMatcher(self.config_manager, self.logger)
         self.protection_manager = ProtectionManager(self.config_manager, logger=self.logger)
+        self.blacklist_manager = BlacklistManager(logger=self.logger)
         
         self.logger.info("🚀 OKX Delist Monitor initialization completed")
     
@@ -190,6 +191,7 @@ class OKXDelistMonitor:
         """Send protection alert and execute protection operations"""
         timestamp = int(announcement['pTime']) / 1000
         date = datetime.fromtimestamp(timestamp).strftime('%Y-%m-%d %H:%M:%S')
+        announcement_id = f"{announcement['title']}_{announcement['pTime']}"
         
         print("\n" + "="*80)
         print("🚨 Alert! Delist announcement affecting configured cryptocurrencies found!")
@@ -207,11 +209,61 @@ class OKXDelistMonitor:
         
         results = self.protection_manager.execute_full_protection(affected_cryptos)
         self.protection_manager.print_protection_summary(results)
+        
+        # Add affected cryptocurrencies to blacklist
+        if affected_cryptos:
+            reason = f"Delisted due to OKX announcement: {announcement['title']}"
+            notes = f"Announcement URL: {announcement['url']}, Timestamp: {announcement['pTime']}"
+            
+            added_count = self.blacklist_manager.add_multiple_to_blacklist(
+                affected_cryptos, 
+                reason, 
+                blacklist_type='delisted',
+                notes=notes
+            )
+            
+            if added_count > 0:
+                print(f"\n🚫 Added {added_count} affected cryptocurrencies to blacklist")
+                self.logger.info(f"🚫 Added {added_count} affected cryptocurrencies to blacklist")
+            else:
+                print("\n⚠️ Failed to add affected cryptocurrencies to blacklist")
+                self.logger.warning("⚠️ Failed to add affected cryptocurrencies to blacklist")
+        
+        # Mark announcement as processed
+        self.blacklist_manager.mark_announcement_processed(
+            announcement_id=announcement_id,
+            title=announcement['title'],
+            url=announcement['url'],
+            p_time=int(announcement['pTime']),
+            affected_cryptos=affected_cryptos,
+            protection_executed=True,
+            notes=f"Protection executed for {len(affected_cryptos)} cryptocurrencies"
+        )
+        
+        # Recreate algo triggers after protection operations
+        self.logger.info("🔄 Recreating algo triggers after protection operations...")
+        try:
+            import subprocess
+            result = subprocess.run(['python', 'create_algo_triggers.py'], 
+                                  capture_output=True, text=True, timeout=300)
+            if result.returncode == 0:
+                self.logger.info("✅ Algo triggers recreated successfully")
+                print("\n✅ Algo triggers recreated successfully")
+            else:
+                self.logger.error(f"❌ Failed to recreate algo triggers: {result.stderr}")
+                print(f"\n❌ Failed to recreate algo triggers: {result.stderr}")
+        except subprocess.TimeoutExpired:
+            self.logger.error("❌ Algo trigger recreation timed out")
+            print("\n❌ Algo trigger recreation timed out")
+        except Exception as e:
+            self.logger.error(f"❌ Error recreating algo triggers: {e}")
+            print(f"\n❌ Error recreating algo triggers: {e}")
     
     def send_info_alert(self, announcement: Dict[str, Any]):
         """Send information alert (does not execute protection operations)"""
         timestamp = int(announcement['pTime']) / 1000
         date = datetime.fromtimestamp(timestamp).strftime('%Y-%m-%d %H:%M:%S')
+        announcement_id = f"{announcement['title']}_{announcement['pTime']}"
         
         print("\n" + "="*60)
         print("ℹ️  Delist Spot announcement found")
@@ -223,6 +275,17 @@ class OKXDelistMonitor:
         print("="*60)
         
         self.logger.info(f"ℹ️ Delist Spot announcement found: {announcement['title']}")
+        
+        # Mark announcement as processed (info only, no protection)
+        self.blacklist_manager.mark_announcement_processed(
+            announcement_id=announcement_id,
+            title=announcement['title'],
+            url=announcement['url'],
+            p_time=int(announcement['pTime']),
+            affected_cryptos=None,
+            protection_executed=False,
+            notes="Info alert only - no protection executed"
+        )
     
 
     
@@ -248,18 +311,35 @@ class OKXDelistMonitor:
                     # Generate unique ID (using title and timestamp)
                     announcement_id = f"{ann['title']}_{ann['pTime']}"
                     
-                    # Check if it's a new announcement
-                    if announcement_id not in self.known_announcements:
+                    # Check if it's a new announcement (using database)
+                    if not self.blacklist_manager.is_announcement_processed(announcement_id):
                         # Check if it's a spot-related announcement
                         if self.crypto_matcher.is_spot_related(ann):
                             today_spot_announcements.append(ann)
-                            self.known_announcements.add(announcement_id)
                             
                             # Also check if it affects configured cryptocurrencies
                             is_affected, affected_cryptos = self.crypto_matcher.check_announcement_impact(ann)
                             if is_affected:
-                                ann['affected_cryptos'] = affected_cryptos
-                                today_affected_announcements.append(ann)
+                                # Filter out cryptocurrencies that are already blacklisted
+                                non_blacklisted_cryptos = set()
+                                already_blacklisted = set()
+                                
+                                for crypto in affected_cryptos:
+                                    if self.blacklist_manager.is_blacklisted(crypto):
+                                        already_blacklisted.add(crypto)
+                                    else:
+                                        non_blacklisted_cryptos.add(crypto)
+                                
+                                # Log blacklisted cryptos
+                                if already_blacklisted:
+                                    self.logger.info(f"🚫 Skipping already blacklisted cryptocurrencies: {sorted(already_blacklisted)}")
+                                
+                                # Only process non-blacklisted cryptos
+                                if non_blacklisted_cryptos:
+                                    ann['affected_cryptos'] = non_blacklisted_cryptos
+                                    today_affected_announcements.append(ann)
+                                else:
+                                    self.logger.info(f"ℹ️ All affected cryptocurrencies are already blacklisted, skipping protection operations")
             
             # Play alert sound for all new delist spot announcements
             if today_spot_announcements:

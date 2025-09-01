@@ -119,6 +119,96 @@ class BlacklistManager:
         except Exception as e:
             self.logger.error(f"❌ Error getting blacklist reason for {crypto_symbol}: {e}")
             return None
+    
+    def add_to_blacklist(self, crypto_symbol: str, reason: str, blacklist_type: str = 'delisted', notes: str = None) -> bool:
+        """Add a cryptocurrency to blacklist"""
+        try:
+            if not all(self.db_config.values()):
+                self.logger.warning("⚠️ Database credentials not fully configured, skipping blacklist addition")
+                return False
+            
+            with psycopg2.connect(**self.db_config) as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute("""
+                        INSERT INTO blacklist (crypto_symbol, reason, blacklist_type, notes)
+                        VALUES (%s, %s, %s, %s)
+                        ON CONFLICT (crypto_symbol) 
+                        DO UPDATE SET 
+                            reason = EXCLUDED.reason,
+                            blacklist_type = EXCLUDED.blacklist_type,
+                            notes = EXCLUDED.notes,
+                            is_active = TRUE,
+                            updated_at = CURRENT_TIMESTAMP
+                    """, (crypto_symbol, reason, blacklist_type, notes))
+                    
+                    conn.commit()
+                    self.logger.info(f"✅ Added {crypto_symbol} to blacklist: {reason}")
+                    return True
+                    
+        except Exception as e:
+            self.logger.error(f"❌ Error adding {crypto_symbol} to blacklist: {e}")
+            return False
+    
+    def add_multiple_to_blacklist(self, crypto_symbols: Set[str], reason: str, blacklist_type: str = 'delisted', notes: str = None) -> int:
+        """Add multiple cryptocurrencies to blacklist, return number of successful additions"""
+        if not crypto_symbols:
+            return 0
+        
+        success_count = 0
+        for crypto in crypto_symbols:
+            if self.add_to_blacklist(crypto, reason, blacklist_type, notes):
+                success_count += 1
+        
+        self.logger.info(f"📋 Added {success_count}/{len(crypto_symbols)} cryptocurrencies to blacklist")
+        return success_count
+    
+    def is_announcement_processed(self, announcement_id: str) -> bool:
+        """Check if an announcement has been processed before"""
+        try:
+            if not all(self.db_config.values()):
+                return False
+            
+            with psycopg2.connect(**self.db_config) as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute("""
+                        SELECT 1 
+                        FROM processed_announcements 
+                        WHERE announcement_id = %s
+                    """, (announcement_id,))
+                    
+                    return cursor.fetchone() is not None
+                    
+        except Exception as e:
+            self.logger.error(f"❌ Error checking if announcement {announcement_id} is processed: {e}")
+            return False
+    
+    def mark_announcement_processed(self, announcement_id: str, title: str, url: str, 
+                                  p_time: int, affected_cryptos: Set[str] = None, 
+                                  protection_executed: bool = False, notes: str = None) -> bool:
+        """Mark an announcement as processed"""
+        try:
+            if not all(self.db_config.values()):
+                self.logger.warning("⚠️ Database credentials not fully configured, skipping announcement tracking")
+                return False
+            
+            with psycopg2.connect(**self.db_config) as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute("""
+                        INSERT INTO processed_announcements 
+                        (announcement_id, title, url, p_time, affected_cryptos, protection_executed, notes)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s)
+                        ON CONFLICT (announcement_id) DO NOTHING
+                    """, (announcement_id, title, url, p_time, 
+                          list(affected_cryptos) if affected_cryptos else None,
+                          protection_executed, notes))
+                    
+                    conn.commit()
+                    self.logger.info(f"✅ Marked announcement as processed: {announcement_id}")
+                    return True
+                    
+        except Exception as e:
+            self.logger.error(f"❌ Error marking announcement {announcement_id} as processed: {e}")
+            return False
 
 
 def test_blacklist_manager():
