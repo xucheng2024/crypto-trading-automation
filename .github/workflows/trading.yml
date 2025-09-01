@@ -72,6 +72,10 @@ jobs:
           mkdir -p logs
           set -o pipefail
           ~/.local/bin/uv sync --locked 2>&1 | tee logs/uv_install.log
+      
+      - name: Initialize executed scripts list
+        run: |
+          : > logs/executed_scripts.txt
           
       - name: Activate virtual environment
         run: |
@@ -87,6 +91,7 @@ jobs:
           OKX_PASSPHRASE: ${{ secrets.OKX_PASSPHRASE }}
         run: |
           echo "🔄 Running monitor_delist.py..."
+          echo "monitor_delist" >> logs/executed_scripts.txt
           source .venv/bin/activate && python monitor_delist.py || echo "⚠️ monitor_delist.py completed with warnings"
           
       - name: Run auto sell orders
@@ -98,6 +103,7 @@ jobs:
           OKX_PASSPHRASE: ${{ secrets.OKX_PASSPHRASE }}
         run: |
           echo "🔄 Running auto_sell_orders.py..."
+          echo "auto_sell_orders" >> logs/executed_scripts.txt
           source .venv/bin/activate && python auto_sell_orders.py || echo "⚠️ auto_sell_orders.py completed with warnings"
           
       - name: Run fetch filled orders
@@ -109,6 +115,7 @@ jobs:
           OKX_PASSPHRASE: ${{ secrets.OKX_PASSPHRASE }}
         run: |
           echo "🔄 Running fetch_filled_orders.py..."
+          echo "fetch_filled_orders" >> logs/executed_scripts.txt
           source .venv/bin/activate && python fetch_filled_orders.py || echo "⚠️ fetch_filled_orders.py completed with warnings"
           
       - name: Run cancel pending limits
@@ -120,6 +127,7 @@ jobs:
           OKX_PASSPHRASE: ${{ secrets.OKX_PASSPHRASE }}
         run: |
           echo "🔄 Running cancel_pending_limits.py..."
+          echo "cancel_pending_limits" >> logs/executed_scripts.txt
           source .venv/bin/activate && python cancel_pending_limits.py --side buy || echo "⚠️ cancel_pending_limits.py completed with warnings"
           
       - name: Run cancel pending triggers (nightly)
@@ -141,6 +149,7 @@ jobs:
           OKX_PASSPHRASE: ${{ secrets.OKX_PASSPHRASE }}
         run: |
           echo "🔄 Running cancel_pending_triggers.py..."
+          echo "cancel_pending_triggers" >> logs/executed_scripts.txt
           source .venv/bin/activate && python cancel_pending_triggers.py || echo "⚠️ cancel_pending_triggers.py completed with warnings"
           
       - name: Run create algo triggers (nightly)
@@ -163,7 +172,18 @@ jobs:
           OKX_ORDER_SIZE: ${{ secrets.OKX_ORDER_SIZE }}
         run: |
           echo "🔄 Running create_algo_triggers.py..."
+          echo "create_algo_triggers" >> logs/executed_scripts.txt
           source .venv/bin/activate && python create_algo_triggers.py || echo "⚠️ create_algo_triggers.py completed with warnings"
+
+      - name: Write run summary
+        if: always()
+        run: |
+          echo "### Executed scripts" >> "$GITHUB_STEP_SUMMARY"
+          if [ -s logs/executed_scripts.txt ]; then
+            sort -u logs/executed_scripts.txt | sed 's/^/- /' | tee -a "$GITHUB_STEP_SUMMARY"
+          else
+            echo "- None" | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
           
       - name: Upload logs
         uses: actions/upload-artifact@v4
