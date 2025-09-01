@@ -132,16 +132,7 @@ class OKXFilledOrdersFetcher:
 
 
 
-    def get_latest_order_utime(self):
-        """Get latest saved order uTime (ms) from DB, or None"""
-        try:
-            self.cursor.execute("SELECT MAX(CAST(utime AS BIGINT)) FROM filled_orders WHERE utime IS NOT NULL AND utime != ''")
-            row = self.cursor.fetchone()
-            if row and row[0]:
-                return int(row[0])
-        except Exception as e:
-            logger.warning(f"⚠️  Failed to get latest uTime from DB: {e}")
-        return None
+    # Removed get_latest_order_utime() - no longer needed since we always query last 1 hour
 
 
 
@@ -390,8 +381,8 @@ class OKXFilledOrdersFetcher:
             if failed_saves > 0:
                 logger.warning(f"⚠️  Failed: {failed_saves}")
             
-            # Check for updates to existing orders
-            self.check_and_update_existing_orders()
+            # Note: Removed check_and_update_existing_orders() as it's redundant
+            # Main mechanism with 1-hour window + ON CONFLICT DO UPDATE handles all cases
             
         except Exception as e:
             logger.error(f"❌ Error in fetch_and_save_filled_orders: {e}")
