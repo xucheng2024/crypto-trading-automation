@@ -356,23 +356,10 @@ class OKXFilledOrdersFetcher:
             end_time = datetime.utcnow()
             begin_time = end_time - timedelta(minutes=minutes or 15)  # Default to 15 minutes
 
-            # Use DB watermark based on uTime (update time) for better accuracy
-            latest_utime_ms = self.get_latest_order_utime()
-            if latest_utime_ms:
-                # Convert uTime to UTC datetime to match end_time
-                latest_dt = datetime.utcfromtimestamp(latest_utime_ms / 1000)
-                
-                # Use the later of: (latest_uTime + 1ms) OR (now - 1 hour)
-                # uTime represents update time, so we can be more precise
-                watermark_begin = latest_dt + timedelta(milliseconds=1)
-                safety_begin = end_time - timedelta(hours=1)  # Look back 1 hour for updates
-                
-                begin_time = max(watermark_begin, safety_begin)
-                
-                logger.info(f"🧭 Using uTime watermark. Latest uTime: {latest_dt.strftime('%H:%M:%S.%f')[:-3]} UTC")
-                logger.info(f"🧭 Query from: {begin_time.strftime('%H:%M:%S.%f')[:-3]} UTC (uTime-based) to {end_time.strftime('%H:%M:%S')} UTC")
-            else:
-                logger.info(f"🧭 No uTime watermark found, using time-based range: {begin_time.strftime('%H:%M:%S')} UTC")
+            # Always query last 1 hour to catch any order updates
+            # This ensures we don't miss accFillSz updates for existing orders
+            begin_time = end_time - timedelta(hours=1)
+            logger.info(f"🧭 Querying last 1 hour: {begin_time.strftime('%H:%M:%S.%f')[:-3]} UTC to {end_time.strftime('%H:%M:%S')} UTC")
             
             logger.info(f"🔍 Fetching orders: {begin_time.strftime('%H:%M:%S.%f')[:-3]} → {end_time.strftime('%H:%M:%S')}")
             
