@@ -31,13 +31,13 @@ export default {
       // 根据cron频率决定触发哪些脚本
       let scripts = [];
       
-      // 判断是否是7分钟间隔的触发 (2, 9, 16, 23, 30, 37, 44, 51, 58) - 错开整点避免冲突
-      if ([2, 9, 16, 23, 30, 37, 44, 51, 58].includes(minute)) {
+      // 判断是否是7分钟间隔的触发 (2, 9, 16, 23, 37, 44, 51, 58) - 错开整点避免冲突
+      if ([2, 9, 16, 23, 37, 44, 51, 58].includes(minute)) {
         scripts = ['monitor_delist', 'cancel_pending_limits'];
         console.log('📅 7-minute interval (staggered): monitor_delist + cancel_pending_limits');
       }
-      // 判断是否是15分钟间隔的触发 (0, 15, 30, 45)
-      else if (minute % 15 === 0) {
+      // 判断是否是15分钟间隔的触发 (0, 15, 45) - 移除30分钟避免与7分钟冲突
+      else if ([0, 15, 45].includes(minute)) {
         scripts = ['fetch_filled_orders', 'auto_sell_orders'];
         console.log('📅 15-minute interval: fetch_filled_orders + auto_sell_orders');
       }
@@ -110,8 +110,8 @@ export default {
       <hr>
       <h2>📅 Cron Schedule:</h2>
       <ul>
-        <li><strong>每7分钟 (2,9,16,23,30,37,44,51,58 * * * *)</strong>: monitor_delist.py + cancel_pending_limits.py</li>
-        <li><strong>每15分钟 (0,15,30,45 * * * *)</strong>: fetch_filled_orders.py + auto_sell_orders.py</li>
+        <li><strong>每7分钟 (2,9,16,23,37,44,51,58 * * * *)</strong>: monitor_delist.py + cancel_pending_limits.py</li>
+        <li><strong>每15分钟 (0,15,45 * * * *)</strong>: fetch_filled_orders.py + auto_sell_orders.py</li>
         <li><strong>每天23:55 SGT (55 15 * * * UTC)</strong>: cancel_pending_triggers.py</li>
         <li><strong>每天00:05 SGT (5 16 * * * UTC)</strong>: create_algo_triggers.py</li>
       </ul>
