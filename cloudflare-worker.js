@@ -18,8 +18,14 @@ export default {
     const minute = now.getUTCMinutes();
     const hour = now.getUTCHours();
     
-    console.log(`🕐 Cron triggered: ${cron} at ${scheduledTime}`);
-    console.log(`🕐 Trigger details: minute=${minute}, hour=${hour}, UTC time=${scheduledTime}`);
+    // 计算新加坡时间 (UTC+8)
+    const sgtTime = new Date(now.getTime() + 8 * 60 * 60 * 1000);
+    
+    console.log('=== Cron Triggered ===');
+    console.log(`🕐 Cron expression: ${cron}`);
+    console.log(`🕐 UTC time: ${now.toISOString()}`);
+    console.log(`🕐 SGT time: ${sgtTime.toISOString()}`);
+    console.log(`🕐 Trigger details: minute=${minute}, hour=${hour} UTC`);
     
     try {
       // 根据cron频率决定触发哪些脚本
@@ -35,15 +41,15 @@ export default {
         scripts = ['fetch_filled_orders', 'auto_sell_orders'];
         console.log('📅 15-minute interval: fetch_filled_orders + auto_sell_orders');
       }
-      // 每天23:55: 取消待处理触发器
-      else if (hour === 23 && minute === 55) {
+      // 每天15:55 UTC (23:55 SGT): 取消待处理触发器
+      else if (hour === 15 && minute === 55) {
         scripts = ['cancel_pending_triggers'];
-        console.log('🌙 Nightly: cancel_pending_triggers');
+        console.log('🌙 Nightly (SGT 23:55): cancel_pending_triggers');
       }
-      // 每天00:05: 创建算法触发器
-      else if (hour === 0 && minute === 5) {
+      // 每天16:05 UTC (00:05 SGT): 创建算法触发器
+      else if (hour === 16 && minute === 5) {
         scripts = ['create_algo_triggers'];
-        console.log('🌅 Morning: create_algo_triggers');
+        console.log('🌅 Morning (SGT 00:05): create_algo_triggers');
       }
       else {
         console.log(`⚠️ No scripts matched for cron: ${cron}, time: ${hour}:${minute}`);
@@ -65,13 +71,18 @@ export default {
             source: 'cloudflare-worker',
             cron_schedule: cron,
             scripts: scripts,
-            interval: (minute % 7 === 0 && minute % 15 !== 0) ? '7min' : (minute % 15 === 0) ? '15min' : ((hour === 23 && minute === 55) || (hour === 0 && minute === 5)) ? 'daily' : 'other'
+            interval: (minute % 7 === 0 && minute % 15 !== 0) ? '7min' : (minute % 15 === 0) ? '15min' : ((hour === 15 && minute === 55) || (hour === 16 && minute === 5)) ? 'daily' : 'other'
           }
         })
       });
 
+      console.log(`📤 GitHub API request sent for scripts: ${scripts.join(', ')}`);
+      console.log(`📤 GitHub API response status: ${response.status}`);
+      
       if (response.ok) {
+        const responseText = await response.text();
         console.log(`✅ GitHub Actions triggered successfully for: ${scripts.join(', ')}`);
+        console.log(`✅ GitHub API response: ${responseText || 'No response body'}`);
         return new Response('OK', { status: 200 });
       } else {
         const errorText = await response.text();
@@ -101,8 +112,8 @@ export default {
       <ul>
         <li><strong>每7分钟 (2,9,16,23,30,37,44,51,58 * * * *)</strong>: monitor_delist.py + cancel_pending_limits.py</li>
         <li><strong>每15分钟 (0,15,30,45 * * * *)</strong>: fetch_filled_orders.py + auto_sell_orders.py</li>
-        <li><strong>每天23:55 (55 23 * * *)</strong>: cancel_pending_triggers.py</li>
-        <li><strong>每天00:05 (5 0 * * *)</strong>: create_algo_triggers.py</li>
+        <li><strong>每天23:55 SGT (55 15 * * * UTC)</strong>: cancel_pending_triggers.py</li>
+        <li><strong>每天00:05 SGT (5 16 * * * UTC)</strong>: create_algo_triggers.py</li>
       </ul>
       <hr>
       <h2>🔧 执行逻辑:</h2>

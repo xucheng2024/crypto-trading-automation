@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Configuration Management Module
-Responsible for loading, cleaning, and backing up limits.json configuration files
+Responsible for loading, cleaning, and backing up limits configuration from database
 """
 
 import json
@@ -12,113 +12,174 @@ from typing import Set, Dict, Any, Optional
 
 
 class ConfigManager:
-    """Configuration File Manager"""
+    """Configuration Database Manager"""
     
-    def __init__(self, config_file: str = 'limits.json', logger: Optional[logging.Logger] = None):
-        self.config_file = config_file
+    def __init__(self, logger: Optional[logging.Logger] = None):
         self.logger = logger or logging.getLogger(__name__)
+        self.db = None
+        self._connect_to_database()
+    
+    def _connect_to_database(self):
+        """Connect to database"""
+        try:
+            from lib.database import Database
+            self.db = Database()
+            if not self.db.connect():
+                self.logger.error("❌ Failed to connect to database")
+                self.db = None
+        except Exception as e:
+            self.logger.error(f"❌ Database connection error: {e}")
+            self.db = None
     
     def load_configured_cryptos(self) -> Set[str]:
-        """Load configured cryptocurrency list from limits.json"""
+        """Load configured cryptocurrency list from database"""
         try:
-            with open(self.config_file, 'r', encoding='utf-8') as f:
-                data = json.load(f)
+            if not self.db:
+                self.logger.warning("⚠️ Database not available, will monitor all delist announcements")
+                return set()
             
-            # Extract all cryptocurrency pairs, remove -USDT suffix to get base currency symbol
-            crypto_pairs = list(data.get('crypto_configs', {}).keys())
+            # Get configured crypto pairs from database
+            crypto_pairs = self.db.get_configured_cryptos()
+            
+            # Extract base currency symbols (remove -USDT suffix)
             base_cryptos = set()
-            
             for pair in crypto_pairs:
                 if '-USDT' in pair:
                     base_crypto = pair.replace('-USDT', '')
                     base_cryptos.add(base_crypto)
             
-            self.logger.info(f"📋 Loaded {len(base_cryptos)} configured cryptocurrencies: {sorted(base_cryptos)}")
+            self.logger.info(f"📋 Loaded {len(base_cryptos)} configured cryptocurrencies from database: {sorted(base_cryptos)}")
             return base_cryptos
             
-        except FileNotFoundError:
-            self.logger.warning(f"⚠️ {self.config_file} file not found, will monitor all delist announcements")
-            return set()
-        except json.JSONDecodeError as e:
-            self.logger.error(f"❌ {self.config_file} format error: {e}")
-            return set()
         except Exception as e:
-            self.logger.error(f"❌ Failed to load {self.config_file}: {e}")
+            self.logger.error(f"❌ Failed to load configured cryptos from database: {e}")
             return set()
     
     def backup_config(self) -> str:
-        """Backup configuration file, return backup filename"""
+        """Backup configuration from database to JSON file, return backup filename"""
         backup_filename = f"limits_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
         try:
-            shutil.copy(self.config_file, backup_filename)
-            self.logger.info(f"📋 Original configuration backed up to: {backup_filename}")
+            if not self.db:
+                self.logger.error("❌ Database not available for backup")
+                return ""
+            
+            # Load configuration from database
+            config_data = self.db.load_limits_config()
+            if not config_data:
+                self.logger.error("❌ No configuration found in database")
+                return ""
+            
+            # Create backups directory if it doesn't exist
+            os.makedirs('backups', exist_ok=True)
+            
+            # Save to backup file
+            backup_path = f"backups/{backup_filename}"
+            with open(backup_path, 'w', encoding='utf-8') as f:
+                json.dump(config_data, f, indent=2, ensure_ascii=False)
+            
+            self.logger.info(f"📦 Configuration backed up to: {backup_path}")
             return backup_filename
         except Exception as e:
-            self.logger.error(f"❌ Failed to backup configuration file: {e}")
-            raise
+            self.logger.error(f"❌ Failed to backup configuration: {e}")
+            return ""
     
     def remove_cryptos_from_config(self, affected_cryptos: Set[str]) -> bool:
-        """Remove affected cryptocurrencies from configuration"""
+        """Remove affected cryptocurrencies from database configuration"""
         if not affected_cryptos:
             return True
         
         try:
-            # Backup original configuration file
+            if not self.db:
+                self.logger.error("❌ Database not available for configuration update")
+                return False
+            
+            # Backup original configuration
             self.backup_config()
             
-            # Read current configuration
-            with open(self.config_file, 'r', encoding='utf-8') as f:
-                limits_config = json.load(f)
-            
-            # Count configurations before removal
-            original_count = len(limits_config.get('crypto_configs', {}))
-            
-            # Remove affected cryptocurrency configurations
+            # Remove affected cryptocurrency configurations from database
             removed_cryptos = []
-            crypto_configs = limits_config.get('crypto_configs', {})
             
             for crypto in affected_cryptos:
                 pair_key = f"{crypto}-USDT"
-                if pair_key in crypto_configs:
-                    del crypto_configs[pair_key]
+                
+                # Check if crypto pair exists in database
+                config = self.db.get_crypto_config(pair_key)
+                if config:
+                    # Remove from database
+                    self.db.cursor.execute('DELETE FROM crypto_limits WHERE inst_id = %s', (pair_key,))
                     removed_cryptos.append(crypto)
-                    self.logger.info(f"🗑️  Removed from configuration: {pair_key}")
+                    self.logger.info(f"🗑️  Removed from database configuration: {pair_key}")
             
-            # Update configuration and save
+            # Commit changes
             if removed_cryptos:
-                limits_config['crypto_configs'] = crypto_configs
+                self.db.conn.commit()
                 
-                with open(self.config_file, 'w', encoding='utf-8') as f:
-                    json.dump(limits_config, f, indent=2, ensure_ascii=False)
+                # Get updated count
+                remaining_cryptos = self.db.get_configured_cryptos()
+                new_count = len(remaining_cryptos)
                 
-                new_count = len(crypto_configs)
-                self.logger.info(f"✅ Configuration cleanup completed: {original_count} -> {new_count} ({len(removed_cryptos)} removed)")
+                self.logger.info(f"✅ Database configuration cleanup completed: {len(removed_cryptos)} removed")
                 self.logger.info(f"📋 Removed cryptocurrencies: {removed_cryptos}")
+                self.logger.info(f"📊 Remaining crypto pairs: {new_count}")
                 
                 return True
             else:
-                self.logger.info("ℹ️ No cryptocurrencies found in configuration that need to be removed")
+                self.logger.info("ℹ️ No cryptocurrencies found in database configuration that need to be removed")
                 return True
                 
         except Exception as e:
-            self.logger.error(f"❌ Failed to clean configuration file: {e}")
+            self.logger.error(f"❌ Failed to clean database configuration: {e}")
             return False
     
     def get_config_stats(self) -> Dict[str, Any]:
-        """Get configuration file statistics"""
+        """Get database configuration statistics"""
         try:
-            with open(self.config_file, 'r', encoding='utf-8') as f:
-                data = json.load(f)
+            if not self.db:
+                self.logger.error("❌ Database not available for statistics")
+                return {}
             
-            crypto_configs = data.get('crypto_configs', {})
+            # Load configuration from database
+            config_data = self.db.load_limits_config()
+            if not config_data:
+                return {}
+            
+            crypto_configs = config_data.get('crypto_configs', {})
             return {
                 'total_cryptos': len(crypto_configs),
                 'crypto_pairs': list(crypto_configs.keys()),
-                'strategy_name': data.get('strategy_name', 'Unknown'),
-                'generated_at': data.get('generated_at', 'Unknown')
+                'strategy_name': config_data.get('strategy_name', 'Unknown'),
+                'generated_at': config_data.get('generated_at', 'Unknown')
             }
         except Exception as e:
-            self.logger.error(f"❌ Failed to get configuration statistics: {e}")
+            self.logger.error(f"❌ Failed to get database configuration statistics: {e}")
+            return {}
+    
+    def load_full_config(self) -> Dict[str, Any]:
+        """Load full configuration from database"""
+        try:
+            if not self.db:
+                self.logger.error("❌ Database not available")
+                return {}
+            
+            config_data = self.db.load_limits_config()
+            if config_data:
+                self.logger.info(f"📋 Loaded full configuration from database: {len(config_data.get('crypto_configs', {}))} crypto pairs")
+            return config_data or {}
+        except Exception as e:
+            self.logger.error(f"❌ Failed to load full configuration from database: {e}")
+            return {}
+    
+    def get_crypto_config(self, inst_id: str) -> Dict[str, Any]:
+        """Get configuration for specific crypto pair"""
+        try:
+            if not self.db:
+                self.logger.error("❌ Database not available")
+                return {}
+            
+            config = self.db.get_crypto_config(inst_id)
+            return config or {}
+        except Exception as e:
+            self.logger.error(f"❌ Failed to get crypto config for {inst_id}: {e}")
             return {}
 
 

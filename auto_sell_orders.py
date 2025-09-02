@@ -106,18 +106,18 @@ class AutoSellOrders:
 
 
     def load_auto_sell_config(self):
-        """Load auto-sell configuration from limits.json"""
+        """Load auto-sell configuration from database"""
         try:
-            import json
-            with open('limits.json', 'r', encoding='utf-8') as f:
-                config = json.load(f)
+            from config_manager import ConfigManager
+            config_manager = ConfigManager(self.logger)
+            config = config_manager.load_full_config()
             
             min_usd = config.get('auto_sell_config', {}).get('min_usd_value', 0.01)
-            self.logger.info(f"⚙️  Auto-sell config loaded: Min USD value = ${min_usd}")
+            self.logger.info(f"⚙️  Auto-sell config loaded from database: Min USD value = ${min_usd}")
             return min_usd
             
         except Exception as e:
-            self.logger.warning(f"⚠️  Failed to load auto-sell config, using default: ${0.01} - {e}")
+            self.logger.warning(f"⚠️  Failed to load auto-sell config from database, using default: ${0.01} - {e}")
             return 0.01
 
     def get_orders_ready_to_sell(self):

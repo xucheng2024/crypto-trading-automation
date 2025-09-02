@@ -231,15 +231,20 @@ class OKXAlgoTrigger:
             logger.debug(f"Traceback: {traceback.format_exc()}")
             raise  # Re-raise for retry mechanism
     
-    def process_limits_file(self, limits_file="limits.json"):
-        """Process limits.json and create algo trigger orders"""
+    def process_limits_from_database(self):
+        """Process limits from database and create algo trigger orders"""
         try:
-            # Read limits.json
-            with open(limits_file, 'r') as f:
-                limits_data = json.load(f)
+            # Load configuration from database
+            from config_manager import ConfigManager
+            config_manager = ConfigManager(logger)
+            limits_data = config_manager.load_full_config()
+            
+            if not limits_data:
+                logger.error("❌ No limits configuration found in database")
+                return False
             
             crypto_configs = limits_data.get('crypto_configs', {})
-            logger.info(f"📋 Found {len(crypto_configs)} crypto pairs in {limits_file}")
+            logger.info(f"📋 Found {len(crypto_configs)} crypto pairs in database")
             
             # Load blacklisted cryptocurrencies
             blacklisted_cryptos = self.blacklist_manager.get_blacklisted_cryptos()
@@ -323,22 +328,17 @@ class OKXAlgoTrigger:
 
 def main():
     try:
-        logger.info("🚀 OKX Algo Trigger Order Creator (Using Official SDK)")
+        logger.info("🚀 OKX Algo Trigger Order Creator (Using Database Configuration)")
         logger.info("=" * 60)
-        
-        # Check if limits.json exists
-        if not os.path.exists("limits.json"):
-            logger.error("❌ Error: limits.json not found in current directory")
-            sys.exit(1)
         
         # Use default order size or get from environment variable
         order_size = os.getenv('OKX_ORDER_SIZE', '100')
         logger.info(f"📊 Using order size: {order_size} USDT")
         logger.info("=" * 60)
         
-        # Create OKX client and process limits
+        # Create OKX client and process limits from database
         okx_client = OKXAlgoTrigger(order_size=order_size)
-        okx_client.process_limits_file()
+        okx_client.process_limits_from_database()
         
         logger.info("✅ Script completed successfully")
         

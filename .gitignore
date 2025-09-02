@@ -78,6 +78,7 @@ MANIFEST
 .env.*
 config.json
 secrets.json
+limits.json
 
 # Coverage directory used by tools like istanbul
 coverage/
