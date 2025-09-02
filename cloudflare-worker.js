@@ -33,31 +33,24 @@ export default {
     console.log(`🕐 Trigger details: minute=${minute}, hour=${hour} UTC`);
     
     try {
-      // 根据cron频率决定触发哪些脚本
+      // 根据event.cron精确分流，避免时间判断错误
+      const cronStr = event.cron;
       let scripts = [];
       
-      // 判断是否是5分钟间隔的触发 (1, 6, 11, 16, 21, 26, 31, 36, 41, 46, 51, 56) - 错开整点避免冲突
-      if ([1, 6, 11, 16, 21, 26, 31, 36, 41, 46, 51, 56].includes(minute)) {
+      if (cronStr.includes('1,6,11,16,21,26,31,36,41,46,51,56')) {
         scripts = ['monitor_delist', 'cancel_pending_limits'];
         console.log('📅 5-minute interval (staggered): monitor_delist + cancel_pending_limits');
-      }
-      // 判断是否是15分钟间隔的触发 (0, 15, 30, 45)
-      else if ([0, 15, 30, 45].includes(minute)) {
+      } else if (cronStr.includes('0,15,30,45')) {
         scripts = ['fetch_filled_orders', 'auto_sell_orders'];
         console.log('📅 15-minute interval: fetch_filled_orders + auto_sell_orders');
-      }
-      // 每天15:55 UTC (23:55 SGT): 取消待处理触发器
-      else if (hour === 15 && minute === 55) {
+      } else if (cronStr.startsWith('55 15')) {
         scripts = ['cancel_pending_triggers'];
         console.log('🌙 Nightly (SGT 23:55): cancel_pending_triggers');
-      }
-      // 每天16:05 UTC (00:05 SGT): 创建算法触发器
-      else if (hour === 16 && minute === 5) {
+      } else if (cronStr.startsWith('5 16')) {
         scripts = ['create_algo_triggers'];
         console.log('🌅 Morning (SGT 00:05): create_algo_triggers');
-      }
-      else {
-        console.log(`⚠️ No scripts matched for cron: ${cron}, time: ${hour}:${minute}`);
+      } else {
+        console.log(`⚠️ No scripts matched for cron: ${cronStr}`);
         return new Response('No scripts to run', { status: 200 });
       }
       
@@ -76,7 +69,7 @@ export default {
             source: 'cloudflare-worker',
             cron_schedule: cron,
             scripts: scripts,
-            interval: (minute % 7 === 0 && minute % 15 !== 0) ? '7min' : (minute % 15 === 0) ? '15min' : ((hour === 15 && minute === 55) || (hour === 16 && minute === 5)) ? 'daily' : 'other'
+            interval: cronStr.includes('1,6,11,16,21,26,31,36,41,46,51,56') ? '5min' : cronStr.includes('0,15,30,45') ? '15min' : (cronStr.startsWith('55 15') || cronStr.startsWith('5 16')) ? 'daily' : 'other'
           }
         })
       });
