@@ -37,7 +37,7 @@ export default {
       const cronStr = event.cron;
       let scripts = [];
       
-      if (cronStr.includes('11,16,21,26,31,36,41,46,51,56')) {
+      if (cronStr.includes('1,6,11,16,21,26,31,36,41,46,51,56')) {
         scripts = ['monitor_delist', 'cancel_pending_limits'];
         console.log('📅 5-minute interval (staggered): monitor_delist + cancel_pending_limits');
       } else if (cronStr.includes('0,15,30,45')) {
@@ -69,7 +69,7 @@ export default {
             source: 'cloudflare-worker',
             cron_schedule: cron,
             scripts: scripts,
-            interval: cronStr.includes('11,16,21,26,31,36,41,46,51,56') ? '5min' : cronStr.includes('0,15,30,45') ? '15min' : (cronStr.startsWith('55 15') || cronStr.startsWith('5 16')) ? 'daily' : 'other'
+            interval: cronStr.includes('1,6,11,16,21,26,31,36,41,46,51,56') ? '5min' : cronStr.includes('0,15,30,45') ? '15min' : (cronStr.startsWith('55 15') || cronStr.startsWith('5 16')) ? 'daily' : 'other'
           }
         })
       });
@@ -108,7 +108,7 @@ export default {
       <hr>
       <h2>📅 Cron Schedule:</h2>
       <ul>
-        <li><strong>每5分钟 (11,16,21,26,31,36,41,46,51,56 * * * *)</strong>: monitor_delist.py + cancel_pending_limits.py</li>
+        <li><strong>每5分钟 (1,6,11,16,21,26,31,36,41,46,51,56 * * * *)</strong>: monitor_delist.py + cancel_pending_limits.py</li>
         <li><strong>每15分钟 (0,15,30,45 * * * *)</strong>: fetch_filled_orders.py + auto_sell_orders.py</li>
         <li><strong>每天23:55 SGT (55 15 * * * UTC)</strong>: cancel_pending_triggers.py</li>
         <li><strong>每天00:05 SGT (5 16 * * * UTC)</strong>: create_algo_triggers.py</li>
