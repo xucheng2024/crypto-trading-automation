@@ -6,7 +6,7 @@
 // GitHub 配置
 const GITHUB_OWNER = 'xucheng2024';
 const GITHUB_REPO = 'crypto-trading-automation';
-const GITHUB_TOKEN = 'YOUR_GITHUB_TOKEN'; // 需要设置环境变量
+
 
 export default {
   async scheduled(event, env, ctx) {
@@ -65,7 +65,7 @@ export default {
       const response = await fetch(`https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/dispatches`, {
         method: 'POST',
         headers: {
-          'Authorization': `token ${env.GITHUB_TOKEN || GITHUB_TOKEN}`,
+          'Authorization': `token ${env.GITHUB_TOKEN}`,
           'Accept': 'application/vnd.github.v3+json',
           'User-Agent': 'Cloudflare-Worker-Cron'
         },
