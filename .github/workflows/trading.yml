@@ -13,22 +13,33 @@ on:
   repository_dispatch:
     types: [cron]
 
+# 动态设置运行名称
+run-name: |
+  ${{ github.event_name == 'workflow_dispatch' && format('Manual: {0}', github.event.inputs.scripts) || format('Auto: {0}', join(github.event.client_payload.scripts, ', ')) }}
+
 jobs:
   trading:
+    name: Crypto Trading Bot
     runs-on: ubuntu-latest
     
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
         
-      - name: Log execution time
+      - name: Log execution time and scripts
         run: |
           echo "🕐 Workflow started at: $(date -u)"
           echo "🕐 UTC time: $(date -u +%Y-%m-%d\ %H:%M:%S\ UTC)"
-          echo "🕐 Cron schedule: ${{ github.event.schedule || 'manual' }}"
           echo "🕐 Event type: ${{ github.event_name }}"
-          echo "🧰 Scripts payload: ${{ toJSON(github.event.client_payload.scripts) }}"
-          echo "🧰 Manual input scripts: ${{ github.event.inputs.scripts }}"
+          echo "=========================================="
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "🎯 MANUAL TRIGGER - Scripts: ${{ github.event.inputs.scripts }}"
+          elif [ "${{ github.event_name }}" = "repository_dispatch" ]; then
+            echo "🤖 AUTO TRIGGER - Scripts: ${{ join(github.event.client_payload.scripts, ', ') }}"
+            echo "📅 Cron schedule: ${{ github.event.client_payload.cron_schedule }}"
+            echo "⏰ Interval: ${{ github.event.client_payload.interval }}"
+          fi
+          echo "=========================================="
         
       - name: Set up Python
         uses: actions/setup-python@v4
@@ -82,7 +93,7 @@ jobs:
           source .venv/bin/activate
           echo "✅ Virtual environment activated"
           
-      - name: Run monitoring and protection
+      - name: 🔍 Execute monitor_delist.py - Delisting Protection
         if: (github.event_name == 'workflow_dispatch' && contains(github.event.inputs.scripts, 'monitor_delist')) || (github.event_name == 'repository_dispatch' && github.event.action == 'cron' && contains(toJSON(github.event.client_payload.scripts), 'monitor_delist'))
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
@@ -94,7 +105,7 @@ jobs:
           echo "monitor_delist" >> logs/executed_scripts.txt
           source .venv/bin/activate && python monitor_delist.py || echo "⚠️ monitor_delist.py completed with warnings"
           
-      - name: Run auto sell orders
+      - name: 💰 Execute auto_sell_orders.py - Market Sell Orders
         if: (github.event_name == 'workflow_dispatch' && contains(github.event.inputs.scripts, 'auto_sell_orders')) || (github.event_name == 'repository_dispatch' && github.event.action == 'cron' && contains(github.event.client_payload.scripts, 'auto_sell_orders'))
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
@@ -106,7 +117,7 @@ jobs:
           echo "auto_sell_orders" >> logs/executed_scripts.txt
           source .venv/bin/activate && python auto_sell_orders.py || echo "⚠️ auto_sell_orders.py completed with warnings"
           
-      - name: Run fetch filled orders
+      - name: 📊 Execute fetch_filled_orders.py - Order Tracking
         if: (github.event_name == 'workflow_dispatch' && contains(github.event.inputs.scripts, 'fetch_filled_orders')) || (github.event_name == 'repository_dispatch' && github.event.action == 'cron' && contains(github.event.client_payload.scripts, 'fetch_filled_orders'))
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
@@ -118,7 +129,7 @@ jobs:
           echo "fetch_filled_orders" >> logs/executed_scripts.txt
           source .venv/bin/activate && python fetch_filled_orders.py || echo "⚠️ fetch_filled_orders.py completed with warnings"
           
-      - name: Run cancel pending limits
+      - name: ❌ Execute cancel_pending_limits.py - Limit Order Management
         if: (github.event_name == 'workflow_dispatch' && contains(github.event.inputs.scripts, 'cancel_pending_limits')) || (github.event_name == 'repository_dispatch' && github.event.action == 'cron' && contains(toJSON(github.event.client_payload.scripts), 'cancel_pending_limits'))
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
@@ -130,7 +141,7 @@ jobs:
           echo "cancel_pending_limits" >> logs/executed_scripts.txt
           source .venv/bin/activate && python cancel_pending_limits.py --side buy || echo "⚠️ cancel_pending_limits.py completed with warnings"
           
-      - name: Run cancel pending triggers (nightly)
+      - name: 🌙 Execute cancel_pending_triggers.py - Nightly Cleanup
         if: (
               github.event_name == 'workflow_dispatch' && (
                 contains(github.event.inputs.scripts, 'cancel_pending_triggers') ||
@@ -152,7 +163,7 @@ jobs:
           echo "cancel_pending_triggers" >> logs/executed_scripts.txt
           source .venv/bin/activate && python cancel_pending_triggers.py || echo "⚠️ cancel_pending_triggers.py completed with warnings"
           
-      - name: Run create algo triggers (nightly)
+      - name: 🌅 Execute create_algo_triggers.py - Morning Setup
         if: (
               github.event_name == 'workflow_dispatch' && (
                 contains(github.event.inputs.scripts, 'create_algo_triggers') ||
