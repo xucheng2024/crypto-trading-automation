@@ -10,7 +10,7 @@ GITHUB_REPO = "crypto-trading-automation"
 [triggers]
 crons = [
   # 每5分钟执行: monitor_delist + cancel_pending_limits (错开整点，避免与15分钟冲突)
-  "1,6,11,16,21,26,31,36,41,46,51,56 * * * *",
+  "11,16,21,26,31,36,41,46,51,56 * * * *",
   # 每15分钟执行: fetch_filled_orders + auto_sell_orders (整点)
   "0,15,30,45 * * * *",
   # 每天23:55 SGT (15:55 UTC) - 取消待处理触发器
