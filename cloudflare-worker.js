@@ -6,7 +6,7 @@
 // GitHub 配置
 const GITHUB_OWNER = 'xucheng2024';
 const GITHUB_REPO = 'crypto-trading-automation';
-4const GITHUB_TOKEN = 'YOUR_GITHUB_TOKEN'; // 需要设置环境变量
+const GITHUB_TOKEN = 'YOUR_GITHUB_TOKEN'; // 需要设置环境变量
 
 export default {
   async scheduled(event, env, ctx) {
