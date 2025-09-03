@@ -236,12 +236,12 @@ python monitor_delist.py
 
 ```env
 # PostgreSQL Database (required)
-DATABASE_URL=postgresql://username:password@host:port/database
+DATABASE_URL=your_database_connection_string
 
 # OKX Production API (required for private endpoints)
-OKX_API_KEY=your_production_api_key
-OKX_SECRET_KEY=your_production_secret_key
-OKX_PASSPHRASE=your_production_passphrase
+OKX_API_KEY=your_api_key
+OKX_SECRET_KEY=your_secret_key
+OKX_PASSPHRASE=your_passphrase
 
 # OKX Trading Environment (false for live, true for demo)
 OKX_TESTNET=false
@@ -407,7 +407,7 @@ crypto_remote/
 ### Cloudflare Worker Deployment
 - **✅ Worker Name**: `crypto-trading-cron-prod`
 - **✅ Access URL**: `https://crypto-trading-cron-prod.eatfreshapple.workers.dev/`
-- **✅ KV Namespace**: `DEDUP_KV` (ID: 6a50d25e1cb9432e85c19d32f043e91a)
+- **✅ KV Namespace**: `DEDUP_KV` (ID configured via environment variable)
 - **✅ Environment Variables**: All secrets properly configured
 - **✅ Cron Scheduling**: 4 different time intervals active
 - **✅ Deduplication**: KV-based minute-level deduplication working
