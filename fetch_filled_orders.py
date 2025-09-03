@@ -123,7 +123,7 @@ class OKXFilledOrdersFetcher:
             logger.info("✅ Connected to PostgreSQL database")
             
             logger.info(f"🚀 OKX Filled Orders Fetcher - {'Demo' if self.testnet else 'Live'}")
-            logger.info(f"🔑 API: {self.api_key[:8]}...{self.api_key[-4:] if len(self.api_key) > 12 else '***'}")
+            logger.info(f"🔑 API: {'✅ Configured' if self.api_key else '❌ Not Configured'}")
             
         except Exception as e:
             logger.error(f"❌ Failed to initialize OKX API: {e}")

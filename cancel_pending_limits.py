@@ -96,7 +96,7 @@ class OKXLimitOrderManager:
             logger.info("🚀 OKX Pending Limit Order Canceller")
             logger.info("============================================================")
             logger.info(f"🔧 Trading Environment: {'Demo' if self.testnet else 'Live'}")
-            logger.info(f"🔑 API Key: {self.api_key[:8]}...{self.api_key[-4:] if len(self.api_key) > 12 else '***'}")
+            logger.info(f"🔑 API Key: {'✅ Configured' if self.api_key else '❌ Not Configured'}")
             logger.info("============================================================")
             
         except Exception as e:

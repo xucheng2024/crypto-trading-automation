@@ -48,7 +48,7 @@ class ConfigManager:
                     base_crypto = pair.replace('-USDT', '')
                     base_cryptos.add(base_crypto)
             
-            self.logger.info(f"📋 Loaded {len(base_cryptos)} configured cryptocurrencies from database: {sorted(base_cryptos)}")
+            self.logger.info(f"📋 Loaded {len(base_cryptos)} configured cryptocurrencies from database")
             return base_cryptos
             
         except Exception as e:
