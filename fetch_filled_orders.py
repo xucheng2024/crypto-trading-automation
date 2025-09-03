@@ -136,31 +136,43 @@ class OKXFilledOrdersFetcher:
 
 
 
+    def get_last_trade_timestamp(self):
+        """Get the timestamp of the last trade from database"""
+        try:
+            self.cursor.execute('''
+                SELECT MAX(CAST(ts AS BIGINT)) as last_ts
+                FROM filled_orders 
+                WHERE ts IS NOT NULL AND ts != ''
+            ''')
+            result = self.cursor.fetchone()
+            if result and result[0]:
+                return int(result[0])
+            return None
+        except Exception as e:
+            logger.warning(f"⚠️ Failed to get last trade timestamp: {e}")
+            return None
+
     @retry(
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=4, max=10),
         retry=retry_if_exception_type((Exception,))
     )
-    def get_filled_orders(self, begin_time=None, end_time=None, limit=100):
-        """Get filled limit orders with retry mechanism"""
+    def get_filled_trades(self, begin_ts=None, limit=100):
+        """Get filled trades using get_fills API with retry mechanism"""
         try:
-            logger.debug("🔍 Fetching filled limit orders...")
+            logger.debug("🔍 Fetching filled trades...")
             
-            # Prepare parameters for get_orders_history
+            # Prepare parameters for get_fills (transaction details)
             params = {
                 'instType': 'SPOT',
-                'ordType': 'limit',
-                'state': 'filled',
                 'limit': str(limit)
             }
             
-            # Add time filters if provided (using begin/end for orders_history)
-            if begin_time:
-                params['begin'] = str(int(begin_time.timestamp() * 1000))
-            if end_time:
-                params['end'] = str(int(end_time.timestamp() * 1000))
+            # Add time filter if provided
+            if begin_ts:
+                params['begin'] = str(begin_ts)
             
-            result = self.trade_api.get_orders_history(**params)
+            result = self.trade_api.get_fills(**params)
             
             if not result:
                 logger.warning("⚠️  Empty response from API")
@@ -170,22 +182,22 @@ class OKXFilledOrdersFetcher:
             logger.debug(f"🔍 Full API response: {result}")
             
             if result.get('code') == '0':
-                orders = result.get('data', [])
-                logger.info(f"📋 Found {len(orders)} filled limit orders")
+                trades = result.get('data', [])
+                logger.info(f"📋 Found {len(trades)} total trades")
                 
-                # Filter for buy orders only
-                buy_orders = [order for order in orders if order.get('side') == 'buy']
-                logger.info(f"📋 Filtered to {len(buy_orders)} buy orders (removed {len(orders) - len(buy_orders)} sell orders)")
+                # Filter for buy trades only
+                buy_trades = [trade for trade in trades if trade.get('side') == 'buy']
+                logger.info(f"📋 Filtered to {len(buy_trades)} buy trades (removed {len(trades) - len(buy_trades)} sell trades)")
                 
-                # Log order details for debugging
-                if buy_orders:
-                    logger.debug(f"📝 Order types found: {list(set(order.get('ordType', 'unknown') for order in buy_orders))}")
-                    logger.debug(f"📝 Order sides found: {list(set(order.get('side', 'unknown') for order in buy_orders))}")
-                    # Log first order structure for debugging
-                    if len(buy_orders) > 0:
-                        logger.debug(f"📝 First order structure: {list(buy_orders[0].keys())}")
+                # Log trade details for debugging
+                if buy_trades:
+                    logger.debug(f"📝 Trade sides found: {list(set(trade.get('side', 'unknown') for trade in buy_trades))}")
+                    logger.debug(f"📝 Sub types found: {list(set(trade.get('subType', 'unknown') for trade in buy_trades))}")
+                    # Log first trade structure for debugging
+                    if len(buy_trades) > 0:
+                        logger.debug(f"📝 First trade structure: {list(buy_trades[0].keys())}")
                 
-                return buy_orders
+                return buy_trades
             else:
                 error_msg = result.get('msg', 'Unknown error')
                 logger.error(f"❌ API Error getting filled orders: {error_msg}")
@@ -193,22 +205,24 @@ class OKXFilledOrdersFetcher:
                 return []
                 
         except Exception as e:
-            logger.error(f"❌ Exception getting filled orders: {e}")
+            logger.error(f"❌ Exception getting filled trades: {e}")
             logger.debug(f"Traceback: {traceback.format_exc()}")
             raise  # Re-raise for retry mechanism
 
-    def save_order_to_db(self, order):
-        """Save a single order to database"""
+    def save_trade_to_db(self, trade):
+        """Save a single trade to database"""
         try:
-            # Extract required fields
-            inst_id = order.get('instId', '')
-            ord_id = order.get('ordId', '')
-            fill_px = order.get('fillPx', '')
-            fill_sz = order.get('fillSz', '')
-            side = order.get('side', '')
+            # Extract required fields from trade data
+            inst_id = trade.get('instId', '')
+            ord_id = trade.get('ordId', '')
+            trade_id = trade.get('tradeId', '')
+            bill_id = trade.get('billId', '')
+            fill_px = trade.get('fillPx', '')
+            fill_sz = trade.get('fillSz', '')
+            side = trade.get('side', '')
             
-            # Try multiple timestamp fields in order of preference
-            ts = order.get('fillTime') or order.get('uTime') or order.get('cTime') or ''
+            # Use ts field from trade data
+            ts = trade.get('ts', '')
             
             # Calculate sell time (ts + 20 hours)
             sell_time = None
@@ -221,84 +235,84 @@ class OKXFilledOrdersFetcher:
                 except (ValueError, TypeError) as e:
                     logger.warning(f"⚠️  Could not calculate sell time for order {ord_id}: {e}")
             
-            # Validate required fields (make ts optional for now)
-            if not all([inst_id, ord_id, fill_px, fill_sz, side]):
-                logger.warning(f"⚠️  Skipping order with missing required data: {order}")
+            # Validate required fields
+            if not all([inst_id, trade_id, fill_px, fill_sz, side]):
+                logger.warning(f"⚠️  Skipping trade with missing required data: {trade}")
                 return False
             
             # Prepare data for insertion
             data = {
                 'instId': inst_id,
                 'ordId': ord_id,
+                'tradeId': trade_id,
+                'billId': bill_id,
                 'fillPx': fill_px,
                 'fillSz': fill_sz,
                 'side': side,
                 'ts': ts,
-                'ordType': order.get('ordType', ''),
-                'avgPx': order.get('avgPx', ''),
-                'accFillSz': order.get('accFillSz', ''),
-                'fee': order.get('fee', ''),
-                'feeCcy': order.get('feeCcy', ''),
-                'tradeId': order.get('tradeId', ''),
-                'fillTime': order.get('fillTime', ''),
-                'cTime': order.get('cTime', ''),
-                'uTime': order.get('uTime', ''),
+                'subType': trade.get('subType', ''),
+                'execType': trade.get('execType', ''),
+                'fee': trade.get('fee', ''),
+                'feeCcy': trade.get('feeCcy', ''),
+                'feeRate': trade.get('feeRate', ''),
+                'fillTime': trade.get('fillTime', ''),
+                'posSide': trade.get('posSide', ''),
+                'clOrdId': trade.get('clOrdId', ''),
+                'tag': trade.get('tag', ''),
                 'sell_time': sell_time
             }
             
-            # Insert new order; update existing order but preserve sell_time and sold_status
+            # Insert new trade; update existing trade but preserve sell_time and sold_status
             self.cursor.execute('''
                 INSERT INTO filled_orders 
-                (instId, ordId, fillPx, fillSz, side, ts, ordType, avgPx, accFillSz, fee, feeCcy, tradeId, fillTime, cTime, uTime, sell_time)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT (ordId) DO UPDATE SET
+                (instId, ordId, tradeId, billId, fillPx, fillSz, side, ts, subType, execType, fee, feeCcy, feeRate, fillTime, posSide, clOrdId, tag, sell_time)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (tradeId) DO UPDATE SET
                     fillPx = EXCLUDED.fillPx,
                     fillSz = EXCLUDED.fillSz,
-                    avgPx = EXCLUDED.avgPx,
-                    accFillSz = EXCLUDED.accFillSz,
                     fee = EXCLUDED.fee,
                     feeCcy = EXCLUDED.feeCcy,
-                    tradeId = EXCLUDED.tradeId,
+                    feeRate = EXCLUDED.feeRate,
                     fillTime = EXCLUDED.fillTime,
-                    uTime = EXCLUDED.uTime
+                    execType = EXCLUDED.execType
                     -- sell_time and sold_status are preserved (not updated)
             ''', (
-                data['instId'], data['ordId'], data['fillPx'], data['fillSz'], data['side'], data['ts'],
-                data['ordType'], data['avgPx'], data['accFillSz'], data['fee'], data['feeCcy'],
-                data['tradeId'], data['fillTime'], data['cTime'], data['uTime'], data['sell_time']
+                data['instId'], data['ordId'], data['tradeId'], data['billId'], data['fillPx'], data['fillSz'], 
+                data['side'], data['ts'], data['subType'], data['execType'], data['fee'], data['feeCcy'], 
+                data['feeRate'], data['fillTime'], data['posSide'], data['clOrdId'], data['tag'], data['sell_time']
             ))
 
             # Log the result of insert/update
             if self.cursor.rowcount == 1:
-                logger.debug(f"✅ Order inserted/updated: {ord_id}")
+                logger.debug(f"✅ Trade inserted/updated: {trade_id}")
             else:
-                logger.debug(f"⚠️  Unexpected rowcount: {self.cursor.rowcount} for order: {ord_id}")
+                logger.debug(f"⚠️  Unexpected rowcount: {self.cursor.rowcount} for trade: {trade_id}")
                 return False
             
-            # If order is newly saved and it's a buy order, create trigger sell order
-            # Check if this is a new order (not an update) by checking if sell_time was just set
+            # If trade is newly saved and it's a buy trade, create trigger sell order
+            # Check if this is a new trade (not an update) by checking if sell_time was just set
             if self.cursor.rowcount == 1 and side == 'buy' and fill_px and fill_sz and sell_time:
-                # Check if this order already has a sell_time (meaning it was updated, not inserted)
-                self.cursor.execute('SELECT sell_time FROM filled_orders WHERE ordId = %s', (ord_id,))
+                # Check if this trade already has a sell_time (meaning it was updated, not inserted)
+                self.cursor.execute('SELECT sell_time FROM filled_orders WHERE tradeId = %s', (trade_id,))
                 existing_sell_time = self.cursor.fetchone()
                 
                 if existing_sell_time and existing_sell_time[0] == sell_time:
-                    # This is a new order, create trigger sell order
-                    logger.info(f"💰 New buy order saved: {inst_id} @ {fill_px} x {fill_sz}")
+                    # This is a new trade, create trigger sell order
+                    logger.info(f"💰 New buy trade saved: {inst_id} @ {fill_px} x {fill_sz}")
                     try:
                         self.create_trigger_sell_order(inst_id, fill_px, fill_sz, ord_id)
                     except Exception as e:
-                        logger.warning(f"⚠️  Failed to create trigger sell order for {ord_id}: {e}")
+                        logger.warning(f"⚠️  Failed to create trigger sell order for {trade_id}: {e}")
                 else:
-                    logger.debug(f"🔄 Buy order updated: {inst_id} @ {fill_px} x {fill_sz} (trigger order already exists)")
+                    logger.debug(f"🔄 Buy trade updated: {inst_id} @ {fill_px} x {fill_sz} (trigger order already exists)")
             
             return True
             
         except Exception as e:  # PostgreSQL compatible
-            logger.warning(f"⚠️  Duplicate order ID {ord_id}: {e}")
+            logger.warning(f"⚠️  Duplicate trade ID {trade_id}: {e}")
             return False
         except Exception as e:
-            logger.error(f"❌ Error saving order {ord_id}: {e}")
+            logger.error(f"❌ Error saving trade {trade_id}: {e}")
             logger.debug(f"Traceback: {traceback.format_exc()}")
             return False
 
@@ -340,35 +354,36 @@ class OKXFilledOrdersFetcher:
 
 
 
-    def fetch_and_save_filled_orders(self, minutes=None):
-        """Fetch filled orders with minutes parameter"""
+    def fetch_and_save_filled_trades(self, minutes=None):
+        """Fetch filled trades using incremental approach based on last trade timestamp"""
         try:
-            # Calculate time range based on minutes (use UTC to match OKX API timestamps)
-            end_time = datetime.utcnow()
-            begin_time = end_time - timedelta(minutes=minutes or 15)  # Default to 15 minutes
-
-            # Always query last 1 hour to catch any order updates
-            # This ensures we don't miss accFillSz updates for existing orders
-            begin_time = end_time - timedelta(hours=1)
-            logger.info(f"🧭 Querying last 1 hour: {begin_time.strftime('%H:%M:%S.%f')[:-3]} UTC to {end_time.strftime('%H:%M:%S')} UTC")
+            # Get the timestamp of the last trade from database
+            last_trade_ts = self.get_last_trade_timestamp()
             
-            logger.info(f"🔍 Fetching orders: {begin_time.strftime('%H:%M:%S.%f')[:-3]} → {end_time.strftime('%H:%M:%S')}")
+            if last_trade_ts:
+                # Start from the next microsecond after the last trade
+                begin_ts = last_trade_ts + 1
+                logger.info(f"🧭 Incremental fetch: from {begin_ts} (last trade + 1μs)")
+            else:
+                # First run: get trades from the last specified minutes
+                end_time = datetime.utcnow()
+                begin_time = end_time - timedelta(minutes=minutes or 15)
+                begin_ts = int(begin_time.timestamp() * 1000)
+                logger.info(f"🧭 Initial fetch: last {minutes or 15} minutes from {begin_ts}")
             
-            # Get filled orders
-            orders = self.get_filled_orders(begin_time, end_time)
+            # Get filled trades
+            trades = self.get_filled_trades(begin_ts=begin_ts)
             
-            if not orders:
-                logger.info("🎯 No filled orders found in the specified time range")
+            if not trades:
+                logger.info("🎯 No new filled trades found")
                 return
             
-
-            
-            # Save orders to database
+            # Save trades to database
             successful_saves = 0
             failed_saves = 0
             
-            for order in orders:
-                if self.save_order_to_db(order):
+            for trade in trades:
+                if self.save_trade_to_db(trade):
                     successful_saves += 1
                 else:
                     failed_saves += 1
@@ -377,15 +392,12 @@ class OKXFilledOrdersFetcher:
             self.conn.commit()
             
             # Summary
-            logger.info(f"📊 Summary: {successful_saves}/{len(orders)} saved")
+            logger.info(f"📊 Summary: {successful_saves}/{len(trades)} trades saved")
             if failed_saves > 0:
                 logger.warning(f"⚠️  Failed: {failed_saves}")
             
-            # Note: Removed check_and_update_existing_orders() as it's redundant
-            # Main mechanism with 1-hour window + ON CONFLICT DO UPDATE handles all cases
-            
         except Exception as e:
-            logger.error(f"❌ Error in fetch_and_save_filled_orders: {e}")
+            logger.error(f"❌ Error in fetch_and_save_filled_trades: {e}")
             logger.debug(f"Traceback: {traceback.format_exc()}")
             raise
 
@@ -493,8 +505,8 @@ def main():
         # Initialize fetcher
         fetcher = OKXFilledOrdersFetcher()
         
-        # Fetch and save filled orders
-        fetcher.fetch_and_save_filled_orders(minutes=args.minutes)
+        # Fetch and save filled trades
+        fetcher.fetch_and_save_filled_trades(minutes=args.minutes)
         
         logger.info("✅ Process completed")
         
