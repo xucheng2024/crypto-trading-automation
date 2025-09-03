@@ -185,7 +185,7 @@ class OKXFilledOrdersFetcher:
                 trades = result.get('data', [])
                 logger.info(f"📋 Found {len(trades)} total trades")
                 
-                # Filter for buy trades only
+                # Filter for buy trades only (SDK doesn't support subType parameter)
                 buy_trades = [trade for trade in trades if trade.get('side') == 'buy']
                 logger.info(f"📋 Filtered to {len(buy_trades)} buy trades (removed {len(trades) - len(buy_trades)} sell trades)")
                 
