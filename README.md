@@ -79,6 +79,10 @@ python monitor_delist.py
 - **⚡ Partial Fill Support** - Each transaction (tradeId) processed individually, supporting complex order scenarios
 - **🛠️ Database Schema Evolution** - `tradeId` as business primary key, `ordId` as audit trail, `sold_status` as VARCHAR
 - **🔧 Method Signature Optimization** - Removed unused parameters and simplified API calls
+- **⏰ 24-Hour Rolling Window** - Changed monitor from daily to 24-hour rolling window for better fault tolerance (2025-09-03)
+- **🎯 Enhanced Crypto Matching** - Improved regex with negative lookahead/lookbehind to prevent false matches (2025-09-03)
+- **🔄 Alias Support** - Added trading pair format support (BTC-USDT, BTC/USDT, BTCUSDT) for comprehensive matching (2025-09-03)
+- **🛡️ False Positive Prevention** - Prevents BTC matching WBTC, ETH matching ETHW, AR matching ARB (2025-09-03)
 
 ### Cloudflare Workers Cron Schedule ⭐
 ```yaml
@@ -106,9 +110,12 @@ python monitor_delist.py
 - **Purpose**: Intelligent delisting protection with automated response
 - **Architecture**: Modular design with specialized components
 - **Features**: 
-  - **Smart Detection**: Only monitors cryptocurrencies from your configuration
+  - **24-Hour Rolling Window**: Monitors past 24 hours instead of daily for better fault tolerance
+  - **Smart Detection**: Only monitors cryptocurrencies from your database configuration
+  - **Enhanced Matching**: Improved regex prevents false matches (BTC vs WBTC, ETH vs ETHW)
+  - **Trading Pair Support**: Recognizes BTC-USDT, BTC/USDT, BTCUSDT formats
   - **Automated Protection**: 3-step response (cancel orders → sell balances → update config)
-  - **Configuration Cleanup**: Automatically removes delisted cryptos from limits.json
+  - **Database Integration**: Automatically removes delisted cryptos from database configuration
   - **Balance Liquidation**: Market sell any holdings of affected cryptocurrencies
   - **Trigger Reconstruction**: Recreates algo triggers with updated configuration
   - **Comprehensive Logging**: Detailed audit trail of all protection actions
@@ -177,19 +184,23 @@ python monitor_delist.py
 ### New Modular Components 🆕
 
 #### `config_manager.py`
-- **Purpose**: Configuration file management and backup operations
+- **Purpose**: Database configuration management and backup operations
 - **Features**:
-  - **Smart Loading**: Reads and validates `limits.json` configuration
-  - **Automatic Backup**: Creates timestamped backups before modifications
-  - **Safe Cleanup**: Removes delisted cryptocurrencies from configuration
-  - **Error Handling**: Validates JSON structure and handles file operations
+  - **Database Integration**: Reads and manages configuration from PostgreSQL database
+  - **Smart Loading**: Extracts base cryptocurrencies from trading pairs (BTC from BTC-USDT)
+  - **Automatic Backup**: Creates timestamped JSON backups before modifications
+  - **Safe Cleanup**: Removes delisted cryptocurrencies from database configuration
+  - **Error Handling**: Validates database structure and handles connection issues
 
 #### `crypto_matcher.py`
-- **Purpose**: Intelligent cryptocurrency detection in announcements
+- **Purpose**: Intelligent cryptocurrency detection in announcements with enhanced matching
 - **Features**:
   - **Spot Trading Filter**: Only processes spot trading related announcements
-  - **Smart Matching**: Extracts crypto symbols from configured pairs (e.g., BTC from BTC-USDT)
+  - **Enhanced Regex Matching**: Uses negative lookahead/lookbehind to prevent false matches
+  - **Trading Pair Alias Support**: Recognizes BTC-USDT, BTC/USDT, BTCUSDT formats
+  - **False Positive Prevention**: Prevents BTC matching WBTC, ETH matching ETHW, AR matching ARB
   - **Case Insensitive**: Robust text matching regardless of case
+  - **Database Integration**: Loads configured cryptocurrencies from database
   - **Validation**: Ensures only configured cryptocurrencies trigger actions
 
 #### `okx_client.py` ⭐
@@ -408,6 +419,8 @@ crypto_remote/
 - **Database Schema Optimization**: tradeId as business primary key, enhanced status management
 - **API Interface Optimization**: Switched to get_fills for granular trade details
 - **Incremental Data Fetching**: Smart watermarking for efficient data retrieval
+- **24-Hour Rolling Window**: Monitor changed from daily to rolling window for better fault tolerance
+- **Enhanced Crypto Matching**: Improved regex prevents false matches with comprehensive alias support
 
 ### Architecture Benefits
 - **Maintainability**: Clean separation of concerns across 5 specialized modules
@@ -477,4 +490,4 @@ if affected:
 This project is for educational and personal use. Please ensure compliance with OKX API terms and local trading regulations.
 
 ---
-**System Architecture**: Modular + Cloud • **Total Lines**: 1,120+ (5 modules) • **Main Script**: 277 lines • **Code Reduction**: 59% • **API Unification**: 6 scripts share 1 OKX client • **Database**: PostgreSQL (Neon) • **Deployment**: Cloudflare Workers + GitHub Actions • **Scheduling**: Precise minute-level cron via Cloudflare Workers • **TradeId-Centric**: Individual transaction processing with enhanced deduplication • **Database Schema**: tradeId as business primary key, VARCHAR sold_status • **Last Updated**: 2025-09-03
+**System Architecture**: Modular + Cloud • **Total Lines**: 1,120+ (5 modules) • **Main Script**: 277 lines • **Code Reduction**: 59% • **API Unification**: 6 scripts share 1 OKX client • **Database**: PostgreSQL (Neon) • **Deployment**: Cloudflare Workers + GitHub Actions • **Scheduling**: Precise minute-level cron via Cloudflare Workers • **TradeId-Centric**: Individual transaction processing with enhanced deduplication • **Database Schema**: tradeId as business primary key, VARCHAR sold_status • **24-Hour Rolling**: Monitor with enhanced crypto matching and false positive prevention • **Last Updated**: 2025-09-03
