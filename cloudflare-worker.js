@@ -33,25 +33,29 @@ export default {
     console.log(`🕐 Trigger details: minute=${minute}, hour=${hour} UTC`);
     
     try {
-      // 根据event.cron精确分流，避免时间判断错误
-      const cronStr = event.cron;
-      let scripts = [];
+      // 使用Map精确分流，避免时间判断错误和隐性空转
+      const cronMap = new Map([
+        ["1,6,11,16,21,26,31,36,41,46,51,56 * * * *", ['monitor_delist', 'cancel_pending_limits']],
+        ["0,15,30,45 * * * *", ['fetch_filled_orders', 'auto_sell_orders']],
+        ["55 15 * * *", ['cancel_pending_triggers']], // 23:55 SGT
+        ["5 16 * * *", ['create_algo_triggers']],    // 00:05 SGT
+      ]);
       
-      if (cronStr.includes('1,6,11,16,21,26,31,36,41,46,51,56')) {
-        scripts = ['monitor_delist', 'cancel_pending_limits'];
+      const scripts = cronMap.get(event.cron);
+      if (!scripts) {
+        console.log(`⚠️ No scripts mapped for cron: ${event.cron}`);
+        return new Response('No scripts mapped', { status: 200 });
+      }
+      
+      // 根据脚本类型输出日志
+      if (scripts.includes('monitor_delist')) {
         console.log('📅 5-minute interval (staggered): monitor_delist + cancel_pending_limits');
-      } else if (cronStr.includes('0,15,30,45')) {
-        scripts = ['fetch_filled_orders', 'auto_sell_orders'];
+      } else if (scripts.includes('fetch_filled_orders')) {
         console.log('📅 15-minute interval: fetch_filled_orders + auto_sell_orders');
-      } else if (cronStr.startsWith('55 15')) {
-        scripts = ['cancel_pending_triggers'];
+      } else if (scripts.includes('cancel_pending_triggers')) {
         console.log('🌙 Nightly (SGT 23:55): cancel_pending_triggers');
-      } else if (cronStr.startsWith('5 16')) {
-        scripts = ['create_algo_triggers'];
+      } else if (scripts.includes('create_algo_triggers')) {
         console.log('🌅 Morning (SGT 00:05): create_algo_triggers');
-      } else {
-        console.log(`⚠️ No scripts matched for cron: ${cronStr}`);
-        return new Response('No scripts to run', { status: 200 });
       }
       
       // 触发 GitHub repository_dispatch
@@ -69,7 +73,9 @@ export default {
             source: 'cloudflare-worker',
             cron_schedule: cron,
             scripts: scripts,
-            interval: cronStr.includes('1,6,11,16,21,26,31,36,41,46,51,56') ? '5min' : cronStr.includes('0,15,30,45') ? '15min' : (cronStr.startsWith('55 15') || cronStr.startsWith('5 16')) ? 'daily' : 'other'
+            interval: event.cron === "1,6,11,16,21,26,31,36,41,46,51,56 * * * *" ? '5min' : 
+                      event.cron === "0,15,30,45 * * * *" ? '15min' : 
+                      (event.cron === "55 15 * * *" || event.cron === "5 16 * * *") ? 'daily' : 'other'
           }
         })
       });

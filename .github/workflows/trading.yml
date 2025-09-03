@@ -17,6 +17,11 @@ on:
 run-name: |
   ${{ github.event_name == 'workflow_dispatch' && format('Manual: {0}', github.event.inputs.scripts) || format('Auto: {0}', join(github.event.client_payload.scripts, ', ')) }}
 
+# 并发控制
+concurrency:
+  group: "trading-${{ github.event.client_payload.scripts || github.event.inputs.scripts || 'default' }}"
+  cancel-in-progress: false
+
 jobs:
   trading:
     name: Crypto Trading Bot
@@ -26,11 +31,14 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
         
-      - name: Log execution time and scripts
+      - name: Show payload and execution info
         run: |
           echo "🕐 Workflow started at: $(date -u)"
           echo "🕐 UTC time: $(date -u +%Y-%m-%d\ %H:%M:%S\ UTC)"
           echo "🕐 Event type: ${{ github.event_name }}"
+          echo "=========================================="
+          echo "📋 Full payload:"
+          echo '${{ toJson(github.event.client_payload) }}' | jq .
           echo "=========================================="
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             echo "🎯 MANUAL TRIGGER - Scripts: ${{ github.event.inputs.scripts }}"
@@ -93,88 +101,7 @@ jobs:
           source .venv/bin/activate
           echo "✅ Virtual environment activated"
           
-      - name: 🔍 Execute monitor_delist.py - Delisting Protection
-        if: (github.event_name == 'workflow_dispatch' && contains(github.event.inputs.scripts, 'monitor_delist')) || (github.event_name == 'repository_dispatch' && github.event.action == 'cron' && contains(toJSON(github.event.client_payload.scripts), 'monitor_delist'))
-        env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
-          OKX_API_KEY: ${{ secrets.OKX_API_KEY }}
-          OKX_SECRET_KEY: ${{ secrets.OKX_SECRET_KEY }}
-          OKX_PASSPHRASE: ${{ secrets.OKX_PASSPHRASE }}
-        run: |
-          echo "🔄 Running monitor_delist.py..."
-          echo "monitor_delist" >> logs/executed_scripts.txt
-          source .venv/bin/activate && python monitor_delist.py || echo "⚠️ monitor_delist.py completed with warnings"
-          
-      - name: 💰 Execute auto_sell_orders.py - Market Sell Orders
-        if: (github.event_name == 'workflow_dispatch' && contains(github.event.inputs.scripts, 'auto_sell_orders')) || (github.event_name == 'repository_dispatch' && github.event.action == 'cron' && contains(github.event.client_payload.scripts, 'auto_sell_orders'))
-        env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
-          OKX_API_KEY: ${{ secrets.OKX_API_KEY }}
-          OKX_SECRET_KEY: ${{ secrets.OKX_SECRET_KEY }}
-          OKX_PASSPHRASE: ${{ secrets.OKX_PASSPHRASE }}
-        run: |
-          echo "🔄 Running auto_sell_orders.py..."
-          echo "auto_sell_orders" >> logs/executed_scripts.txt
-          source .venv/bin/activate && python auto_sell_orders.py || echo "⚠️ auto_sell_orders.py completed with warnings"
-          
-      - name: 📊 Execute fetch_filled_orders.py - Order Tracking
-        if: (github.event_name == 'workflow_dispatch' && contains(github.event.inputs.scripts, 'fetch_filled_orders')) || (github.event_name == 'repository_dispatch' && github.event.action == 'cron' && contains(github.event.client_payload.scripts, 'fetch_filled_orders'))
-        env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
-          OKX_API_KEY: ${{ secrets.OKX_API_KEY }}
-          OKX_SECRET_KEY: ${{ secrets.OKX_SECRET_KEY }}
-          OKX_PASSPHRASE: ${{ secrets.OKX_PASSPHRASE }}
-        run: |
-          echo "🔄 Running fetch_filled_orders.py..."
-          echo "fetch_filled_orders" >> logs/executed_scripts.txt
-          source .venv/bin/activate && python fetch_filled_orders.py || echo "⚠️ fetch_filled_orders.py completed with warnings"
-          
-      - name: ❌ Execute cancel_pending_limits.py - Limit Order Management
-        if: (github.event_name == 'workflow_dispatch' && contains(github.event.inputs.scripts, 'cancel_pending_limits')) || (github.event_name == 'repository_dispatch' && github.event.action == 'cron' && contains(toJSON(github.event.client_payload.scripts), 'cancel_pending_limits'))
-        env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
-          OKX_API_KEY: ${{ secrets.OKX_API_KEY }}
-          OKX_SECRET_KEY: ${{ secrets.OKX_SECRET_KEY }}
-          OKX_PASSPHRASE: ${{ secrets.OKX_PASSPHRASE }}
-        run: |
-          echo "🔄 Running cancel_pending_limits.py..."
-          echo "cancel_pending_limits" >> logs/executed_scripts.txt
-          source .venv/bin/activate && python cancel_pending_limits.py --side buy || echo "⚠️ cancel_pending_limits.py completed with warnings"
-          
-      - name: 🌙 Execute cancel_pending_triggers.py - Nightly Cleanup
-        if: (
-              github.event_name == 'workflow_dispatch' && (
-                contains(github.event.inputs.scripts, 'cancel_pending_triggers') ||
-                contains(github.event.inputs.scripts, 'cancel_triggers') ||
-                contains(github.event.inputs.scripts, 'cancel_trigger') ||
-                contains(github.event.inputs.scripts, 'cancel') ||
-                contains(github.event.inputs.scripts, 'nightly')
-              )
-            ) || (
-              github.event_name == 'repository_dispatch' && github.event.action == 'cron' && contains(toJSON(github.event.client_payload.scripts), 'cancel_pending_triggers')
-            )
-        env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
-          OKX_API_KEY: ${{ secrets.OKX_API_KEY }}
-          OKX_SECRET_KEY: ${{ secrets.OKX_SECRET_KEY }}
-          OKX_PASSPHRASE: ${{ secrets.OKX_PASSPHRASE }}
-        run: |
-          echo "🔄 Running cancel_pending_triggers.py..."
-          echo "cancel_pending_triggers" >> logs/executed_scripts.txt
-          source .venv/bin/activate && python cancel_pending_triggers.py || echo "⚠️ cancel_pending_triggers.py completed with warnings"
-          
-      - name: 🌅 Execute create_algo_triggers.py - Morning Setup
-        if: (
-              github.event_name == 'workflow_dispatch' && (
-                contains(github.event.inputs.scripts, 'create_algo_triggers') ||
-                contains(github.event.inputs.scripts, 'create_triggers') ||
-                contains(github.event.inputs.scripts, 'create_trigger') ||
-                contains(github.event.inputs.scripts, 'create') ||
-                contains(github.event.inputs.scripts, 'nightly')
-              )
-            ) || (
-              github.event_name == 'repository_dispatch' && github.event.action == 'cron' && contains(toJSON(github.event.client_payload.scripts), 'create_algo_triggers')
-            )
+      - name: Select and run scripts
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           OKX_API_KEY: ${{ secrets.OKX_API_KEY }}
@@ -182,9 +109,53 @@ jobs:
           OKX_PASSPHRASE: ${{ secrets.OKX_PASSPHRASE }}
           OKX_ORDER_SIZE: ${{ secrets.OKX_ORDER_SIZE }}
         run: |
-          echo "🔄 Running create_algo_triggers.py..."
-          echo "create_algo_triggers" >> logs/executed_scripts.txt
-          source .venv/bin/activate && python create_algo_triggers.py || echo "⚠️ create_algo_triggers.py completed with warnings"
+          set -e
+          source .venv/bin/activate
+          
+          # 获取要执行的脚本列表
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            SCRIPTS="${{ github.event.inputs.scripts }}"
+          else
+            SCRIPTS="${{ join(github.event.client_payload.scripts, ' ') }}"
+          fi
+          
+          echo "Will run scripts: $SCRIPTS"
+          echo "Scripts to execute: $SCRIPTS" >> logs/executed_scripts.txt
+          
+          # 执行每个脚本
+          for script in $SCRIPTS; do
+            case "$script" in
+              monitor_delist)
+                echo "🔄 Running monitor_delist.py..."
+                python monitor_delist.py || echo "⚠️ monitor_delist.py completed with warnings"
+                ;;
+              cancel_pending_limits)
+                echo "🔄 Running cancel_pending_limits.py..."
+                python cancel_pending_limits.py --side buy || echo "⚠️ cancel_pending_limits.py completed with warnings"
+                ;;
+              fetch_filled_orders)
+                echo "🔄 Running fetch_filled_orders.py..."
+                python fetch_filled_orders.py || echo "⚠️ fetch_filled_orders.py completed with warnings"
+                ;;
+              auto_sell_orders)
+                echo "🔄 Running auto_sell_orders.py..."
+                python auto_sell_orders.py || echo "⚠️ auto_sell_orders.py completed with warnings"
+                ;;
+              cancel_pending_triggers)
+                echo "🔄 Running cancel_pending_triggers.py..."
+                python cancel_pending_triggers.py || echo "⚠️ cancel_pending_triggers.py completed with warnings"
+                ;;
+              create_algo_triggers)
+                echo "🔄 Running create_algo_triggers.py..."
+                python create_algo_triggers.py || echo "⚠️ create_algo_triggers.py completed with warnings"
+                ;;
+              *)
+                echo "❌ Unknown script: $script"
+                ;;
+            esac
+          done
+          
+
 
       - name: Write run summary
         if: always()
