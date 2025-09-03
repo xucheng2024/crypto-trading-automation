@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 OKX Delist Spot Monitoring Script (Refactored Version)
-Checks every 5 minutes for today's delist spot announcements
+Checks every 5 minutes for delist spot announcements from the past 24 hours
 If found, issues alerts and executes protection operations
 """
 
@@ -178,18 +178,17 @@ class OKXDelistMonitor:
         
         return []
     
-    def is_today_announcement(self, announcement: Dict[str, Any]) -> bool:
-        """Check if it's a today's announcement"""
+    def is_recent_announcement(self, announcement: Dict[str, Any]) -> bool:
+        """Check if it's an announcement from the past 24 hours"""
         try:
             # Parse timestamp
             timestamp = int(announcement['pTime']) / 1000
-            announcement_date = datetime.fromtimestamp(timestamp)
-            today = datetime.now()
+            announcement_time = datetime.fromtimestamp(timestamp)
+            now = datetime.now()
             
-            # Check if it's today
-            return (announcement_date.year == today.year and 
-                   announcement_date.month == today.month and 
-                   announcement_date.day == today.day)
+            # Check if it's within the past 24 hours
+            time_diff = now - announcement_time
+            return time_diff <= timedelta(hours=24)
         except:
             return False
     
@@ -316,12 +315,12 @@ class OKXDelistMonitor:
                 self._found_announcements = False
                 return
             
-            # Check for today's delist spot announcements
-            today_spot_announcements = []
-            today_affected_announcements = []
+            # Check for recent delist spot announcements (past 24 hours)
+            recent_spot_announcements = []
+            recent_affected_announcements = []
             
             for ann in announcements:
-                if self.is_today_announcement(ann):
+                if self.is_recent_announcement(ann):
                     # Generate unique ID (using title and timestamp)
                     announcement_id = f"{ann['title']}_{ann['pTime']}"
                     
@@ -329,7 +328,7 @@ class OKXDelistMonitor:
                     if not self.blacklist_manager.is_announcement_processed(announcement_id):
                         # Check if it's a spot-related announcement
                         if self.crypto_matcher.is_spot_related(ann):
-                            today_spot_announcements.append(ann)
+                            recent_spot_announcements.append(ann)
                             
                             # Also check if it affects configured cryptocurrencies
                             is_affected, affected_cryptos = self.crypto_matcher.check_announcement_impact(ann)
@@ -351,24 +350,24 @@ class OKXDelistMonitor:
                                 # Only process non-blacklisted cryptos
                                 if non_blacklisted_cryptos:
                                     ann['affected_cryptos'] = non_blacklisted_cryptos
-                                    today_affected_announcements.append(ann)
+                                    recent_affected_announcements.append(ann)
                                 else:
                                     self.logger.info(f"ℹ️ All affected cryptocurrencies are already blacklisted, skipping protection operations")
             
             # Play alert sound for all new delist spot announcements
-            if today_spot_announcements:
-                self.logger.warning(f"🔊 Found {len(today_spot_announcements)} new delist spot announcements!")
+            if recent_spot_announcements:
+                self.logger.warning(f"🔊 Found {len(recent_spot_announcements)} new delist spot announcements (past 24 hours)!")
                 self._found_announcements = True
 
                 
                 # Then process announcements affecting configured cryptocurrencies
-                if today_affected_announcements:
-                    self.logger.warning(f"🎯 Among them {len(today_affected_announcements)} affect configured cryptocurrencies!")
-                    for ann in today_affected_announcements:
+                if recent_affected_announcements:
+                    self.logger.warning(f"🎯 Among them {len(recent_affected_announcements)} affect configured cryptocurrencies!")
+                    for ann in recent_affected_announcements:
                         self.send_protection_alert(ann, ann['affected_cryptos'])
                 else:
                     self.logger.info("✅ These spot announcements do not affect your configured cryptocurrencies")
-                    for ann in today_spot_announcements:
+                    for ann in recent_spot_announcements:
                         self.send_info_alert(ann)
             else:
                 self.logger.info("✅ No new delist spot announcements found")
