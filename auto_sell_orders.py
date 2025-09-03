@@ -235,7 +235,7 @@ class AutoSellOrders:
             return 0.0, 0.0
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=10))
-    def place_market_sell_order(self, inst_id, size, order_id):
+    def place_market_sell_order(self, inst_id, size):
         """Place market sell order - check balance first, then decide sell amount"""
         self.logger.info(f"📤 Processing {inst_id}: requested size={size}")
         
@@ -326,7 +326,7 @@ class AutoSellOrders:
                 if not self.mark_trade_processing(trade_id):
                     continue
                 
-                sell_result = self.place_market_sell_order(inst_id, fill_sz, trade_id)
+                sell_result = self.place_market_sell_order(inst_id, fill_sz)
                 
                 if sell_result == True:  # Successfully sold
                     if self.mark_trade_as_sold(trade_id):
