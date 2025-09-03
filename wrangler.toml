@@ -10,8 +10,8 @@ compatibility_date = "2024-01-01"
 # 需要在Cloudflare Dashboard中创建KV命名空间并设置ID
 [[kv_namespaces]]
 binding = "DEDUP_KV"
-id = "your_kv_namespace_id"
-preview_id = "your_preview_kv_namespace_id"
+id = "6a50d25e1cb9432e85c19d32f043e91a"
+preview_id = "6a50d25e1cb9432e85c19d32f043e91a"
 
 [triggers]
 crons = [
