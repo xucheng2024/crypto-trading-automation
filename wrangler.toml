@@ -2,12 +2,12 @@ name = "crypto-trading-cron-prod"
 main = "cloudflare-worker.js"
 compatibility_date = "2024-01-01"
 
-# 环境变量配置
-[vars]
-GITHUB_OWNER = "xucheng2024"
-GITHUB_REPO = "crypto-trading-automation"
+# 环境变量配置 (需要在Cloudflare Dashboard中设置)
+# GITHUB_OWNER = "your_github_username"
+# GITHUB_REPO = "your_repo_name"
 
 # KV存储配置（用于去重）
+# 需要在Cloudflare Dashboard中创建KV命名空间并设置ID
 [[kv_namespaces]]
 binding = "DEDUP_KV"
 id = "your_kv_namespace_id"
@@ -27,3 +27,5 @@ crons = [
 
 # 密钥配置 (需要在Cloudflare Dashboard中设置)
 # GITHUB_TOKEN = "your_github_token_here"
+# GITHUB_OWNER = "your_github_username"  
+# GITHUB_REPO = "your_repo_name"

@@ -3,9 +3,9 @@
  * Cron triggers: 每5分钟和每15分钟执行不同脚本组合
  */
 
-// GitHub 配置
-const GITHUB_OWNER = 'xucheng2024';
-const GITHUB_REPO = 'crypto-trading-automation';
+// GitHub 配置 - 从环境变量获取
+const GITHUB_OWNER = env.GITHUB_OWNER || 'xucheng2024';
+const GITHUB_REPO = env.GITHUB_REPO || 'crypto-trading-automation';
 
 
 export default {
@@ -77,7 +77,7 @@ export default {
       }
       
       // 触发 GitHub repository_dispatch
-      const response = await fetch(`https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/dispatches`, {
+      const response = await fetch(`https://api.github.com/repos/${env.GITHUB_OWNER}/${env.GITHUB_REPO}/dispatches`, {
         method: 'POST',
         headers: {
           'Authorization': `token ${env.GITHUB_TOKEN}`,
@@ -127,7 +127,7 @@ export default {
     return new Response(`
       <h1>🚀 Crypto Trading Automation Cron Worker</h1>
       <p>Status: Active</p>
-      <p>GitHub Repo: ${GITHUB_OWNER}/${GITHUB_REPO}</p>
+      <p>GitHub Repo: ${env.GITHUB_OWNER}/${env.GITHUB_REPO}</p>
       <p>POST to this endpoint to manually trigger</p>
       <hr>
       <h2>📅 Cron Schedule:</h2>
