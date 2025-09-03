@@ -7,6 +7,12 @@ compatibility_date = "2024-01-01"
 GITHUB_OWNER = "xucheng2024"
 GITHUB_REPO = "crypto-trading-automation"
 
+# KV存储配置（用于去重）
+[[kv_namespaces]]
+binding = "DEDUP_KV"
+id = "your_kv_namespace_id"
+preview_id = "your_preview_kv_namespace_id"
+
 [triggers]
 crons = [
   # 每5分钟执行: monitor_delist + cancel_pending_limits (错开整点，避免与15分钟冲突)

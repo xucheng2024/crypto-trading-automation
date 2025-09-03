@@ -17,6 +17,10 @@ import base64
 from datetime import datetime, timedelta
 from typing import Set, List, Dict, Any
 
+# Import our utility modules
+from utils_http import get_global_session, safe_request
+from utils_deduplication import is_action_processed, mark_action_processed
+
 # Load environment variables first
 try:
     from dotenv import load_dotenv
@@ -129,11 +133,13 @@ class OKXDelistMonitor:
                 signature = self.generate_signature(timestamp, 'GET', request_path)
                 headers = self.get_headers(timestamp, signature)
                 
-                # Send request
-                response = requests.get(self.base_url, params={
-                    'annType': 'announcements-delistings',
-                    'page': page
-                }, headers=headers, timeout=10)
+                # Send request with robust HTTP session
+                session = get_global_session()
+                response = safe_request('GET', self.base_url, session=session, 
+                                      params={
+                                          'annType': 'announcements-delistings',
+                                          'page': page
+                                      }, headers=headers, timeout=10)
                 
                 if response.status_code == 200:
                     data = response.json()
@@ -202,6 +208,14 @@ class OKXDelistMonitor:
         print(f"🔗 Detailed Link: {announcement['url']}")
         print(f"⏰ Timestamp: {announcement['pTime']}")
         print("="*80)
+        
+        # 检查是否已经处理过这个公告
+        if is_action_processed('delist_protection', announcement_id=announcement_id):
+            self.logger.info(f"⚠️ Delist announcement already processed: {announcement_id}")
+            return
+        
+        # 标记为已处理
+        mark_action_processed('delist_protection', announcement_id=announcement_id)
         
         # Execute protection operations
         self.logger.warning(f"🚨 Delist announcement affecting configured cryptocurrencies detected: {announcement['title']}")

@@ -23,6 +23,24 @@ export default {
     console.log(`🕐 Worker triggered at: ${timestamp}`);
     console.log(`🕐 Cron: ${cron}, Hour: ${hour}, Minute: ${minute}`);
     
+    // 去重机制：检查同一分钟是否已经执行过
+    const runKey = `run:${cron}:${now.getUTCFullYear()}${String(now.getUTCMonth() + 1).padStart(2, '0')}${String(now.getUTCDate()).padStart(2, '0')}${String(now.getUTCHours()).padStart(2, '0')}${String(now.getUTCMinutes()).padStart(2, '0')}`;
+    
+    try {
+      // 尝试从KV获取执行记录
+      const existingRun = await env.DEDUP_KV?.get(runKey);
+      if (existingRun) {
+        console.log(`⚠️ Duplicate execution detected for key: ${runKey}`);
+        return new Response('Duplicate execution prevented', { status: 200 });
+      }
+      
+      // 标记为已执行（TTL: 1小时）
+      await env.DEDUP_KV?.put(runKey, timestamp, { expirationTtl: 3600 });
+      console.log(`✅ Marked execution for key: ${runKey}`);
+    } catch (error) {
+      console.log(`⚠️ Deduplication check failed: ${error.message}, continuing execution`);
+    }
+    
     // 计算新加坡时间 (UTC+8)
     const sgtTime = new Date(now.getTime() + 8 * 60 * 60 * 1000);
     
