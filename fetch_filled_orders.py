@@ -405,77 +405,7 @@ class OKXFilledOrdersFetcher:
 
 
 
-    def check_and_update_existing_orders(self):
-        """Check for updates to existing orders by comparing with API data"""
-        try:
-            logger.info("🔍 Checking for updates to existing orders...")
-            
-            # Get all unsold orders from database
-            self.cursor.execute('''
-                SELECT ordId, instId, accFillSz, side, ts
-                FROM filled_orders 
-                WHERE sold_status IS NULL AND side = 'buy'
-                ORDER BY CAST(ts AS BIGINT) DESC
-            ''')
-            
-            db_orders = self.cursor.fetchall()
-            
-            if not db_orders:
-                logger.info("📭 No unsold orders found in database")
-                return
-            
-            logger.info(f"📊 Found {len(db_orders)} unsold orders in database")
-            
-            # Get recent orders from API (last 7 days to cover all possible updates)
-            recent_orders = self.get_filled_orders(limit=100)
-            
-            if not recent_orders:
-                logger.info("📭 No recent orders found from API")
-                return
-            
-            # Create a dictionary of API orders by ordId
-            api_orders_dict = {}
-            for order in recent_orders:
-                ord_id = order.get('ordId', '')
-                if ord_id:
-                    api_orders_dict[ord_id] = order
-            
-            updates_needed = 0
-            
-            # Compare database orders with API data
-            for db_order in db_orders:
-                ord_id, inst_id, db_acc_fill_sz, side, ts = db_order
-                
-                if ord_id in api_orders_dict:
-                    api_order = api_orders_dict[ord_id]
-                    api_acc_fill_sz = api_order.get('accFillSz', '')
-                    
-                    # Compare accFillSz
-                    if db_acc_fill_sz != api_acc_fill_sz:
-                        logger.info(f"🔄 Update needed for {inst_id} | ordId: {ord_id}")
-                        logger.info(f"   DB accFillSz: {db_acc_fill_sz}")
-                        logger.info(f"   API accFillSz: {api_acc_fill_sz}")
-                        
-                        # Update the order with latest API data
-                        if self.save_order_to_db(api_order):
-                            updates_needed += 1
-                            logger.info(f"✅ Updated {inst_id} | ordId: {ord_id}")
-                        else:
-                            logger.warning(f"⚠️  Failed to update {inst_id} | ordId: {ord_id}")
-                    else:
-                        logger.debug(f"✅ {inst_id} | ordId: {ord_id} is up to date")
-                else:
-                    logger.debug(f"⚠️  Order {ord_id} not found in recent API data")
-            
-            if updates_needed > 0:
-                self.conn.commit()
-                logger.info(f"📊 Updated {updates_needed} orders with latest data")
-            else:
-                logger.info("✅ All orders are up to date")
-                
-        except Exception as e:
-            logger.error(f"❌ Error checking existing orders: {e}")
-            logger.debug(f"Traceback: {traceback.format_exc()}")
+
 
     def close(self):
         """Close database connection"""

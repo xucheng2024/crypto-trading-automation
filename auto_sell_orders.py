@@ -126,7 +126,7 @@ class AutoSellOrders:
         current_time = int(datetime.utcnow().timestamp() * 1000)
         
         self.cursor.execute('''
-            SELECT instId, ordId, accFillSz, side, ts, sell_time, fillPx
+            SELECT instId, ordId, fillSz, side, ts, sell_time, fillPx
             FROM filled_orders 
             WHERE sell_time IS NOT NULL 
               AND sold_status IS NULL
@@ -140,11 +140,11 @@ class AutoSellOrders:
         if orders:
             self.logger.info(f"🔍 Found {len(orders)} orders ready to sell")
             for order in orders:
-                inst_id, ord_id, acc_fill_sz, side, ts, sell_time, fill_px = order
+                inst_id, ord_id, fill_sz, side, ts, sell_time, fill_px = order
                 # Display sell_time in UTC for consistency
                 sell_time_str = datetime.utcfromtimestamp(int(sell_time)/1000).strftime('%H:%M:%S UTC')
                 buy_price = self.format_price(fill_px)
-                self.logger.info(f"   📋 {inst_id} | ordId: {ord_id} | Total: {acc_fill_sz} | Buy: ${buy_price} | Sell: {sell_time_str}")
+                self.logger.info(f"   📋 {inst_id} | ordId: {ord_id} | Total: {fill_sz} | Buy: ${buy_price} | Sell: {sell_time_str}")
         
         return orders
 
