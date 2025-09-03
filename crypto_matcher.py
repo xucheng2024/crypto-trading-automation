@@ -16,6 +16,9 @@ class CryptoMatcher:
         self.config_manager = config_manager or ConfigManager()
         self.logger = logger or logging.getLogger(__name__)
         self.configured_cryptos = self.config_manager.load_configured_cryptos()
+        
+        # Create alias mapping for common trading pair formats
+        self._create_alias_mapping()
     
     def is_spot_related(self, announcement: dict) -> bool:
         """Check if it's related to spot trading"""
@@ -23,29 +26,61 @@ class CryptoMatcher:
         return 'spot' in title or 'spot trading' in title
     
     def find_affected_cryptos(self, announcement_text: str) -> Set[str]:
-        """Find affected cryptocurrencies in announcement text"""
+        """Find affected cryptocurrencies in announcement text using improved matching"""
         if not self.configured_cryptos:
             return set()
         
-        announcement_upper = announcement_text.upper()
-        affected_cryptos = set()
+        # Use the new alias-based matching
+        return self._find_crypto_aliases(announcement_text)
+    
+    def _is_exact_match(self, crypto: str, text: str) -> bool:
+        """Check if cryptocurrency appears as a complete word in text with improved regex"""
+        import re
+        
+        # Ensure both crypto and text are uppercase for case-insensitive matching
+        crypto_upper = crypto.upper()
+        text_upper = text.upper()
+        
+        # Create a more precise regex pattern
+        # (?<![A-Z0-9]) ensures the crypto is not preceded by alphanumeric characters
+        # (?![A-Z0-9]) ensures the crypto is not followed by alphanumeric characters
+        # re.I flag for case-insensitive matching (though we already converted to uppercase)
+        pattern = re.compile(rf'(?<![A-Z0-9]){re.escape(crypto_upper)}(?![A-Z0-9])', re.I)
+        
+        return bool(pattern.search(text_upper))
+    
+    def _create_alias_mapping(self):
+        """Create alias mapping for common trading pair formats"""
+        self.alias_mapping = {}
+        
+        # Common quote currencies
+        quote_currencies = ['USDT', 'USDC', 'BTC', 'ETH', 'USD', 'EUR', 'GBP']
         
         for crypto in self.configured_cryptos:
             crypto_upper = crypto.upper()
-            # Use word boundary matching to avoid partial matches
-            # This prevents "BTC" from matching "WBTC" or "BTCB"
-            if self._is_exact_match(crypto_upper, announcement_upper):
-                affected_cryptos.add(crypto)
-        
-        return affected_cryptos
+            aliases = {crypto_upper}  # Include the original crypto
+            
+            # Add common trading pair formats
+            for quote in quote_currencies:
+                # BTC-USDT, BTC/USDT, BTCUSDT formats
+                aliases.add(f"{crypto_upper}-{quote}")
+                aliases.add(f"{crypto_upper}/{quote}")
+                aliases.add(f"{crypto_upper}{quote}")
+            
+            self.alias_mapping[crypto_upper] = aliases
     
-    def _is_exact_match(self, crypto: str, text: str) -> bool:
-        """Check if cryptocurrency appears as a complete word in text"""
-        # Split text into words and check for exact match
-        # Handle punctuation by stripping common punctuation marks
-        import re
-        words = re.findall(r'\b\w+\b', text)
-        return crypto in words
+    def _find_crypto_aliases(self, text: str) -> Set[str]:
+        """Find all crypto aliases that appear in the text"""
+        found_cryptos = set()
+        text_upper = text.upper()
+        
+        for crypto, aliases in self.alias_mapping.items():
+            for alias in aliases:
+                if self._is_exact_match(alias, text_upper):
+                    found_cryptos.add(crypto)
+                    break  # Found this crypto, no need to check other aliases
+        
+        return found_cryptos
     
     def check_announcement_impact(self, announcement: dict) -> Tuple[bool, Set[str]]:
         """Check if announcement affects configured cryptocurrencies"""
@@ -69,6 +104,7 @@ class CryptoMatcher:
     def reload_config(self):
         """Reload configuration"""
         self.configured_cryptos = self.config_manager.load_configured_cryptos()
+        self._create_alias_mapping()
 
 
 # Compatibility functions, maintain backward compatibility
