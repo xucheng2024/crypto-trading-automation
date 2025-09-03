@@ -7,11 +7,11 @@ compatibility_date = "2024-01-01"
 # GITHUB_REPO = "your_repo_name"
 
 # KV存储配置（用于去重）
-# 需要在Cloudflare Dashboard中创建KV命名空间并设置ID
+# 命名空间ID通过环境变量设置，避免硬编码
 [[kv_namespaces]]
 binding = "DEDUP_KV"
-id = "6a50d25e1cb9432e85c19d32f043e91a"
-preview_id = "6a50d25e1cb9432e85c19d32f043e91a"
+id = "${KV_NAMESPACE_ID}"
+preview_id = "${KV_NAMESPACE_ID}"
 
 [triggers]
 crons = [
@@ -29,3 +29,4 @@ crons = [
 # GITHUB_TOKEN = "your_github_token_here"
 # GITHUB_OWNER = "your_github_username"  
 # GITHUB_REPO = "your_repo_name"
+# KV_NAMESPACE_ID = "your_kv_namespace_id_here"
