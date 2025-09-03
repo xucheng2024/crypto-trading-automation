@@ -72,6 +72,13 @@ python monitor_delist.py
 - **🔧 Multi-Fill Order Fix** - Fixed `accFillSz` handling for orders with multiple fills (2025-09-02)
 - **📊 Smart Update Strategy** - Added intelligent order update detection and data discrepancy resolution
 - **🛡️ Data Integrity** - Enhanced database update logic to preserve critical status fields during updates
+- **🎯 TradeId-Centric Processing** - Complete refactor to use `tradeId` as primary key for individual transactions (2025-09-03)
+- **🔄 API Interface Optimization** - Switched from `get_orders_history` to `get_fills` for granular trade details
+- **📈 Incremental Data Fetching** - Smart watermarking using last `tradeId` timestamp for efficient data retrieval
+- **🔒 Enhanced Deduplication** - `tradeId`-based unique constraints prevent duplicate processing of same transaction
+- **⚡ Partial Fill Support** - Each transaction (tradeId) processed individually, supporting complex order scenarios
+- **🛠️ Database Schema Evolution** - `tradeId` as business primary key, `ordId` as audit trail, `sold_status` as VARCHAR
+- **🔧 Method Signature Optimization** - Removed unused parameters and simplified API calls
 
 ### Cloudflare Workers Cron Schedule ⭐
 ```yaml
@@ -134,33 +141,38 @@ python monitor_delist.py
   - Efficient order management
 
 #### `fetch_filled_orders.py` ⭐
-- **Purpose**: Track completed orders and calculate sell times
+- **Purpose**: Track completed orders and calculate sell times with tradeId-centric processing
 - **Features**:
+  - **TradeId-Centric Processing**: Uses `tradeId` as primary key for individual transactions
+  - **API Interface Optimization**: Switched from `get_orders_history` to `get_fills` for granular trade details
+  - **Incremental Data Fetching**: Smart watermarking using last `tradeId` timestamp for efficient retrieval
+  - **Enhanced Deduplication**: `tradeId`-based unique constraints prevent duplicate processing
+  - **Partial Fill Support**: Each transaction processed individually, supporting complex order scenarios
   - **Sell Time Calculation**: Automatically calculates sell_time as ts + 20 hours (UTC-based)
-  - **Smart Watermarking**: Uses database timestamp +1ms as query start point (not fixed 15-min window)
   - **Timezone Consistency**: All time calculations use UTC to match OKX API timestamps
-  - **Real-time Monitoring**: Continuous order status monitoring
-  - **Database Storage**: PostgreSQL database for order history
-  - **Buy-only Storage**: Filters to side='buy' before saving
-  - **Smart Update Strategy**: Uses ON CONFLICT DO UPDATE to handle multi-fill orders correctly
+  - **Real-time Monitoring**: Continuous order status monitoring with incremental updates
+  - **Database Storage**: PostgreSQL database with optimized schema for trade tracking
+  - **Buy-only Storage**: Client-side filtering for side='buy' trades
+  - **Smart Update Strategy**: Uses ON CONFLICT (tradeId) DO UPDATE to handle updates correctly
   - **Data Integrity**: Preserves sell_time and sold_status during updates
-  - **Discrepancy Detection**: Automatically checks and fixes data differences between DB and API
-  - **Multi-Fill Support**: Correctly handles orders that fill across multiple transactions
 
 #### `auto_sell_orders.py` ⭐
-- **Purpose**: Automatically execute market sell orders based on sell_time
+- **Purpose**: Automatically execute market sell orders based on sell_time with tradeId-centric processing
 - **Features**:
+  - **TradeId-Centric Processing**: Processes individual transactions (tradeId) instead of entire orders
+  - **Individual Transaction Selling**: Each tradeId sold separately with its specific fillSz
+  - **Enhanced Status Management**: Supports NULL/PROCESSING/SOLD states with VARCHAR field type
+  - **Processing Lock**: Marks trades as PROCESSING before sell to prevent overlaps
   - **UTC Time Comparison**: Uses UTC timestamps to match sell_time calculation consistency
   - **Time-based Selling**: Executes sells when sell_time < current_time (UTC-based)
   - **Audio Notifications**: 10-second continuous beep sound for successful sells
-  - **Duplicate Prevention**: Tracks sold_status to avoid re-processing
-  - **Processing Lock**: Marks rows as PROCESSING before sell to prevent overlaps
+  - **Duplicate Prevention**: Tracks sold_status to avoid re-processing same tradeId
   - **Strict Selection**: Only processes rows where sold_status IS NULL; sell_time cast to Integer
-  - **Detailed Logging**: Includes ordId in scan and processing logs for auditability
+  - **Detailed Logging**: Includes tradeId and ordId in logs for complete auditability
   - **Market Order Execution**: Uses market orders for immediate execution
   - **Timezone Display**: Shows sell times with "UTC" label for clarity
-  - **Accumulated Fill Size**: Uses accFillSz instead of fillSz for correct sell quantities
-  - **Multi-Fill Support**: Correctly sells total accumulated quantity for orders with multiple fills
+  - **Precise Quantity Control**: Uses fillSz for exact transaction quantity (not accumulated)
+  - **Partial Fill Support**: Correctly handles orders with multiple partial fills as separate transactions
 
 ### New Modular Components 🆕
 
@@ -238,6 +250,25 @@ OKX_TESTNET=false
 - **Sell Time Management**: Automatically calculates and tracks sell times (ts + 20 hours)
 - **Risk Management**: Configurable limits and coefficients per crypto pair
 - **Market Adaptation**: Dynamic precision adjustment based on coin value
+
+### TradeId-Centric Processing Architecture 🆕
+- **Individual Transaction Processing**: Each `tradeId` represents a unique transaction, processed independently
+- **Partial Fill Support**: One order can have multiple `tradeId`s (partial fills), each sold separately
+- **Enhanced Deduplication**: `tradeId`-based unique constraints prevent duplicate processing
+- **Precise Quantity Control**: Uses `fillSz` (single transaction size) instead of `accFillSz` (accumulated size)
+- **Database Schema Optimization**: `tradeId` as business primary key, `ordId` as audit trail
+- **Status Management**: VARCHAR `sold_status` supports NULL/PROCESSING/SOLD states
+- **API Interface**: Switched from `get_orders_history` to `get_fills` for granular trade details
+- **Incremental Fetching**: Smart watermarking using last `tradeId` timestamp for efficiency
+
+#### Example: Partial Fill Scenario
+```
+Order: BTC-USDT Buy 1.0 BTC
+├── tradeId: trade_001 (fillSz: 0.5 BTC) → Sold separately
+├── tradeId: trade_002 (fillSz: 0.3 BTC) → Sold separately  
+└── tradeId: trade_003 (fillSz: 0.2 BTC) → Sold separately
+```
+Each transaction is processed individually with its own `sell_time` and `sold_status`.
 
 ## 📢 Announcements Features
 
@@ -371,9 +402,12 @@ crypto_remote/
 - **Error Resolution**: All previous API issues resolved with enhanced error handling
 - **Cloud Migration**: Successfully migrated to PostgreSQL and GitHub Actions
 - **Precise Scheduling**: Cloudflare Workers provide minute-level accuracy (99.9% uptime)
-- **Multi-Fill Order Handling**: Fixed accFillSz processing for orders with multiple fills (2025-09-02)
-- **Data Integrity**: Smart update strategy preserves critical status fields during database updates
-- **Discrepancy Detection**: Automatic detection and resolution of data differences between database and API
+- **TradeId-Centric Processing**: Complete refactor to individual transaction processing (2025-09-03)
+- **Enhanced Deduplication**: tradeId-based unique constraints prevent duplicate processing
+- **Partial Fill Support**: Each transaction processed individually with precise quantity control
+- **Database Schema Optimization**: tradeId as business primary key, enhanced status management
+- **API Interface Optimization**: Switched to get_fills for granular trade details
+- **Incremental Data Fetching**: Smart watermarking for efficient data retrieval
 
 ### Architecture Benefits
 - **Maintainability**: Clean separation of concerns across 5 specialized modules
@@ -443,4 +477,4 @@ if affected:
 This project is for educational and personal use. Please ensure compliance with OKX API terms and local trading regulations.
 
 ---
-**System Architecture**: Modular + Cloud • **Total Lines**: 1,120+ (5 modules) • **Main Script**: 277 lines • **Code Reduction**: 59% • **API Unification**: 6 scripts share 1 OKX client • **Database**: PostgreSQL (Neon) • **Deployment**: Cloudflare Workers + GitHub Actions • **Scheduling**: Precise minute-level cron via Cloudflare Workers • **Multi-Fill Fix**: accFillSz handling for orders with multiple fills • **Last Updated**: 2025-09-02
+**System Architecture**: Modular + Cloud • **Total Lines**: 1,120+ (5 modules) • **Main Script**: 277 lines • **Code Reduction**: 59% • **API Unification**: 6 scripts share 1 OKX client • **Database**: PostgreSQL (Neon) • **Deployment**: Cloudflare Workers + GitHub Actions • **Scheduling**: Precise minute-level cron via Cloudflare Workers • **TradeId-Centric**: Individual transaction processing with enhanced deduplication • **Database Schema**: tradeId as business primary key, VARCHAR sold_status • **Last Updated**: 2025-09-03
