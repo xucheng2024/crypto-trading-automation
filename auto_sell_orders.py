@@ -126,7 +126,7 @@ class AutoSellOrders:
         current_time = int(datetime.utcnow().timestamp() * 1000)
         
         self.cursor.execute('''
-            SELECT instId, ordId, fillSz, side, ts, sell_time, fillPx
+            SELECT instId, ordId, tradeId, fillSz, side, ts, sell_time, fillPx
             FROM filled_orders 
             WHERE sell_time IS NOT NULL 
               AND sold_status IS NULL
@@ -140,45 +140,45 @@ class AutoSellOrders:
         if orders:
             self.logger.info(f"🔍 Found {len(orders)} orders ready to sell")
             for order in orders:
-                inst_id, ord_id, fill_sz, side, ts, sell_time, fill_px = order
+                inst_id, ord_id, trade_id, fill_sz, side, ts, sell_time, fill_px = order
                 # Display sell_time in UTC for consistency
                 sell_time_str = datetime.utcfromtimestamp(int(sell_time)/1000).strftime('%H:%M:%S UTC')
                 buy_price = self.format_price(fill_px)
-                self.logger.info(f"   📋 {inst_id} | ordId: {ord_id} | Total: {fill_sz} | Buy: ${buy_price} | Sell: {sell_time_str}")
+                self.logger.info(f"   📋 {inst_id} | ordId: {ord_id} | tradeId: {trade_id} | fillSz: {fill_sz} | Buy: ${buy_price} | Sell: {sell_time_str}")
         
         return orders
 
-    def mark_order_processing(self, order_id):
-        """Mark order as PROCESSING to avoid duplicate processing"""
+    def mark_trade_processing(self, trade_id):
+        """Mark trade as PROCESSING to avoid duplicate processing"""
         try:
             self.cursor.execute('''
                 UPDATE filled_orders 
                 SET sold_status = 'PROCESSING'
-                WHERE ordId = %s AND sold_status IS NULL
-            ''', (order_id,))
+                WHERE tradeId = %s AND sold_status IS NULL
+            ''', (trade_id,))
             self.conn.commit()
             if self.cursor.rowcount == 1:
-                self.logger.info(f"🔒 Locked order for processing: {order_id}")
+                self.logger.info(f"🔒 Locked trade for processing: {trade_id}")
                 return True
             else:
-                self.logger.info(f"⏭️  Skip, already taken or processed: {order_id}")
+                self.logger.info(f"⏭️  Skip, already taken or processed: {trade_id}")
                 return False
         except Exception as e:
-            self.logger.error(f"❌ Error locking order {order_id}: {e}")
+            self.logger.error(f"❌ Error locking trade {trade_id}: {e}")
             return False
 
-    def clear_order_processing(self, order_id):
+    def clear_trade_processing(self, trade_id):
         """Clear PROCESSING status to allow future retries on failure"""
         try:
             self.cursor.execute('''
                 UPDATE filled_orders 
                 SET sold_status = NULL
-                WHERE ordId = %s AND sold_status = 'PROCESSING'
-            ''', (order_id,))
+                WHERE tradeId = %s AND sold_status = 'PROCESSING'
+            ''', (trade_id,))
             self.conn.commit()
-            self.logger.info(f"🔓 Cleared processing lock: {order_id}")
+            self.logger.info(f"🔓 Cleared processing lock: {trade_id}")
         except Exception as e:
-            self.logger.error(f"❌ Error clearing processing for {order_id}: {e}")
+            self.logger.error(f"❌ Error clearing processing for {trade_id}: {e}")
 
     def get_available_balance(self, inst_id):
         """Get available balance for a specific instrument"""
@@ -284,23 +284,23 @@ class AutoSellOrders:
         self.logger.info(f"✅ Sold {inst_id} | Size: {sell_amount} | USD equivalent: ${eq_usd:.4f} | Order: {okx_order_id}")
         return True
 
-    def mark_order_as_sold(self, order_id):
-        """Mark order as sold in database"""
+    def mark_trade_as_sold(self, trade_id):
+        """Mark trade as sold in database"""
         try:
             self.cursor.execute('''
                 UPDATE filled_orders 
                 SET sold_status = 'SOLD'
-                WHERE ordId = %s
-            ''', (order_id,))
+                WHERE tradeId = %s
+            ''', (trade_id,))
             
             self.conn.commit()
-            self.logger.info(f"✅ Order {order_id} marked as sold")
+            self.logger.info(f"✅ Trade {trade_id} marked as sold")
             
 
             return True
             
         except Exception as e:
-            self.logger.error(f"❌ Error marking order {order_id} as sold: {e}")
+            self.logger.error(f"❌ Error marking trade {trade_id} as sold: {e}")
             return False
 
 
@@ -316,34 +316,34 @@ class AutoSellOrders:
         failed_sells = 0
         
         for order in orders:
-            inst_id, ord_id, acc_fill_sz, side, ts, sell_time, fill_px = order
+            inst_id, ord_id, trade_id, fill_sz, side, ts, sell_time, fill_px = order
             
             try:
                 formatted_price = self.format_price(fill_px)
-                self.logger.info(f"🔄 Processing: {inst_id} | ordId: {ord_id} | Buy: ${formatted_price} | Total: {acc_fill_sz}")
+                self.logger.info(f"🔄 Processing: {inst_id} | ordId: {ord_id} | tradeId: {trade_id} | Buy: ${formatted_price} | fillSz: {fill_sz}")
                 
-                # Lock this order to prevent duplicate processing (intra-run or concurrent)
-                if not self.mark_order_processing(ord_id):
+                # Lock this trade to prevent duplicate processing (intra-run or concurrent)
+                if not self.mark_trade_processing(trade_id):
                     continue
                 
-                sell_result = self.place_market_sell_order(inst_id, acc_fill_sz, ord_id)
+                sell_result = self.place_market_sell_order(inst_id, fill_sz, trade_id)
                 
                 if sell_result == True:  # Successfully sold
-                    if self.mark_order_as_sold(ord_id):
+                    if self.mark_trade_as_sold(trade_id):
                         successful_sells += 1
                     else:
-                        self.logger.warning(f"⚠️  Order {ord_id} sold but failed to update database")
+                        self.logger.warning(f"⚠️  Trade {trade_id} sold but failed to update database")
                         successful_sells += 1
                 elif sell_result == "INSUFFICIENT_VALUE":  # USD equivalent too small, mark as processed
-                    if self.mark_order_as_sold(ord_id):
-                        self.logger.info(f"✅ Order {ord_id} marked as sold (insufficient USD value)")
+                    if self.mark_trade_as_sold(trade_id):
+                        self.logger.info(f"✅ Trade {trade_id} marked as sold (insufficient USD value)")
                         successful_sells += 1
                     else:
-                        self.logger.warning(f"⚠️  Order {ord_id} insufficient value but failed to update database")
+                        self.logger.warning(f"⚠️  Trade {trade_id} insufficient value but failed to update database")
                         failed_sells += 1
                 else:  # Selling failed
                     # Clear PROCESSING to allow future retry
-                    self.clear_order_processing(ord_id)
+                    self.clear_trade_processing(trade_id)
                     failed_sells += 1
                 
                 # Rate limiting: wait 0.1 seconds between orders
