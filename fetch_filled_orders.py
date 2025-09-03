@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Automated Filled Order Tracking System
-Monitors completed orders and calculates sell times for automated trading
+Monitors completed orders and calculates trade times for automated trading
 """
 
 import os

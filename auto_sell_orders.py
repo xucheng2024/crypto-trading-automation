@@ -352,7 +352,7 @@ class AutoSellOrders:
             except Exception as e:
                 # Clear PROCESSING on unexpected error to avoid stuck state
                 try:
-                    self.clear_order_processing(ord_id)
+                    self.clear_trade_processing(trade_id)
                 except Exception:
                     pass
                 failed_sells += 1
