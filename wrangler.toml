@@ -10,8 +10,8 @@ compatibility_date = "2024-01-01"
 # 命名空间ID通过环境变量设置，避免硬编码
 [[kv_namespaces]]
 binding = "DEDUP_KV"
-id = "${KV_NAMESPACE_ID}"
-preview_id = "${KV_NAMESPACE_ID}"
+id = "6a50d25e1cb9432e85c19d32f043e91a"
+preview_id = "6a50d25e1cb9432e85c19d32f043e91a"
 
 [triggers]
 crons = [
@@ -19,10 +19,10 @@ crons = [
   "1,6,11,16,21,26,31,36,41,46,51,56 * * * *",
   # 每15分钟执行: fetch_filled_orders + auto_sell_orders (整点)
   "0,15,30,45 * * * *",
-  # 每天23:55 SGT (15:55 UTC) - 取消待处理触发器
-  "55 15 * * *",
-  # 每天00:05 SGT (16:05 UTC) - 创建算法触发器
-  "5 16 * * *"
+  # 每天23:55 UTC - 取消待处理触发器
+  "55 23 * * *",
+  # 每天00:05 UTC - 创建算法触发器
+  "5 0 * * *"
 ]
 
 # 密钥配置 (需要在Cloudflare Dashboard中设置)

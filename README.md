@@ -93,17 +93,17 @@ python monitor_delist.py
 # Every 15 minutes - Fetch filled orders + Auto sell orders
 - cron: '0,15,30,45 * * * *'
 
-# Daily at 23:55 - Cancel pending trigger orders
+# Daily at 23:55 UTC - Cancel pending trigger orders
 - cron: '55 23 * * *'
 
-# Daily at 00:05 - Create new algo triggers
+# Daily at 00:05 UTC - Create new algo triggers
 - cron: '5 0 * * *'
 ```
 
 ### Execution Strategy
 - **7-Minute Tasks (Staggered)**: `monitor_delist.py` + `cancel_pending_limits.py`
 - **15-Minute Tasks**: `fetch_filled_orders.py` + `auto_sell_orders.py`
-- **Daily Tasks**: `cancel_pending_triggers.py` (23:55) + `create_algo_triggers.py` (00:05)
+- **Daily Tasks**: `cancel_pending_triggers.py` (23:55 UTC) + `create_algo_triggers.py` (00:05 UTC)
 
 ### Automation Scripts
 

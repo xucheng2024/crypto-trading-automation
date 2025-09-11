@@ -3,9 +3,9 @@
  * Cron triggers: 每5分钟和每15分钟执行不同脚本组合
  */
 
-// GitHub 配置 - 从环境变量获取
-const GITHUB_OWNER = env.GITHUB_OWNER || 'xucheng2024';
-const GITHUB_REPO = env.GITHUB_REPO || 'crypto-trading-automation';
+// GitHub 配置 - 默认值
+const DEFAULT_GITHUB_OWNER = 'xucheng2024';
+const DEFAULT_GITHUB_REPO = 'crypto-trading-automation';
 
 
 export default {
@@ -55,8 +55,8 @@ export default {
       const cronMap = new Map([
         ["1,6,11,16,21,26,31,36,41,46,51,56 * * * *", ['monitor_delist', 'cancel_pending_limits']],
         ["0,15,30,45 * * * *", ['fetch_filled_orders', 'auto_sell_orders']],
-        ["55 15 * * *", ['cancel_pending_triggers']], // 23:55 SGT
-        ["5 16 * * *", ['create_algo_triggers']],    // 00:05 SGT
+        ["55 23 * * *", ['cancel_pending_triggers']], // 23:55 UTC
+        ["5 0 * * *", ['create_algo_triggers']],     // 00:05 UTC
       ]);
       
       const scripts = cronMap.get(event.cron);
@@ -71,13 +71,15 @@ export default {
       } else if (scripts.includes('fetch_filled_orders')) {
         console.log('📅 15-minute interval: fetch_filled_orders + auto_sell_orders');
       } else if (scripts.includes('cancel_pending_triggers')) {
-        console.log('🌙 Nightly (SGT 23:55): cancel_pending_triggers');
+        console.log('🌙 Nightly (UTC 23:55): cancel_pending_triggers');
       } else if (scripts.includes('create_algo_triggers')) {
-        console.log('🌅 Morning (SGT 00:05): create_algo_triggers');
+        console.log('🌅 Morning (UTC 00:05): create_algo_triggers');
       }
       
       // 触发 GitHub repository_dispatch
-      const response = await fetch(`https://api.github.com/repos/${env.GITHUB_OWNER}/${env.GITHUB_REPO}/dispatches`, {
+      const githubOwner = env.GITHUB_OWNER || DEFAULT_GITHUB_OWNER;
+      const githubRepo = env.GITHUB_REPO || DEFAULT_GITHUB_REPO;
+      const response = await fetch(`https://api.github.com/repos/${githubOwner}/${githubRepo}/dispatches`, {
         method: 'POST',
         headers: {
           'Authorization': `token ${env.GITHUB_TOKEN}`,
@@ -93,7 +95,7 @@ export default {
             scripts: scripts,
             interval: event.cron === "1,6,11,16,21,26,31,36,41,46,51,56 * * * *" ? '5min' : 
                       event.cron === "0,15,30,45 * * * *" ? '15min' : 
-                      (event.cron === "55 15 * * *" || event.cron === "5 16 * * *") ? 'daily' : 'other'
+                      (event.cron === "55 23 * * *" || event.cron === "5 0 * * *") ? 'daily' : 'other'
           }
         })
       });
@@ -124,18 +126,21 @@ export default {
       return this.scheduled({ cron: 'manual' }, env, ctx);
     }
     
+    const githubOwner = env.GITHUB_OWNER || DEFAULT_GITHUB_OWNER;
+    const githubRepo = env.GITHUB_REPO || DEFAULT_GITHUB_REPO;
+    
     return new Response(`
       <h1>🚀 Crypto Trading Automation Cron Worker</h1>
       <p>Status: Active</p>
-      <p>GitHub Repo: ${env.GITHUB_OWNER}/${env.GITHUB_REPO}</p>
+      <p>GitHub Repo: ${githubOwner}/${githubRepo}</p>
       <p>POST to this endpoint to manually trigger</p>
       <hr>
       <h2>📅 Cron Schedule:</h2>
       <ul>
         <li><strong>每5分钟 (1,6,11,16,21,26,31,36,41,46,51,56 * * * *)</strong>: monitor_delist.py + cancel_pending_limits.py</li>
         <li><strong>每15分钟 (0,15,30,45 * * * *)</strong>: fetch_filled_orders.py + auto_sell_orders.py</li>
-        <li><strong>每天23:55 SGT (55 15 * * * UTC)</strong>: cancel_pending_triggers.py</li>
-        <li><strong>每天00:05 SGT (5 16 * * * UTC)</strong>: create_algo_triggers.py</li>
+        <li><strong>每天23:55 UTC (55 23 * * *)</strong>: cancel_pending_triggers.py</li>
+        <li><strong>每天00:05 UTC (5 0 * * *)</strong>: create_algo_triggers.py</li>
       </ul>
       <hr>
       <h2>🔧 执行逻辑:</h2>
