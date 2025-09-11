@@ -152,6 +152,10 @@ jobs:
                 echo "🔄 Running create_algo_triggers.py..."
                 python create_algo_triggers.py || echo "⚠️ create_algo_triggers.py completed with warnings"
                 ;;
+              check_sell_triggers)
+                echo "🔄 Running check_sell_triggers.py..."
+                python check_sell_triggers.py || echo "⚠️ check_sell_triggers.py completed with warnings"
+                ;;
               *)
                 echo "❌ Unknown script: $script"
                 ;;
