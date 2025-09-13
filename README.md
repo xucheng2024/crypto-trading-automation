@@ -84,26 +84,27 @@ python monitor_delist.py
 - **🎯 Enhanced Crypto Matching** - Improved regex with negative lookahead/lookbehind to prevent false matches (2025-09-03)
 - **🔄 Alias Support** - Added trading pair format support (BTC-USDT, BTC/USDT, BTCUSDT) for comprehensive matching (2025-09-03)
 - **🛡️ False Positive Prevention** - Prevents BTC matching WBTC, ETH matching ETHW, AR matching ARB (2025-09-03)
+- **🕐 Singapore Timezone Sync** - All cron schedules aligned with Singapore time (UTC+8) to match OKX exchange trading hours (2025-09-13)
 
 ### Cloudflare Workers Cron Schedule ⭐
 ```yaml
-# Every 7 minutes (staggered to avoid overlap) - Monitoring and protection
-- cron: '2,9,16,23,30,37,44,51,58 * * * *'
+# Every 5 minutes (staggered to avoid overlap) - Monitoring and protection
+- cron: '1,6,11,16,21,26,31,36,41,46,51,56 * * * *'
 
 # Every 15 minutes - Fetch filled orders + Auto sell orders
 - cron: '0,15,30,45 * * * *'
 
-# Daily at 23:55 UTC - Cancel pending trigger orders
-- cron: '55 23 * * *'
+# Daily at 15:55 UTC (23:55 SGT) - Cancel pending trigger orders
+- cron: '55 15 * * *'
 
-# Daily at 00:05 UTC - Create new algo triggers
-- cron: '5 0 * * *'
+# Daily at 16:05 UTC (00:05 SGT) - Create new algo triggers
+- cron: '5 16 * * *'
 ```
 
 ### Execution Strategy
-- **7-Minute Tasks (Staggered)**: `monitor_delist.py` + `cancel_pending_limits.py` + `check_sell_triggers.py`
+- **5-Minute Tasks (Staggered)**: `monitor_delist.py` + `cancel_pending_limits.py` + `check_sell_triggers.py`
 - **15-Minute Tasks**: `fetch_filled_orders.py` + `auto_sell_orders.py`
-- **Daily Tasks**: `cancel_pending_triggers.py` (23:55 UTC) + `create_algo_triggers.py` (00:05 UTC)
+- **Daily Tasks**: `cancel_pending_triggers.py` (15:55 UTC = 23:55 SGT) + `create_algo_triggers.py` (16:05 UTC = 00:05 SGT)
 
 ### Automation Scripts
 

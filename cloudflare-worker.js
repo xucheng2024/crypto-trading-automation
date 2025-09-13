@@ -55,8 +55,8 @@ export default {
       const cronMap = new Map([
         ["1,6,11,16,21,26,31,36,41,46,51,56 * * * *", ['monitor_delist', 'cancel_pending_limits', 'check_sell_triggers']],
         ["0,15,30,45 * * * *", ['fetch_filled_orders', 'auto_sell_orders']],
-        ["55 23 * * *", ['cancel_pending_triggers']], // 23:55 UTC
-        ["5 0 * * *", ['create_algo_triggers']],     // 00:05 UTC
+        ["55 15 * * *", ['cancel_pending_triggers']], // 15:55 UTC = 23:55 SGT
+        ["5 16 * * *", ['create_algo_triggers']],     // 16:05 UTC = 00:05 SGT
       ]);
       
       const scripts = cronMap.get(event.cron);
@@ -71,9 +71,9 @@ export default {
       } else if (scripts.includes('fetch_filled_orders')) {
         console.log('📅 15-minute interval: fetch_filled_orders + auto_sell_orders');
       } else if (scripts.includes('cancel_pending_triggers')) {
-        console.log('🌙 Nightly (UTC 23:55): cancel_pending_triggers');
+        console.log('🌙 Nightly (UTC 15:55 = SGT 23:55): cancel_pending_triggers');
       } else if (scripts.includes('create_algo_triggers')) {
-        console.log('🌅 Morning (UTC 00:05): create_algo_triggers');
+        console.log('🌅 Morning (UTC 16:05 = SGT 00:05): create_algo_triggers');
       }
       
       // 触发 GitHub repository_dispatch
@@ -95,7 +95,7 @@ export default {
             scripts: scripts,
             interval: event.cron === "1,6,11,16,21,26,31,36,41,46,51,56 * * * *" ? '5min' : 
                       event.cron === "0,15,30,45 * * * *" ? '15min' : 
-                      (event.cron === "55 23 * * *" || event.cron === "5 0 * * *") ? 'daily' : 'other'
+                      (event.cron === "55 15 * * *" || event.cron === "5 16 * * *") ? 'daily' : 'other'
           }
         })
       });
@@ -139,8 +139,8 @@ export default {
       <ul>
         <li><strong>每5分钟 (1,6,11,16,21,26,31,36,41,46,51,56 * * * *)</strong>: monitor_delist.py + cancel_pending_limits.py + check_sell_triggers.py</li>
         <li><strong>每15分钟 (0,15,30,45 * * * *)</strong>: fetch_filled_orders.py + auto_sell_orders.py</li>
-        <li><strong>每天23:55 UTC (55 23 * * *)</strong>: cancel_pending_triggers.py</li>
-        <li><strong>每天00:05 UTC (5 0 * * *)</strong>: create_algo_triggers.py</li>
+        <li><strong>每天15:55 UTC = 23:55 SGT (55 15 * * *)</strong>: cancel_pending_triggers.py</li>
+        <li><strong>每天16:05 UTC = 00:05 SGT (5 16 * * *)</strong>: create_algo_triggers.py</li>
       </ul>
       <hr>
       <h2>🔧 执行逻辑:</h2>
