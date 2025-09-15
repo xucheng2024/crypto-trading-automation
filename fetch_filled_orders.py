@@ -12,7 +12,6 @@ import logging
 import logging.handlers
 import traceback
 from datetime import datetime, timedelta
-from decimal import Decimal
 # import sqlite3  # Migrated to PostgreSQL
 import psycopg2
 from psycopg2.extras import RealDictCursor
@@ -289,22 +288,9 @@ class OKXFilledOrdersFetcher:
                 logger.debug(f"⚠️  Unexpected rowcount: {self.cursor.rowcount} for trade: {trade_id}")
                 return False
             
-            # If trade is newly saved and it's a buy trade, create trigger sell order
-            # Check if this is a new trade (not an update) by checking if sell_time was just set
-            if self.cursor.rowcount == 1 and side == 'buy' and fill_px and fill_sz and sell_time:
-                # Check if this trade already has a sell_time (meaning it was updated, not inserted)
-                self.cursor.execute('SELECT sell_time FROM filled_orders WHERE tradeId = %s', (trade_id,))
-                existing_sell_time = self.cursor.fetchone()
-                
-                if existing_sell_time and existing_sell_time[0] == sell_time:
-                    # This is a new trade, create trigger sell order
-                    logger.info(f"💰 New buy trade saved: {inst_id} @ {fill_px} x {fill_sz}")
-                    try:
-                        self.create_trigger_sell_order(inst_id, fill_px, fill_sz, ord_id)
-                    except Exception as e:
-                        logger.warning(f"⚠️  Failed to create trigger sell order for {trade_id}: {e}")
-                else:
-                    logger.debug(f"🔄 Buy trade updated: {inst_id} @ {fill_px} x {fill_sz} (trigger order already exists)")
+            # Log successful trade save
+            if self.cursor.rowcount == 1 and side == 'buy' and fill_px and fill_sz:
+                logger.info(f"💰 New buy trade saved: {inst_id} @ {fill_px} x {fill_sz}")
             
             return True
             
@@ -316,41 +302,6 @@ class OKXFilledOrdersFetcher:
             logger.debug(f"Traceback: {traceback.format_exc()}")
             return False
 
-    def create_trigger_sell_order(self, inst_id, fill_px, fill_sz, ord_id):
-        """Create a trigger sell order at 20% above buy price using OKX trigger order"""
-        try:
-            # Calculate trigger price (20% above buy price) using Decimal for precision
-            buy_price = Decimal(fill_px)
-            trigger_price = buy_price * Decimal('1.20')  # 20% above buy price
-            
-            # Convert to string for API call (maintains precision)
-            trigger_price_str = str(trigger_price)
-            
-            logger.info(f"🎯 Creating trigger sell order: {inst_id} @ {trigger_price_str} (+20%)")
-            
-            # Create trigger order using OKX algo order API
-            result = self.trade_api.place_algo_order(
-                instId=inst_id,
-                tdMode="cash",  # SPOT trading mode
-                side="sell",
-                ordType="trigger",  # Trigger order
-                sz=fill_sz,
-                triggerPx=trigger_price_str,  # Trigger price
-                orderPx="-1"  # -1 for market price execution
-            )
-            
-            if result and result.get('code') == '0':
-                algo_ord_id = result.get('data', [{}])[0].get('algoOrdId', '')
-                logger.info(f"✅ Trigger sell order created: {algo_ord_id}")
-            else:
-                error_msg = result.get('msg', 'Unknown error') if result else 'No response'
-                logger.error(f"❌ Failed to create trigger sell order: {error_msg}")
-                if result:
-                    logger.debug(f"Full API response: {result}")
-                    
-        except Exception as e:
-            logger.error(f"❌ Exception creating trigger sell order: {e}")
-            logger.debug(f"Traceback: {traceback.format_exc()}")
 
 
 

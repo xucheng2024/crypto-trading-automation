@@ -53,7 +53,7 @@ export default {
     try {
       // 使用Map精确分流，避免时间判断错误和隐性空转
       const cronMap = new Map([
-        ["1,6,11,16,21,26,31,36,41,46,51,56 * * * *", ['monitor_delist', 'cancel_pending_limits', 'check_sell_triggers']],
+        ["1,6,11,16,21,26,31,36,41,46,51,56 * * * *", ['monitor_delist', 'cancel_pending_limits']],
         ["0,15,30,45 * * * *", ['fetch_filled_orders', 'auto_sell_orders']],
         ["55 15 * * *", ['cancel_pending_triggers']], // 15:55 UTC = 23:55 SGT
         ["5 16 * * *", ['create_algo_triggers']],     // 16:05 UTC = 00:05 SGT
@@ -67,7 +67,7 @@ export default {
       
       // 根据脚本类型输出日志
       if (scripts.includes('monitor_delist')) {
-        console.log('📅 5-minute interval (staggered): monitor_delist + cancel_pending_limits + check_sell_triggers');
+        console.log('📅 5-minute interval (staggered): monitor_delist + cancel_pending_limits');
       } else if (scripts.includes('fetch_filled_orders')) {
         console.log('📅 15-minute interval: fetch_filled_orders + auto_sell_orders');
       } else if (scripts.includes('cancel_pending_triggers')) {
@@ -137,7 +137,7 @@ export default {
       <hr>
       <h2>📅 Cron Schedule:</h2>
       <ul>
-        <li><strong>每5分钟 (1,6,11,16,21,26,31,36,41,46,51,56 * * * *)</strong>: monitor_delist.py + cancel_pending_limits.py + check_sell_triggers.py</li>
+        <li><strong>每5分钟 (1,6,11,16,21,26,31,36,41,46,51,56 * * * *)</strong>: monitor_delist.py + cancel_pending_limits.py</li>
         <li><strong>每15分钟 (0,15,30,45 * * * *)</strong>: fetch_filled_orders.py + auto_sell_orders.py</li>
         <li><strong>每天15:55 UTC = 23:55 SGT (55 15 * * *)</strong>: cancel_pending_triggers.py</li>
         <li><strong>每天16:05 UTC = 00:05 SGT (5 16 * * *)</strong>: create_algo_triggers.py</li>
@@ -145,7 +145,7 @@ export default {
       <hr>
       <h2>🔧 执行逻辑:</h2>
       <ul>
-        <li>5分钟间隔: 监控和保护 + 取消限价单 + 检查卖出触发器</li>
+        <li>5分钟间隔: 监控和保护 + 取消限价单</li>
         <li>15分钟间隔: 获取已完成订单 + 自动卖出</li>
         <li>夜间任务: 取消待处理触发器</li>
         <li>早晨任务: 创建算法触发器</li>

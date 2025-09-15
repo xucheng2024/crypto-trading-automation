@@ -102,7 +102,7 @@ python monitor_delist.py
 ```
 
 ### Execution Strategy
-- **5-Minute Tasks (Staggered)**: `monitor_delist.py` + `cancel_pending_limits.py` + `check_sell_triggers.py`
+- **5-Minute Tasks (Staggered)**: `monitor_delist.py` + `cancel_pending_limits.py`
 - **15-Minute Tasks**: `fetch_filled_orders.py` + `auto_sell_orders.py`
 - **Daily Tasks**: `cancel_pending_triggers.py` (15:55 UTC = 23:55 SGT) + `create_algo_triggers.py` (16:05 UTC = 00:05 SGT)
 
@@ -149,14 +149,6 @@ python monitor_delist.py
   - Order status checking
   - Efficient order management
 
-#### `check_sell_triggers.py` 🆕
-- **Purpose**: Check sell trigger orders and cancel those with insufficient balance
-- **Features**:
-  - **Sell Trigger Detection**: Finds all active sell trigger orders
-  - **Balance Validation**: Checks USD value of cryptocurrency balances
-  - **Smart Cancellation**: Cancels orders where balance < 1 USD
-  - **Rate Limiting**: Respects OKX API limits with proper delays
-  - **Comprehensive Logging**: Detailed audit trail of all operations
   - **Error Handling**: Robust error handling with retry mechanisms
 
 #### `fetch_filled_orders.py` ⭐
