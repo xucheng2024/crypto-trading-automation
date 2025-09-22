@@ -127,7 +127,9 @@ jobs:
           
           # Get scripts list
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            SCRIPTS="${{ github.event.inputs.scripts }}"
+            SCRIPTS_RAW="${{ github.event.inputs.scripts }}"
+            # Convert comma-separated to space-separated
+            SCRIPTS=$(echo "$SCRIPTS_RAW" | tr ',' ' ')
           else
             SCRIPTS="${{ join(github.event.client_payload.scripts, ' ') }}"
           fi
