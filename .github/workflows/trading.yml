@@ -57,7 +57,7 @@ jobs:
       - name: Set PYTHONPATH
         run: echo "PYTHONPATH=$GITHUB_WORKSPACE" >> $GITHUB_ENV
 
-      # Use pip with requirements.txt instead of uv for better stability
+      # Optimized pip caching strategy
       - name: Cache pip dependencies
         uses: actions/cache@v4
         with:
@@ -67,41 +67,25 @@ jobs:
             pip-${{ runner.os }}-py311-
             pip-${{ runner.os }}-
 
-      # Install dependencies using pip with retry mechanism
-      - name: Install dependencies with retry
+      # Fast dependency installation with optimizations
+      - name: Install dependencies (optimized)
         run: |
           mkdir -p logs
+          echo "📦 Starting optimized dependency installation..."
           
-          # Function to install with retry
-          install_with_retry() {
-            local max_attempts=3
-            local attempt=1
-            
-            while [ $attempt -le $max_attempts ]; do
-              echo "📦 Attempt $attempt/$max_attempts: Installing dependencies..."
-              
-              # Try pip install with timeout and retry
-              if timeout 300 pip install --upgrade pip && \
-                 timeout 600 pip install -r requirements.txt --timeout 60 --retries 3; then
-                echo "✅ Dependencies installed successfully on attempt $attempt"
-                return 0
-              else
-                echo "❌ Installation failed on attempt $attempt"
-                if [ $attempt -lt $max_attempts ]; then
-                  echo "⏳ Waiting 10 seconds before retry..."
-                  sleep 10
-                fi
-              fi
-              
-              attempt=$((attempt + 1))
-            done
-            
-            echo "💥 Failed to install dependencies after $max_attempts attempts"
-            return 1
-          }
+          # Upgrade pip first (usually cached)
+          pip install --upgrade pip
           
-          # Try installation with retry
-          install_with_retry 2>&1 | tee logs/pip_install.log
+          # Install with optimizations for speed
+          pip install \
+            --no-warn-script-location \
+            --disable-pip-version-check \
+            --no-compile \
+            --prefer-binary \
+            -r requirements.txt \
+            2>&1 | tee logs/pip_install.log
+          
+          echo "✅ Dependencies installed successfully"
       
       - name: Initialize executed scripts list
         run: |
