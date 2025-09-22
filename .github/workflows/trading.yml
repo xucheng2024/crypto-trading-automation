@@ -1,7 +1,7 @@
 name: Crypto Trading Automation
 
 on:
-  # 手动触发
+  # Manual trigger
   workflow_dispatch:
     inputs:
       scripts:
@@ -9,15 +9,15 @@ on:
         required: false
         default: 'monitor_delist,cancel_pending_limits,fetch_filled_orders,auto_sell_orders'
 
-  # Cloudflare Worker 触发
+  # Cloudflare Worker trigger
   repository_dispatch:
     types: [cron]
 
-# 动态设置运行名称
+# Dynamic run name
 run-name: |
   ${{ github.event_name == 'workflow_dispatch' && format('Manual: {0}', github.event.inputs.scripts) || format('Auto: {0}', join(github.event.client_payload.scripts, ', ')) }}
 
-# 并发控制
+# Concurrency control
 concurrency:
   group: "trading-${{ github.event.client_payload.scripts || github.event.inputs.scripts || 'default' }}"
   cancel-in-progress: false
@@ -56,53 +56,63 @@ jobs:
           
       - name: Set PYTHONPATH
         run: echo "PYTHONPATH=$GITHUB_WORKSPACE" >> $GITHUB_ENV
-          
-      # 第一层：缓存 uv 包管理器
-      - name: Cache uv binary
+
+      # Use pip with requirements.txt instead of uv for better stability
+      - name: Cache pip dependencies
         uses: actions/cache@v4
         with:
-          path: ~/.local/bin/uv
-          key: uv-binary-${{ runner.os }}-py311
+          path: ~/.cache/pip
+          key: pip-${{ runner.os }}-py311-${{ hashFiles('requirements.txt') }}
           restore-keys: |
-            uv-binary-${{ runner.os }}-
+            pip-${{ runner.os }}-py311-
+            pip-${{ runner.os }}-
 
-      # 第二层：缓存 uv 下载的包
-      - name: Cache uv packages
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/uv
-          key: uv-packages-${{ runner.os }}-py311-${{ hashFiles('uv.lock', 'pyproject.toml', 'requirements.txt') }}
-          restore-keys: |
-            uv-packages-${{ runner.os }}-py311-
-            uv-packages-${{ runner.os }}-
-
-      # 第三层：缓存 Python 虚拟环境
-      - name: Cache Python venv
-        uses: actions/cache@v4
-        with:
-          path: .venv
-          key: python-venv-${{ runner.os }}-py311-${{ hashFiles('uv.lock', 'pyproject.toml', 'requirements.txt') }}
-          restore-keys: |
-            python-venv-${{ runner.os }}-py311-
-            python-venv-${{ runner.os }}-
-
-      - name: Install uv
-        run: curl -LsSf https://astral.sh/uv/install.sh | sh
-
-      - name: Install dependencies
+      # Install dependencies using pip with retry mechanism
+      - name: Install dependencies with retry
         run: |
           mkdir -p logs
-          set -o pipefail
-          ~/.local/bin/uv sync --locked 2>&1 | tee logs/uv_install.log
+          
+          # Function to install with retry
+          install_with_retry() {
+            local max_attempts=3
+            local attempt=1
+            
+            while [ $attempt -le $max_attempts ]; do
+              echo "📦 Attempt $attempt/$max_attempts: Installing dependencies..."
+              
+              # Try pip install with timeout and retry
+              if timeout 300 pip install --upgrade pip && \
+                 timeout 600 pip install -r requirements.txt --timeout 60 --retries 3; then
+                echo "✅ Dependencies installed successfully on attempt $attempt"
+                return 0
+              else
+                echo "❌ Installation failed on attempt $attempt"
+                if [ $attempt -lt $max_attempts ]; then
+                  echo "⏳ Waiting 10 seconds before retry..."
+                  sleep 10
+                fi
+              fi
+              
+              attempt=$((attempt + 1))
+            done
+            
+            echo "💥 Failed to install dependencies after $max_attempts attempts"
+            return 1
+          }
+          
+          # Try installation with retry
+          install_with_retry 2>&1 | tee logs/pip_install.log
       
       - name: Initialize executed scripts list
         run: |
           : > logs/executed_scripts.txt
           
-      - name: Activate virtual environment
+      - name: Verify installation
         run: |
-          source .venv/bin/activate
-          echo "✅ Virtual environment activated"
+          echo "🔍 Verifying Python environment..."
+          python --version
+          pip list | grep -E "(requests|python-okx|psycopg2|tenacity|python-dotenv)" || echo "Some packages not found"
+          echo "✅ Environment verification complete"
           
       - name: Select and run scripts
         env:
@@ -111,11 +121,11 @@ jobs:
           OKX_SECRET_KEY: ${{ secrets.OKX_SECRET_KEY }}
           OKX_PASSPHRASE: ${{ secrets.OKX_PASSPHRASE }}
           OKX_ORDER_SIZE: ${{ secrets.OKX_ORDER_SIZE }}
+          OKX_TESTNET: false
         run: |
           set -e
-          source .venv/bin/activate
           
-          # 获取要执行的脚本列表
+          # Get scripts list
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             SCRIPTS="${{ github.event.inputs.scripts }}"
           else
@@ -125,60 +135,66 @@ jobs:
           echo "Will run scripts: $SCRIPTS"
           echo "Scripts to execute: $SCRIPTS" >> logs/executed_scripts.txt
           
-          # 执行每个脚本
+          # Execute each script
           for script in $SCRIPTS; do
             case "$script" in
               monitor_delist)
                 echo "🔄 Running monitor_delist.py..."
                 python monitor_delist.py || echo "⚠️ monitor_delist.py completed with warnings"
+                echo "monitor_delist.py" >> logs/executed_scripts.txt
                 ;;
               cancel_pending_limits)
                 echo "🔄 Running cancel_pending_limits.py..."
                 python cancel_pending_limits.py --side buy || echo "⚠️ cancel_pending_limits.py completed with warnings"
+                echo "cancel_pending_limits.py" >> logs/executed_scripts.txt
                 ;;
               fetch_filled_orders)
                 echo "🔄 Running fetch_filled_orders.py..."
                 python fetch_filled_orders.py || echo "⚠️ fetch_filled_orders.py completed with warnings"
+                echo "fetch_filled_orders.py" >> logs/executed_scripts.txt
                 ;;
               auto_sell_orders)
                 echo "🔄 Running auto_sell_orders.py..."
                 python auto_sell_orders.py || echo "⚠️ auto_sell_orders.py completed with warnings"
+                echo "auto_sell_orders.py" >> logs/executed_scripts.txt
                 ;;
               cancel_pending_triggers)
                 echo "🔄 Running cancel_pending_triggers.py..."
                 python cancel_pending_triggers.py || echo "⚠️ cancel_pending_triggers.py completed with warnings"
+                echo "cancel_pending_triggers.py" >> logs/executed_scripts.txt
                 ;;
               create_algo_triggers)
                 echo "🔄 Running create_algo_triggers.py..."
                 python create_algo_triggers.py || echo "⚠️ create_algo_triggers.py completed with warnings"
-                ;;
-              check_sell_triggers)
-                echo "🔄 Running check_sell_triggers.py..."
-                python check_sell_triggers.py || echo "⚠️ check_sell_triggers.py completed with warnings"
+                echo "create_algo_triggers.py" >> logs/executed_scripts.txt
                 ;;
               *)
                 echo "❌ Unknown script: $script"
                 ;;
             esac
           done
-          
-
 
       - name: Write run summary
         if: always()
         run: |
-          echo "### Executed scripts" >> "$GITHUB_STEP_SUMMARY"
+          echo "### 📊 Execution Summary" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Workflow:** ${{ github.workflow }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Trigger:** ${{ github.event_name }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Time:** $(date -u)" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "### 🚀 Executed Scripts" >> "$GITHUB_STEP_SUMMARY"
           if [ -s logs/executed_scripts.txt ]; then
-            sort -u logs/executed_scripts.txt | sed 's/^/- /' | tee -a "$GITHUB_STEP_SUMMARY"
+            grep -v "Scripts to execute:" logs/executed_scripts.txt | sort -u | sed 's/^/- ✅ /' >> "$GITHUB_STEP_SUMMARY"
           else
-            echo "- None" | tee -a "$GITHUB_STEP_SUMMARY"
+            echo "- ❌ None" >> "$GITHUB_STEP_SUMMARY"
           fi
           
       - name: Upload logs
         uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: trading-logs-${{ github.run_id }}
+          name: trading-logs-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             logs/**
             *.log
