@@ -223,13 +223,13 @@ class OKXFilledOrdersFetcher:
             # Use ts field from trade data
             ts = trade.get('ts', '')
             
-            # Calculate sell time (ts + 20 hours)
+            # Calculate sell time (ts + 30 hours)
             sell_time = None
             if ts:
                 try:
-                    # Convert timestamp to UTC datetime and add 20 hours
+                    # Convert timestamp to UTC datetime and add 30 hours
                     ts_datetime = datetime.utcfromtimestamp(int(ts) / 1000)
-                    sell_time_datetime = ts_datetime + timedelta(hours=20)
+                    sell_time_datetime = ts_datetime + timedelta(hours=30)
                     sell_time = str(int(sell_time_datetime.timestamp() * 1000))
                 except (ValueError, TypeError) as e:
                     logger.warning(f"⚠️  Could not calculate sell time for order {ord_id}: {e}")

@@ -52,7 +52,7 @@ python monitor_delist.py
 1. **Intelligent Delisting Protection** - 24/7 monitoring with automated response system
 2. **Trigger Order Management** - Automated creation and cancellation of trigger orders with multiple trigger points
 3. **Limit Order Management** - Smart cancellation of pending limit orders
-4. **Filled Order Tracking** - Real-time monitoring of completed orders with sell_time calculation (ts + 20 hours)
+4. **Filled Order Tracking** - Real-time monitoring of completed orders with sell_time calculation (ts + 30 hours)
 5. **Auto Sell Orders** - Automated market sell orders when sell_time is reached
 6. **Modular Architecture** - Clean, maintainable, and extensible component design
 
@@ -159,7 +159,7 @@ python monitor_delist.py
   - **Incremental Data Fetching**: Smart watermarking using last `tradeId` timestamp for efficient retrieval
   - **Enhanced Deduplication**: `tradeId`-based unique constraints prevent duplicate processing
   - **Partial Fill Support**: Each transaction processed individually, supporting complex order scenarios
-  - **Sell Time Calculation**: Automatically calculates sell_time as ts + 20 hours (UTC-based)
+  - **Sell Time Calculation**: Automatically calculates sell_time as ts + 30 hours (UTC-based)
   - **Timezone Consistency**: All time calculations use UTC to match OKX API timestamps
   - **Real-time Monitoring**: Continuous order status monitoring with incremental updates
   - **Database Storage**: PostgreSQL database with optimized schema for trade tracking
@@ -262,7 +262,7 @@ OKX_TESTNET=false
 ### Trading Strategy Details ⭐
 - **Trigger Order Strategy**: Creates 3 trigger points per crypto pair to maximize execution probability
 - **Price Precision**: Uses Decimal type with 28-digit precision for accurate calculations
-- **Sell Time Management**: Automatically calculates and tracks sell times (ts + 20 hours)
+- **Sell Time Management**: Automatically calculates and tracks sell times (ts + 30 hours)
 - **Risk Management**: Configurable limits and coefficients per crypto pair
 - **Market Adaptation**: Dynamic precision adjustment based on coin value
 
