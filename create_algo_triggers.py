@@ -262,6 +262,21 @@ class OKXAlgoTrigger:
             
             for inst_id, config in crypto_configs.items():
                 best_limit = config.get('best_limit')
+                trade_count = config.get('trade_count')
+                try:
+                    int_trade_count = int(trade_count) if trade_count is not None else 0
+                    int_limit = int(best_limit) if best_limit is not None else 0
+                except Exception:
+                    int_trade_count = 0
+                    int_limit = 0
+                original_limit = best_limit
+                # --- update logic: if trade_count < 100 and best_limit > 80, set to 80 ---
+                if int_trade_count < 100 and int_limit > 80:
+                    best_limit = 80
+                    logger.info(f"[ALGO_TRIGGER] {inst_id}: trade_count={trade_count} < 100 and best_limit={original_limit} > 80, override best_limit to 80")
+                else:
+                    logger.info(f"[ALGO_TRIGGER] {inst_id}: trade_count={trade_count}, use best_limit={best_limit}")
+                # --- end update ---
                 if best_limit is None:
                     logger.warning(f"⚠️  Skipping {inst_id}: no best_limit found")
                     continue
