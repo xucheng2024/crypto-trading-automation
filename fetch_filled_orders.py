@@ -347,6 +347,9 @@ class OKXFilledOrdersFetcher:
             if failed_saves > 0:
                 logger.warning(f"⚠️  Failed: {failed_saves}")
             
+            # Check if 4+ currencies are in trading, cancel all trigger orders if so
+            self.check_and_cancel_triggers_if_needed()
+            
         except Exception as e:
             logger.error(f"❌ Error in fetch_and_save_filled_trades: {e}")
             logger.debug(f"Traceback: {traceback.format_exc()}")
@@ -357,6 +360,166 @@ class OKXFilledOrdersFetcher:
 
 
 
+
+    def count_active_trading_currencies(self):
+        """Count distinct currencies currently in trading (not sold yet)"""
+        try:
+            self.cursor.execute('''
+                SELECT COUNT(DISTINCT instId) as currency_count
+                FROM filled_orders 
+                WHERE side = 'buy' 
+                AND (sold_status IS NULL OR sold_status != 'SOLD')
+            ''')
+            result = self.cursor.fetchone()
+            if result and result[0] is not None:
+                return int(result[0])
+            return 0
+        except Exception as e:
+            logger.warning(f"⚠️ Failed to count active trading currencies: {e}")
+            return 0
+
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=4, max=10),
+        retry=retry_if_exception_type((Exception,))
+    )
+    def get_pending_algo_orders(self):
+        """Get all pending algo trigger orders"""
+        try:
+            all_orders = []
+            limit = 100
+            after = None
+            
+            while True:
+                params = {
+                    "ordType": "trigger"
+                }
+                
+                if after:
+                    params["after"] = after
+                
+                result = self.trade_api.order_algos_list(**params)
+                
+                if result.get('code') == '0':
+                    orders = result.get('data', [])
+                    if not orders:
+                        break
+                    
+                    all_orders.extend(orders)
+                    
+                    if len(orders) < limit:
+                        break
+                    
+                    after = orders[-1].get('algoId')
+                    if not after:
+                        break
+                    
+                    time.sleep(0.1)
+                else:
+                    error_msg = result.get('msg', 'Unknown error')
+                    logger.error(f"❌ Failed to get pending orders: {error_msg}")
+                    break
+            
+            return all_orders
+                
+        except Exception as e:
+            logger.error(f"❌ Error getting pending orders: {e}")
+            logger.debug(f"Traceback: {traceback.format_exc()}")
+            raise
+
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=4, max=10),
+        retry=retry_if_exception_type((Exception,))
+    )
+    def cancel_algo_orders_batch(self, orders_batch):
+        """Cancel multiple algo orders in a single API call (max 10 per batch)"""
+        try:
+            algo_orders = []
+            for order in orders_batch:
+                algo_orders.append({
+                    "instId": order['instId'], 
+                    "algoId": order['algoId']
+                })
+            
+            result = self.trade_api.cancel_algo_order(algo_orders)
+            
+            if result.get('code') == '0':
+                order_ids = [order['algoId'] for order in orders_batch]
+                inst_ids = [order['instId'] for order in orders_batch]
+                logger.info(f"✅ Cancelled {len(orders_batch)} trigger orders | Instruments: {', '.join(inst_ids)}")
+                return True
+            else:
+                error_msg = result.get('msg', 'Unknown error')
+                logger.error(f"❌ Failed to cancel batch: {error_msg}")
+                return False
+                
+        except Exception as e:
+            logger.error(f"❌ Error cancelling batch: {e}")
+            logger.debug(f"Traceback: {traceback.format_exc()}")
+            raise
+
+    def cancel_all_trigger_orders(self):
+        """Cancel all pending trigger orders"""
+        try:
+            logger.info("🔍 Checking for pending trigger orders...")
+            pending_orders = self.get_pending_algo_orders()
+            
+            if not pending_orders:
+                logger.info("✅ No pending trigger orders found")
+                return
+            
+            # Filter for trigger orders (all types)
+            trigger_orders = [order for order in pending_orders if order.get('ordType') == 'trigger']
+            
+            if not trigger_orders:
+                logger.info("✅ No pending trigger orders found")
+                return
+            
+            logger.info(f"🎯 Found {len(trigger_orders)} pending trigger orders to cancel")
+            
+            # Process orders in batches of 10
+            batch_size = 10
+            success_count = 0
+            
+            for i in range(0, len(trigger_orders), batch_size):
+                batch = trigger_orders[i : i + batch_size]
+                batch_num = i // batch_size + 1
+                total_batches = (len(trigger_orders) + batch_size - 1) // batch_size
+                
+                logger.info(f"🔄 Processing batch {batch_num}/{total_batches}...")
+                
+                try:
+                    if self.cancel_algo_orders_batch(batch):
+                        success_count += len(batch)
+                    
+                    if batch_num < total_batches:
+                        time.sleep(0.2)
+                except Exception as e:
+                    logger.error(f"❌ Exception while cancelling batch {batch_num}: {e}")
+                    continue
+            
+            logger.info(f"📊 Summary: {success_count}/{len(trigger_orders)} trigger orders cancelled")
+            
+        except Exception as e:
+            logger.error(f"❌ Error cancelling trigger orders: {e}")
+            logger.debug(f"Traceback: {traceback.format_exc()}")
+            raise
+
+    def check_and_cancel_triggers_if_needed(self):
+        """Check if 4+ currencies are in trading, cancel all trigger orders if so"""
+        try:
+            active_count = self.count_active_trading_currencies()
+            logger.info(f"📊 Currently {active_count} currencies in trading")
+            
+            if active_count >= 4:
+                logger.warning(f"⚠️  {active_count} currencies in trading (>= 4), cancelling all trigger orders...")
+                self.cancel_all_trigger_orders()
+            else:
+                logger.info(f"✅ {active_count} currencies in trading (< 4), no action needed")
+        except Exception as e:
+            logger.error(f"❌ Error checking trading currencies: {e}")
+            logger.debug(f"Traceback: {traceback.format_exc()}")
 
     def close(self):
         """Close database connection"""
