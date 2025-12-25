@@ -5,13 +5,17 @@ Database Configuration - PostgreSQL only
 
 import os
 import psycopg2
+from datetime import datetime
 
 def get_database_connection():
     """Get PostgreSQL database connection"""
     # Ensure environment variables are loaded
     try:
         from dotenv import load_dotenv
+        # Default to .env, but also support .env.local (README mentions it in some setups)
         load_dotenv()
+        if not os.getenv('DATABASE_URL'):
+            load_dotenv(dotenv_path='.env.local')
     except ImportError:
         pass
     
@@ -119,11 +123,23 @@ class Database:
                     max_returns VARCHAR(20),
                     trade_count VARCHAR(10),
                     trades_per_month VARCHAR(20),
+                    win_rate VARCHAR(20),
+                    median_earn VARCHAR(20),
                     avg_return_per_trade VARCHAR(20),
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
+            
+            # Add missing columns if table already exists (migration)
+            try:
+                self.cursor.execute('''
+                    ALTER TABLE crypto_limits 
+                    ADD COLUMN IF NOT EXISTS win_rate VARCHAR(20),
+                    ADD COLUMN IF NOT EXISTS median_earn VARCHAR(20)
+                ''')
+            except Exception:
+                pass  # Columns may already exist
             
             self.conn.commit()
             print("✅ Database tables created successfully")
@@ -175,6 +191,16 @@ class Database:
     def save_limits_config(self, config_data):
         """Save limits configuration to database"""
         try:
+            # Ensure columns exist (migration)
+            try:
+                self.cursor.execute('ALTER TABLE crypto_limits ADD COLUMN IF NOT EXISTS win_rate VARCHAR(20)')
+                self.cursor.execute('ALTER TABLE crypto_limits ADD COLUMN IF NOT EXISTS median_earn VARCHAR(20)')
+                self.conn.commit()
+            except Exception as e:
+                # Columns may already exist or other issue, continue anyway
+                self.conn.rollback()
+                pass
+            
             # Clear existing config first
             self.cursor.execute('DELETE FROM limits_config')
             self.cursor.execute('DELETE FROM crypto_limits')
@@ -182,6 +208,14 @@ class Database:
             # Insert main config
             strategy_params = config_data.get('strategy_params', {})
             limit_range = strategy_params.get('limit_range', [])
+
+            generated_at = config_data.get('generated_at')
+            if isinstance(generated_at, str):
+                try:
+                    generated_at = datetime.fromisoformat(generated_at)
+                except ValueError:
+                    # Let PostgreSQL attempt casting if format is unexpected
+                    pass
             
             self.cursor.execute('''
                 INSERT INTO limits_config 
@@ -189,7 +223,7 @@ class Database:
                  limit_range_min, limit_range_max, min_trades, min_avg_earn, buy_fee, sell_fee)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ''', (
-                config_data.get('generated_at'),
+                generated_at,
                 config_data.get('strategy_name'),
                 config_data.get('description'),
                 config_data.get('strategy_type'),
@@ -207,8 +241,8 @@ class Database:
             for inst_id, config in crypto_configs.items():
                 self.cursor.execute('''
                     INSERT INTO crypto_limits 
-                    (inst_id, best_limit, best_duration, max_returns, trade_count, trades_per_month, avg_return_per_trade)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    (inst_id, best_limit, best_duration, max_returns, trade_count, trades_per_month, win_rate, median_earn, avg_return_per_trade)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ''', (
                     inst_id,
                     config.get('best_limit'),
@@ -216,6 +250,8 @@ class Database:
                     config.get('max_returns'),
                     config.get('trade_count'),
                     config.get('trades_per_month'),
+                    config.get('win_rate'),
+                    config.get('median_earn'),
                     config.get('avg_return_per_trade')
                 ))
             
@@ -223,6 +259,11 @@ class Database:
             print(f"✅ Saved limits configuration with {len(crypto_configs)} crypto pairs")
             return True
         except Exception as e:
+            try:
+                if self.conn:
+                    self.conn.rollback()
+            except Exception:
+                pass
             print(f"❌ Failed to save limits config: {e}")
             return False
     
@@ -237,8 +278,12 @@ class Database:
                 print("❌ No limits configuration found in database")
                 return None
             
-            # Load crypto configs
-            self.cursor.execute('SELECT * FROM crypto_limits ORDER BY inst_id')
+            # Load crypto configs with explicit column names
+            self.cursor.execute('''
+                SELECT inst_id, best_limit, best_duration, max_returns, trade_count, 
+                       trades_per_month, win_rate, median_earn, avg_return_per_trade
+                FROM crypto_limits ORDER BY inst_id
+            ''')
             crypto_rows = self.cursor.fetchall()
             
             # Build config structure
@@ -258,16 +303,18 @@ class Database:
                 'crypto_configs': {}
             }
             
-            # Add crypto configs
+            # Add crypto configs (row: inst_id, best_limit, best_duration, max_returns, trade_count, trades_per_month, win_rate, median_earn, avg_return_per_trade)
             for row in crypto_rows:
-                inst_id = row[1]
+                inst_id = row[0]
                 config_data['crypto_configs'][inst_id] = {
-                    'best_limit': row[2],
-                    'best_duration': row[3],
-                    'max_returns': row[4],
-                    'trade_count': row[5],
-                    'trades_per_month': row[6],
-                    'avg_return_per_trade': row[7]
+                    'best_limit': row[1],
+                    'best_duration': row[2],
+                    'max_returns': row[3],
+                    'trade_count': row[4],
+                    'trades_per_month': row[5],
+                    'win_rate': row[6],
+                    'median_earn': row[7],
+                    'avg_return_per_trade': row[8]
                 }
             
             print(f"✅ Loaded limits configuration with {len(crypto_rows)} crypto pairs")
@@ -289,19 +336,25 @@ class Database:
     def get_crypto_config(self, inst_id):
         """Get configuration for specific crypto pair"""
         try:
-            self.cursor.execute('SELECT * FROM crypto_limits WHERE inst_id = %s', (inst_id,))
+            self.cursor.execute('''
+                SELECT inst_id, best_limit, best_duration, max_returns, trade_count, 
+                       trades_per_month, win_rate, median_earn, avg_return_per_trade
+                FROM crypto_limits WHERE inst_id = %s
+            ''', (inst_id,))
             row = self.cursor.fetchone()
             
             if not row:
                 return None
             
             return {
-                'best_limit': row[2],
-                'best_duration': row[3],
-                'max_returns': row[4],
-                'trade_count': row[5],
-                'trades_per_month': row[6],
-                'avg_return_per_trade': row[7]
+                'best_limit': row[1],
+                'best_duration': row[2],
+                'max_returns': row[3],
+                'trade_count': row[4],
+                'trades_per_month': row[5],
+                'win_rate': row[6],
+                'median_earn': row[7],
+                'avg_return_per_trade': row[8]
             }
         except Exception as e:
             print(f"❌ Failed to get crypto config for {inst_id}: {e}")

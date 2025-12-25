@@ -38,15 +38,17 @@ def main():
     try:
         logger.info("🚀 Starting limits database update")
         logger.info("=" * 60)
+
+        limits_path = sys.argv[1] if len(sys.argv) > 1 else 'limits.json'
         
         # Check if limits.json exists
-        if not os.path.exists('limits.json'):
-            logger.error("❌ limits.json file not found")
+        if not os.path.exists(limits_path):
+            logger.error(f"❌ limits.json file not found: {limits_path}")
             sys.exit(1)
         
         # Load limits.json
-        logger.info("📋 Loading limits.json...")
-        with open('limits.json', 'r', encoding='utf-8') as f:
+        logger.info(f"📋 Loading limits.json: {limits_path}")
+        with open(limits_path, 'r', encoding='utf-8') as f:
             limits_data = json.load(f)
         
         logger.info(f"📊 Loaded configuration:")
@@ -94,7 +96,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
-
 
