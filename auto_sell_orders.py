@@ -29,10 +29,14 @@ except ImportError:
     load_dotenv()
 
 from okx_client import OKXClient
+from utils_time import (
+    get_utc_now_naive, get_today_start_utc_timestamp_ms,
+    timestamp_to_utc_datetime_naive, format_datetime_utc, get_log_filename
+)
 
 def setup_logging():
     """Setup logging with file rotation"""
-    log_filename = f"auto_sell_orders_{datetime.now().strftime('%Y%m%d')}.log"
+    log_filename = get_log_filename('auto_sell_orders')
     os.makedirs('logs', exist_ok=True)
     log_path = os.path.join('logs', log_filename)
     
@@ -121,30 +125,32 @@ class AutoSellOrders:
             return 0.01
 
     def get_orders_ready_to_sell(self):
-        """Get all orders that are ready to sell (sell_time < current_time)"""
-        # Use UTC time to match sell_time calculation in fetch_filled_orders.py
-        current_time = int(datetime.utcnow().timestamp() * 1000)
+        """Get all orders that are ready to sell: non-today buy orders"""
+        # Get today's date in UTC (start of day at 00:00:00) using unified time utility
+        today_start_ts = get_today_start_utc_timestamp_ms()
         
         self.cursor.execute('''
             SELECT instId, ordId, tradeId, fillSz, side, ts, sell_time, fillPx
             FROM filled_orders 
-            WHERE sell_time IS NOT NULL 
-              AND sold_status IS NULL
-              AND CAST(sell_time AS BIGINT) <= %s 
+            WHERE sold_status IS NULL
               AND side = 'buy'
-            ORDER BY CAST(sell_time AS BIGINT) ASC
-        ''', (current_time,))
+              AND ts IS NOT NULL
+              AND CAST(ts AS BIGINT) < %s
+            ORDER BY CAST(ts AS BIGINT) ASC
+        ''', (today_start_ts,))
         
         orders = self.cursor.fetchall()
         
         if orders:
-            self.logger.info(f"🔍 Found {len(orders)} orders ready to sell")
+            self.logger.info(f"🔍 Found {len(orders)} non-today buy orders ready to sell")
             for order in orders:
                 inst_id, ord_id, trade_id, fill_sz, side, ts, sell_time, fill_px = order
-                # Display sell_time in UTC for consistency
-                sell_time_str = datetime.utcfromtimestamp(int(sell_time)/1000).strftime('%H:%M:%S UTC')
+                buy_datetime = timestamp_to_utc_datetime_naive(int(ts)) if ts else None
+                buy_date_str = format_datetime_utc(buy_datetime) if buy_datetime else 'N/A'
                 buy_price = self.format_price(fill_px)
-                self.logger.info(f"   📋 {inst_id} | ordId: {ord_id} | tradeId: {trade_id} | fillSz: {fill_sz} | Buy: ${buy_price} | Sell: {sell_time_str}")
+                self.logger.info(f"   📋 {inst_id} | ordId: {ord_id} | tradeId: {trade_id} | fillSz: {fill_sz} | Buy: ${buy_price} @ {buy_date_str}")
+        else:
+            self.logger.info("🔍 No non-today buy orders found to sell")
         
         return orders
 

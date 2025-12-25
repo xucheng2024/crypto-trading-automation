@@ -20,6 +20,10 @@ from typing import Set, List, Dict, Any
 # Import our utility modules
 from utils_http import get_global_session, safe_request
 from utils_deduplication import is_action_processed, mark_action_processed
+from utils_time import (
+    get_utc_now_naive, timestamp_to_utc_datetime_naive, 
+    format_datetime_utc, is_within_hours, get_log_filename
+)
 
 # Load environment variables first
 try:
@@ -67,8 +71,8 @@ class OKXDelistMonitor:
         # Create logs directory
         os.makedirs('logs', exist_ok=True)
         
-        # Set log filename
-        log_filename = f"monitor_delist_{datetime.now().strftime('%Y%m%d')}.log"
+        # Set log filename (use UTC time)
+        log_filename = get_log_filename('monitor_delist')
         log_path = os.path.join('logs', log_filename)
         
         # Configure logging (with rotation)
@@ -179,23 +183,23 @@ class OKXDelistMonitor:
         return []
     
     def is_recent_announcement(self, announcement: Dict[str, Any]) -> bool:
-        """Check if it's an announcement from the past 24 hours"""
+        """Check if it's an announcement from the past 24 hours (UTC time)"""
         try:
-            # Parse timestamp
-            timestamp = int(announcement['pTime']) / 1000
-            announcement_time = datetime.fromtimestamp(timestamp)
-            now = datetime.now()
+            # Parse timestamp (milliseconds) and convert to UTC datetime
+            timestamp_ms = int(announcement['pTime'])
+            announcement_time = timestamp_to_utc_datetime_naive(timestamp_ms)
             
-            # Check if it's within the past 24 hours
-            time_diff = now - announcement_time
-            return time_diff <= timedelta(hours=24)
-        except:
+            # Check if it's within the past 24 hours using UTC time
+            return is_within_hours(announcement_time, hours=24)
+        except Exception as e:
+            self.logger.warning(f"⚠️ Error checking announcement time: {e}")
             return False
     
     def send_protection_alert(self, announcement: Dict[str, Any], affected_cryptos: Set[str]):
         """Send protection alert and execute protection operations"""
-        timestamp = int(announcement['pTime']) / 1000
-        date = datetime.fromtimestamp(timestamp).strftime('%Y-%m-%d %H:%M:%S')
+        timestamp_ms = int(announcement['pTime'])
+        announcement_time = timestamp_to_utc_datetime_naive(timestamp_ms)
+        date = format_datetime_utc(announcement_time)
         announcement_id = f"{announcement['title']}_{announcement['pTime']}"
         
         print("\n" + "="*80)
@@ -274,8 +278,9 @@ class OKXDelistMonitor:
     
     def send_info_alert(self, announcement: Dict[str, Any]):
         """Send information alert (does not execute protection operations)"""
-        timestamp = int(announcement['pTime']) / 1000
-        date = datetime.fromtimestamp(timestamp).strftime('%Y-%m-%d %H:%M:%S')
+        timestamp_ms = int(announcement['pTime'])
+        announcement_time = timestamp_to_utc_datetime_naive(timestamp_ms)
+        date = format_datetime_utc(announcement_time)
         announcement_id = f"{announcement['title']}_{announcement['pTime']}"
         
         print("\n" + "="*60)
@@ -304,7 +309,8 @@ class OKXDelistMonitor:
     
     def check_for_new_announcements(self):
         """Check for new announcements"""
-        self.logger.info(f"🔍 [{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Starting delist announcement check...")
+        now_utc = get_utc_now_naive()
+        self.logger.info(f"🔍 [{format_datetime_utc(now_utc, '%Y-%m-%d %H:%M:%S')}] Starting delist announcement check...")
         
         try:
             # Fetch announcements from page 1
