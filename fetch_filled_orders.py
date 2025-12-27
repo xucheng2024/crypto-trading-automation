@@ -351,7 +351,7 @@ class OKXFilledOrdersFetcher:
             if failed_saves > 0:
                 logger.warning(f"⚠️  Failed: {failed_saves}")
             
-            # Check if 4+ currencies are in trading, cancel all trigger orders if so
+            # Check if 4+ orders are in trading, cancel all trigger orders if so
             self.check_and_cancel_triggers_if_needed()
             
             # Check and create sell trigger orders for active trades
@@ -369,10 +369,10 @@ class OKXFilledOrdersFetcher:
 
 
     def count_active_trading_currencies(self):
-        """Count distinct currencies currently in trading (not sold yet)"""
+        """Count active trading orders (not sold yet) - includes multiple orders per currency"""
         try:
             self.cursor.execute('''
-                SELECT COUNT(DISTINCT instId) as currency_count
+                SELECT COUNT(*) as order_count
                 FROM filled_orders 
                 WHERE side = 'buy' 
                 AND (sold_status IS NULL OR sold_status != 'SOLD')
@@ -382,7 +382,7 @@ class OKXFilledOrdersFetcher:
                 return int(result[0])
             return 0
         except Exception as e:
-            logger.warning(f"⚠️ Failed to count active trading currencies: {e}")
+            logger.warning(f"⚠️ Failed to count active trading orders: {e}")
             return 0
 
     @retry(
@@ -514,18 +514,18 @@ class OKXFilledOrdersFetcher:
             raise
 
     def check_and_cancel_triggers_if_needed(self):
-        """Check if 4+ currencies are in trading, cancel all trigger orders if so"""
+        """Check if 4+ orders are in trading, cancel all trigger orders if so"""
         try:
             active_count = self.count_active_trading_currencies()
-            logger.info(f"📊 Currently {active_count} currencies in trading")
+            logger.info(f"📊 Currently {active_count} active trading orders")
             
             if active_count >= 4:
-                logger.warning(f"⚠️  {active_count} currencies in trading (>= 4), cancelling all trigger orders...")
+                logger.warning(f"⚠️  {active_count} active trading orders (>= 4), cancelling all trigger orders...")
                 self.cancel_all_trigger_orders()
             else:
-                logger.info(f"✅ {active_count} currencies in trading (< 4), no action needed")
+                logger.info(f"✅ {active_count} active trading orders (< 4), no action needed")
         except Exception as e:
-            logger.error(f"❌ Error checking trading currencies: {e}")
+            logger.error(f"❌ Error checking trading orders: {e}")
             logger.debug(f"Traceback: {traceback.format_exc()}")
 
     def get_active_trading_orders(self):
