@@ -106,35 +106,49 @@ class OKXAlgoTrigger:
         retry=retry_if_exception_type((Exception,))
     )
     def get_crypto_data(self, inst_id):
-        """Get crypto data in one API call: today's open price and 3-day price increase check"""
+        """Get crypto data: today's open price and yesterday's volatility check"""
         try:
-            # Get past 4 days of data (today + 3 days back) in one API call
+            # Get past 2 days of data (today + yesterday)
             result = self.market_api.get_candlesticks(
                 instId=inst_id,
                 bar="1D",
-                limit="4"  # Get 4 days of data
+                limit="2"  # Get 2 days of data (today and yesterday)
             )
             
             if result.get('code') == '0' and result.get('data'):
                 data = result['data']
-                if len(data) >= 4:
+                if len(data) >= 2:
                     # Data is ordered from newest to oldest
-                    # data[0] = today, data[1] = yesterday, data[2] = 2 days ago, data[3] = 3 days ago
+                    # data[0] = today, data[1] = yesterday
                     today_open = Decimal(data[0][1])  # Today's open price
-                    three_days_ago_open = Decimal(data[3][1])  # 3 days ago open price
                     
-                    # Calculate percentage increase from 3 days ago to today
-                    price_increase_pct = ((today_open - three_days_ago_open) / three_days_ago_open) * Decimal('100')
+                    # Yesterday's data: [timestamp, open, high, low, close, volume, ...]
+                    yesterday_open = Decimal(data[1][1])   # Yesterday's open
+                    yesterday_high = Decimal(data[1][2])   # Yesterday's high
+                    yesterday_low = Decimal(data[1][3])    # Yesterday's low
+                    yesterday_close = Decimal(data[1][4])  # Yesterday's close
                     
-                    logger.info(f"📈 {inst_id} | 3d ago: ${three_days_ago_open} | Today: ${today_open} | Change: {price_increase_pct:.2f}%")
+                    # Calculate volatility metrics
+                    # Rule 1: (high-low)/open > 0.25 (amplitude > 25%)
+                    amplitude_ratio = (yesterday_high - yesterday_low) / yesterday_open
                     
-                    # Check if price increase is too high (>70%)
-                    if price_increase_pct > Decimal('70'):
-                        logger.warning(f"🚫 {inst_id} | SKIPPING - Rose {price_increase_pct:.2f}% in past 3 days (>70%)")
-                        return None, False  # Return None for price, False for filter
-                    else:
-                        logger.info(f"✅ {inst_id} | OK - Only rose {price_increase_pct:.2f}% in past 3 days (<70%)")
-                        return today_open, True  # Return today's price, True for filter
+                    # Rule 2: abs(close/open-1) > 0.12 (price change > 12%)
+                    price_change_ratio = abs(yesterday_close / yesterday_open - Decimal('1'))
+                    
+                    logger.info(f"📈 {inst_id} | Yesterday: O=${yesterday_open} H=${yesterday_high} L=${yesterday_low} C=${yesterday_close}")
+                    logger.info(f"   Amplitude: {(amplitude_ratio * 100):.2f}% | Price Change: {(price_change_ratio * 100):.2f}%")
+                    
+                    # Check skip conditions
+                    if amplitude_ratio > Decimal('0.25'):
+                        logger.warning(f"🚫 {inst_id} | SKIPPING - Yesterday amplitude {(amplitude_ratio * 100):.2f}% > 25%")
+                        return None, False  # Skip: too volatile
+                    
+                    if price_change_ratio > Decimal('0.12'):
+                        logger.warning(f"🚫 {inst_id} | SKIPPING - Yesterday price change {(price_change_ratio * 100):.2f}% > 12%")
+                        return None, False  # Skip: too volatile
+                    
+                    logger.info(f"✅ {inst_id} | OK - Yesterday volatility within limits")
+                    return today_open, True  # Return today's price, True for filter
                 else:
                     logger.warning(f"⚠️ {inst_id} | Insufficient historical data, allowing trigger creation")
                     # If we have at least today's data, use it
@@ -281,12 +295,12 @@ class OKXAlgoTrigger:
                 logger.info(f"\n🔄 Processing {inst_id}...")
                 
                 try:
-                    # Get crypto data in one API call: price and 3-day increase check
+                    # Get crypto data: price and yesterday volatility check
                     open_price, price_check_passed = self.get_crypto_data(inst_id)
                     
                     if not price_check_passed:
-                        logger.warning(f"⚠️  Skipping {inst_id}: rose >70% in past 3 days")
-                        failed_pairs.append((inst_id, "Skipped due to high price increase (>70% in 3 days)"))
+                        logger.warning(f"⚠️  Skipping {inst_id}: yesterday volatility too high")
+                        failed_pairs.append((inst_id, "Skipped due to high yesterday volatility"))
                         continue
                     
                     if open_price is None:
