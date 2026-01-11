@@ -114,7 +114,7 @@ class OKXAlgoTrigger:
     def get_crypto_data(self, inst_id):
         """Get crypto data: today's open price and yesterday's volatility check"""
         try:
-            # Check cache first (if 7day data was already fetched)
+            # Check cache first (if 10day data was already fetched)
             if inst_id in self.data_cache and 'candlestick_data' in self.data_cache[inst_id]:
                 cached_data = self.data_cache[inst_id]['candlestick_data']
                 if len(cached_data) >= 2:
@@ -191,35 +191,35 @@ class OKXAlgoTrigger:
         wait=wait_exponential(multiplier=1, min=4, max=10),
         retry=retry_if_exception_type((Exception,))
     )
-    def get_7day_data(self, inst_id):
-        """Get past 7 days of data (including today) and calculate max high, and get current price"""
+    def get_10day_data(self, inst_id):
+        """Get past 10 days of data (including today) and calculate max high, and get current price"""
         try:
             # Check cache first
             if inst_id in self.data_cache:
                 cached = self.data_cache[inst_id]
                 if 'max_high' in cached and 'current_price' in cached:
-                    logger.debug(f"📦 {inst_id} | Using cached 7day data")
+                    logger.debug(f"📦 {inst_id} | Using cached 10day data")
                     return cached['max_high'], cached['current_price']
             
-            # Get past 7 days of data (including today)
+            # Get past 10 days of data (including today)
             result = self.market_api.get_candlesticks(
                 instId=inst_id,
                 bar="1D",
-                limit="7"  # Get 7 days of data (including today)
+                limit="10"  # Get 10 days of data (including today)
             )
             
             if result.get('code') == '0' and result.get('data'):
                 data = result['data']
-                if len(data) < 7:
-                    logger.warning(f"⚠️ {inst_id} | Insufficient 7-day data: {len(data)} days")
+                if len(data) < 10:
+                    logger.warning(f"⚠️ {inst_id} | Insufficient 10-day data: {len(data)} days")
                     return None, None
                 
                 # Data is ordered from newest to oldest
-                # data[0] = today, data[1] = yesterday, ... data[6] = 7 days ago
+                # data[0] = today, data[1] = yesterday, ... data[9] = 10 days ago
                 
-                # Find max high in past 7 days (including today)
+                # Find max high in past 10 days (including today)
                 max_high = Decimal(data[0][2])  # Start with today's high
-                for i in range(1, 7):
+                for i in range(1, 10):
                     day_high = Decimal(data[i][2])
                     if day_high > max_high:
                         max_high = day_high
@@ -231,7 +231,7 @@ class OKXAlgoTrigger:
                     if ticker_data and len(ticker_data) > 0:
                         current_price = Decimal(ticker_data[0].get('last', '0'))  # Current last traded price
                         if current_price > 0:
-                            logger.info(f"📊 {inst_id} | 7-day max high: ${max_high} | Current price: ${current_price}")
+                            logger.info(f"📊 {inst_id} | 10-day max high: ${max_high} | Current price: ${current_price}")
                             
                             # Cache the data for potential reuse
                             self.data_cache[inst_id] = {
@@ -252,11 +252,11 @@ class OKXAlgoTrigger:
                 return None, None
             
             error_msg = result.get('msg', 'Unknown error')
-            logger.warning(f"⚠️ Failed to get 7-day data for {inst_id}: {error_msg}")
+            logger.warning(f"⚠️ Failed to get 10-day data for {inst_id}: {error_msg}")
             return None, None
             
         except Exception as e:
-            logger.warning(f"⚠️ Error getting 7-day data for {inst_id}: {e}")
+            logger.warning(f"⚠️ Error getting 10-day data for {inst_id}: {e}")
             logger.debug(f"Traceback: {traceback.format_exc()}")
             return None, None
     
@@ -368,14 +368,14 @@ class OKXAlgoTrigger:
         wait=wait_exponential(multiplier=1, min=4, max=10),
         retry=retry_if_exception_type((Exception,))
     )
-    def create_7day_drop_trigger_order(self, inst_id, trigger_price):
-        """Create single trigger order at target price (for 7day drop strategy)"""
+    def create_10day_drop_trigger_order(self, inst_id, trigger_price):
+        """Create single trigger order at target price (for 10day drop strategy)"""
         try:
             # Use common method to create order
-            return self._create_trigger_order_internal(inst_id, trigger_price, "7day Drop")
+            return self._create_trigger_order_internal(inst_id, trigger_price, "10day Drop")
                 
         except Exception as e:
-            logger.error(f"❌ Error creating 7day drop trigger order for {inst_id}: {e}")
+            logger.error(f"❌ Error creating 10day drop trigger order for {inst_id}: {e}")
             logger.debug(f"Traceback: {traceback.format_exc()}")
             raise  # Re-raise for retry mechanism
     
@@ -489,8 +489,8 @@ class OKXAlgoTrigger:
             logger.error(f"❌ Error processing limits from database: {e}")
             logger.debug(f"Traceback: {traceback.format_exc()}")
     
-    def _process_single_7day_drop_pair(self, inst_id, config, blacklisted_cryptos):
-        """Process a single crypto pair for 7day drop strategy (for parallel processing)"""
+    def _process_single_10day_drop_pair(self, inst_id, config, blacklisted_cryptos):
+        """Process a single crypto pair for 10day drop strategy (for parallel processing)"""
         drop_ratio = config.get('drop_ratio')
         
         if drop_ratio is None:
@@ -507,12 +507,12 @@ class OKXAlgoTrigger:
         logger.info(f"\n🔄 Processing {inst_id}...")
         
         try:
-            # Get 7-day data: max high and current price
-            max_high, current_price = self.get_7day_data(inst_id)
+            # Get 10-day data: max high and current price
+            max_high, current_price = self.get_10day_data(inst_id)
             
             if max_high is None or current_price is None:
-                logger.warning(f"⚠️  Skipping {inst_id}: could not get 7-day data or current price")
-                return (inst_id, "Failed to get 7-day data or current price", False)
+                logger.warning(f"⚠️  Skipping {inst_id}: could not get 10-day data or current price")
+                return (inst_id, "Failed to get 10-day data or current price", False)
             
             # Calculate buy price: max_high × (1 - drop_ratio)
             drop_ratio_decimal = Decimal(str(drop_ratio))
@@ -522,7 +522,7 @@ class OKXAlgoTrigger:
             
             # Create buy trigger order at buy_price (trigger will execute when price drops to buy_price)
             # Note: We create the trigger regardless of current price, as the trigger order will wait for price to drop
-            if self.create_7day_drop_trigger_order(inst_id, buy_price):
+            if self.create_10day_drop_trigger_order(inst_id, buy_price):
                 return (inst_id, None, True)
             else:
                 return (inst_id, "Failed to create order", False)
@@ -531,24 +531,24 @@ class OKXAlgoTrigger:
             logger.error(f"❌ Error processing {inst_id}: {e}")
             return (inst_id, str(e), False)
 
-    def process_7day_drop_from_database(self):
-        """Process 7day drop strategy from database and create algo trigger orders (optimized with parallel processing)"""
+    def process_10day_drop_from_database(self):
+        """Process 10day drop strategy from database and create algo trigger orders (optimized with parallel processing)"""
         try:
-            # Load 7day drop configuration from database
+            # Load 10day drop configuration from database
             db = Database()
             if not db.connect():
                 logger.error("❌ Failed to connect to database")
                 return False
             
-            config_data = db.load_7day_drop_config()
+            config_data = db.load_7day_drop_config()  # Database table name still uses 7day, but logic is now 10day
             db.disconnect()
             
             if not config_data:
-                logger.error("❌ No 7day drop configuration found in database")
+                logger.error("❌ No 10day drop configuration found in database")
                 return False
             
             crypto_configs = config_data.get('crypto_configs', {})
-            logger.info(f"📋 Found {len(crypto_configs)} crypto pairs in 7day drop configuration")
+            logger.info(f"📋 Found {len(crypto_configs)} crypto pairs in 10day drop configuration")
             
             # Load blacklisted cryptocurrencies
             blacklisted_cryptos = self.blacklist_manager.get_blacklisted_cryptos()
@@ -558,7 +558,7 @@ class OKXAlgoTrigger:
                 logger.info("✅ No blacklisted cryptocurrencies found")
             
             logger.info("=" * 60)
-            logger.info("📊 Processing 7day Drop Strategy")
+            logger.info("📊 Processing 10day Drop Strategy")
             logger.info("🚀 Processing with parallel execution (max 2 workers)")
             logger.info("=" * 60)
             
@@ -573,7 +573,7 @@ class OKXAlgoTrigger:
             with ThreadPoolExecutor(max_workers=2) as executor:
                 # Submit all tasks
                 future_to_pair = {
-                    executor.submit(self._process_single_7day_drop_pair, inst_id, config, blacklisted_cryptos): inst_id
+                    executor.submit(self._process_single_10day_drop_pair, inst_id, config, blacklisted_cryptos): inst_id
                     for inst_id, config in crypto_configs.items()
                 }
                 
@@ -593,7 +593,7 @@ class OKXAlgoTrigger:
                         failed_pairs.append((inst_id, str(e)))
             
             logger.info("\n" + "=" * 60)
-            logger.info(f"📊 7day Drop Summary: {success_count}/{total_count} orders created successfully")
+            logger.info(f"📊 10day Drop Summary: {success_count}/{total_count} orders created successfully")
             
             if skipped_blacklist > 0:
                 logger.info(f"🚫 Skipped due to blacklist: {skipped_blacklist}")
@@ -604,7 +604,7 @@ class OKXAlgoTrigger:
                     logger.warning(f"   {pair}: {reason}")
             
         except Exception as e:
-            logger.error(f"❌ Error processing 7day drop strategy: {e}")
+            logger.error(f"❌ Error processing 10day drop strategy: {e}")
             logger.debug(f"Traceback: {traceback.format_exc()}")
 
 def main():
@@ -620,10 +620,10 @@ def main():
         # Create OKX client and process limits from database
         okx_client = OKXAlgoTrigger(order_size=order_size)
         
-        # Process 7day drop strategy first (cache 7day data)
-        okx_client.process_7day_drop_from_database()
+        # Process 10day drop strategy first (cache 10day data)
+        okx_client.process_10day_drop_from_database()
         
-        # Process regular limits strategy (can use cached 7day data if available)
+        # Process regular limits strategy (can use cached 10day data if available)
         okx_client.process_limits_from_database()
         
         logger.info("✅ Script completed successfully")
