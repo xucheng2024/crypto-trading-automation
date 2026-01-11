@@ -212,8 +212,8 @@ class OKXFilledOrdersFetcher:
             logger.debug(f"Traceback: {traceback.format_exc()}")
             raise  # Re-raise for retry mechanism
 
-    def save_trade_to_db(self, trade):
-        """Save a single trade to database"""
+    def prepare_trade_data(self, trade):
+        """Prepare trade data for database insertion"""
         try:
             # Extract required fields from trade data
             inst_id = trade.get('instId', '')
@@ -241,32 +241,42 @@ class OKXFilledOrdersFetcher:
             # Validate required fields
             if not all([inst_id, trade_id, fill_px, fill_sz, side]):
                 logger.warning(f"⚠️  Skipping trade with missing required data: {trade}")
-                return False
+                return None
             
-            # Prepare data for insertion
-            data = {
-                'instId': inst_id,
-                'ordId': ord_id,
-                'tradeId': trade_id,
-                'billId': bill_id,
-                'fillPx': fill_px,
-                'fillSz': fill_sz,
-                'side': side,
-                'ts': ts,
-                'subType': trade.get('subType', ''),
-                'execType': trade.get('execType', ''),
-                'fee': trade.get('fee', ''),
-                'feeCcy': trade.get('feeCcy', ''),
-                'feeRate': trade.get('feeRate', ''),
-                'fillTime': trade.get('fillTime', ''),
-                'posSide': trade.get('posSide', ''),
-                'clOrdId': trade.get('clOrdId', ''),
-                'tag': trade.get('tag', ''),
-                'sell_time': sell_time
-            }
+            # Return tuple for batch insert
+            return (
+                inst_id, ord_id, trade_id, bill_id, fill_px, fill_sz, side, ts,
+                trade.get('subType', ''), trade.get('execType', ''),
+                trade.get('fee', ''), trade.get('feeCcy', ''), trade.get('feeRate', ''),
+                trade.get('fillTime', ''), trade.get('posSide', ''),
+                trade.get('clOrdId', ''), trade.get('tag', ''), sell_time
+            )
+        except Exception as e:
+            logger.error(f"❌ Error preparing trade data: {e}")
+            return None
+
+    def save_trades_batch(self, trades):
+        """Save multiple trades to database using batch insert (optimized)"""
+        if not trades:
+            return 0, 0
+        
+        try:
+            # Prepare all trade data
+            trade_data_list = []
+            valid_trades = []
             
-            # Insert new trade; update existing trade but preserve sell_time and sold_status
-            self.cursor.execute('''
+            for trade in trades:
+                trade_data = self.prepare_trade_data(trade)
+                if trade_data:
+                    trade_data_list.append(trade_data)
+                    valid_trades.append(trade)
+            
+            if not trade_data_list:
+                logger.warning("⚠️  No valid trades to save")
+                return 0, len(trades)
+            
+            # Batch insert using executemany
+            self.cursor.executemany('''
                 INSERT INTO filled_orders 
                 (instId, ordId, tradeId, billId, fillPx, fillSz, side, ts, subType, execType, fee, feeCcy, feeRate, fillTime, posSide, clOrdId, tag, sell_time)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
@@ -279,33 +289,35 @@ class OKXFilledOrdersFetcher:
                     fillTime = EXCLUDED.fillTime,
                     execType = EXCLUDED.execType
                     -- sell_time and sold_status are preserved (not updated)
-            ''', (
-                data['instId'], data['ordId'], data['tradeId'], data['billId'], data['fillPx'], data['fillSz'], 
-                data['side'], data['ts'], data['subType'], data['execType'], data['fee'], data['feeCcy'], 
-                data['feeRate'], data['fillTime'], data['posSide'], data['clOrdId'], data['tag'], data['sell_time']
-            ))
-
-            # Log the result of insert/update
-            if self.cursor.rowcount == 1:
-                logger.debug(f"✅ Trade inserted/updated: {trade_id}")
-            else:
-                logger.debug(f"⚠️  Unexpected rowcount: {self.cursor.rowcount} for trade: {trade_id}")
-                return False
+            ''', trade_data_list)
             
-            # Log successful trade save
-            if self.cursor.rowcount == 1 and side == 'buy' and fill_px and fill_sz:
-                logger.info(f"💰 New buy trade saved: {inst_id} @ {fill_px} x {fill_sz}")
+            # Single commit for all trades
+            self.conn.commit()
             
-            return True
+            # Log successful trades
+            successful_count = len(trade_data_list)
+            for trade in valid_trades:
+                inst_id = trade.get('instId', '')
+                trade_id = trade.get('tradeId', '')
+                fill_px = trade.get('fillPx', '')
+                fill_sz = trade.get('fillSz', '')
+                side = trade.get('side', '')
+                
+                if side == 'buy' and fill_px and fill_sz:
+                    logger.info(f"💰 New buy trade saved: {inst_id} @ {fill_px} x {fill_sz}")
+                else:
+                    logger.debug(f"✅ Trade inserted/updated: {trade_id}")
             
-        except Exception as e:  # PostgreSQL compatible
-            logger.warning(f"⚠️  Duplicate trade ID {trade_id}: {e}")
-            return False
+            failed_count = len(trades) - successful_count
+            logger.info(f"📊 Batch saved {successful_count}/{len(trades)} trades")
+            
+            return successful_count, failed_count
+            
         except Exception as e:
-            logger.error(f"❌ Error saving trade {trade_id}: {e}")
+            logger.error(f"❌ Error in batch save: {e}")
             logger.debug(f"Traceback: {traceback.format_exc()}")
-            return False
-
+            self.conn.rollback()
+            return 0, len(trades)
 
 
 
@@ -333,18 +345,8 @@ class OKXFilledOrdersFetcher:
                 logger.info("🎯 No new filled trades found")
                 return
             
-            # Save trades to database
-            successful_saves = 0
-            failed_saves = 0
-            
-            for trade in trades:
-                if self.save_trade_to_db(trade):
-                    successful_saves += 1
-                else:
-                    failed_saves += 1
-            
-            # Commit changes
-            self.conn.commit()
+            # Save trades to database using batch insert (optimized)
+            successful_saves, failed_saves = self.save_trades_batch(trades)
             
             # Summary
             logger.info(f"📊 Summary: {successful_saves}/{len(trades)} trades saved")

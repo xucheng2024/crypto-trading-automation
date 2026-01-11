@@ -290,24 +290,32 @@ class AutoSellOrders:
         self.logger.info(f"✅ Sold {inst_id} | Size: {sell_amount} | USD equivalent: ${eq_usd:.4f} | Order: {okx_order_id}")
         return True
 
-    def mark_trade_as_sold(self, trade_id):
-        """Mark trade as sold in database"""
+    def mark_trades_as_sold_batch(self, trade_ids):
+        """Mark multiple trades as sold in database using batch update (optimized)"""
+        if not trade_ids:
+            return 0
+        
         try:
-            self.cursor.execute('''
+            # Batch update using executemany
+            self.cursor.executemany('''
                 UPDATE filled_orders 
                 SET sold_status = 'SOLD'
                 WHERE tradeId = %s
-            ''', (trade_id,))
+            ''', [(trade_id,) for trade_id in trade_ids])
             
+            # Single commit for all updates
             self.conn.commit()
-            self.logger.info(f"✅ Trade {trade_id} marked as sold")
             
-
-            return True
+            updated_count = self.cursor.rowcount
+            self.logger.info(f"✅ Batch marked {updated_count} trades as sold")
+            
+            return updated_count
             
         except Exception as e:
-            self.logger.error(f"❌ Error marking trade {trade_id} as sold: {e}")
-            return False
+            self.logger.error(f"❌ Error in batch mark as sold: {e}")
+            self.logger.debug(f"Traceback: {traceback.format_exc()}")
+            self.conn.rollback()
+            return 0
 
 
 
@@ -320,6 +328,7 @@ class AutoSellOrders:
         
         successful_sells = 0
         failed_sells = 0
+        trades_to_mark_sold = []  # Collect trade IDs for batch update
         
         for order in orders:
             inst_id, ord_id, trade_id, fill_sz, side, ts, sell_time, fill_px = order
@@ -335,18 +344,12 @@ class AutoSellOrders:
                 sell_result = self.place_market_sell_order(inst_id, fill_sz)
                 
                 if sell_result == True:  # Successfully sold
-                    if self.mark_trade_as_sold(trade_id):
-                        successful_sells += 1
-                    else:
-                        self.logger.warning(f"⚠️  Trade {trade_id} sold but failed to update database")
-                        successful_sells += 1
+                    trades_to_mark_sold.append(trade_id)
+                    successful_sells += 1
                 elif sell_result == "INSUFFICIENT_VALUE":  # USD equivalent too small, mark as processed
-                    if self.mark_trade_as_sold(trade_id):
-                        self.logger.info(f"✅ Trade {trade_id} marked as sold (insufficient USD value)")
-                        successful_sells += 1
-                    else:
-                        self.logger.warning(f"⚠️  Trade {trade_id} insufficient value but failed to update database")
-                        failed_sells += 1
+                    trades_to_mark_sold.append(trade_id)
+                    self.logger.info(f"✅ Trade {trade_id} will be marked as sold (insufficient USD value)")
+                    successful_sells += 1
                 else:  # Selling failed
                     # Clear PROCESSING to allow future retry
                     self.clear_trade_processing(trade_id)
@@ -364,6 +367,12 @@ class AutoSellOrders:
                 failed_sells += 1
                 self.logger.error(f"❌ Error processing sell order {ord_id}: {e}")
                 continue
+        
+        # Batch update all successful sells (optimized)
+        if trades_to_mark_sold:
+            updated_count = self.mark_trades_as_sold_batch(trades_to_mark_sold)
+            if updated_count != len(trades_to_mark_sold):
+                self.logger.warning(f"⚠️  Expected to mark {len(trades_to_mark_sold)} trades as sold, but only {updated_count} were updated")
         
         # Summary
         if successful_sells > 0 or failed_sells > 0:

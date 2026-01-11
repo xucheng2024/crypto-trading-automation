@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from decimal import Decimal, getcontext, ROUND_HALF_UP
 import time
 import traceback
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 # Load environment variables first
@@ -378,6 +379,45 @@ class OKXAlgoTrigger:
             logger.debug(f"Traceback: {traceback.format_exc()}")
             raise  # Re-raise for retry mechanism
     
+    def _process_single_limit_pair(self, inst_id, config, blacklisted_cryptos):
+        """Process a single crypto pair for limits strategy (for parallel processing)"""
+        best_limit = config.get('best_limit')
+        
+        if best_limit is None:
+            return (inst_id, "no best_limit found", False)
+        
+        # Extract base currency from inst_id (e.g., "BTC-USDT" -> "BTC")
+        base_currency = inst_id.split('-')[0] if '-' in inst_id else inst_id
+        
+        # Check if cryptocurrency is blacklisted
+        if base_currency in blacklisted_cryptos:
+            reason = self.blacklist_manager.get_blacklist_reason(base_currency)
+            return (inst_id, f"Blacklisted: {reason}", False)
+        
+        logger.info(f"\n🔄 Processing {inst_id}...")
+        
+        try:
+            # Get crypto data: price and yesterday volatility check
+            open_price, price_check_passed = self.get_crypto_data(inst_id)
+            
+            if not price_check_passed:
+                logger.warning(f"⚠️  Skipping {inst_id}: yesterday volatility too high")
+                return (inst_id, "Skipped due to high yesterday volatility", False)
+            
+            if open_price is None:
+                logger.warning(f"⚠️  Skipping {inst_id}: could not get open price")
+                return (inst_id, "Failed to get open price", False)
+            
+            # Create algo trigger order
+            if self.create_algo_trigger_order(inst_id, best_limit, open_price):
+                return (inst_id, None, True)
+            else:
+                return (inst_id, "Failed to create order", False)
+            
+        except Exception as e:
+            logger.error(f"❌ Error processing {inst_id}: {e}")
+            return (inst_id, str(e), False)
+
     def process_limits_from_database(self):
         """Process limits from database and create algo trigger orders"""
         try:
@@ -401,59 +441,36 @@ class OKXAlgoTrigger:
                 logger.info("✅ No blacklisted cryptocurrencies found")
             
             logger.info("=" * 60)
+            logger.info("🚀 Processing with parallel execution (max 5 workers)")
+            logger.info("=" * 60)
             
             success_count = 0
             total_count = len(crypto_configs)
             failed_pairs = []
             skipped_blacklist = 0
             
-            for inst_id, config in crypto_configs.items():
-                best_limit = config.get('best_limit')
+            # Process in parallel (max 5 workers to respect OKX rate limits: 5 requests/2 seconds)
+            with ThreadPoolExecutor(max_workers=5) as executor:
+                # Submit all tasks
+                future_to_pair = {
+                    executor.submit(self._process_single_limit_pair, inst_id, config, blacklisted_cryptos): inst_id
+                    for inst_id, config in crypto_configs.items()
+                }
                 
-                if best_limit is None:
-                    logger.warning(f"⚠️  Skipping {inst_id}: no best_limit found")
-                    continue
-                
-                # Extract base currency from inst_id (e.g., "BTC-USDT" -> "BTC")
-                base_currency = inst_id.split('-')[0] if '-' in inst_id else inst_id
-                
-                # Check if cryptocurrency is blacklisted
-                if base_currency in blacklisted_cryptos:
-                    reason = self.blacklist_manager.get_blacklist_reason(base_currency)
-                    logger.warning(f"🚫 Skipping {inst_id}: blacklisted ({reason})")
-                    failed_pairs.append((inst_id, f"Blacklisted: {reason}"))
-                    skipped_blacklist += 1
-                    continue
-                
-                logger.info(f"\n🔄 Processing {inst_id}...")
-                
-                try:
-                    # Get crypto data: price and yesterday volatility check
-                    open_price, price_check_passed = self.get_crypto_data(inst_id)
-                    
-                    if not price_check_passed:
-                        logger.warning(f"⚠️  Skipping {inst_id}: yesterday volatility too high")
-                        failed_pairs.append((inst_id, "Skipped due to high yesterday volatility"))
-                        continue
-                    
-                    if open_price is None:
-                        logger.warning(f"⚠️  Skipping {inst_id}: could not get open price")
-                        failed_pairs.append((inst_id, "Failed to get open price"))
-                        continue
-                    
-                    # Create algo trigger order
-                    if self.create_algo_trigger_order(inst_id, best_limit, open_price):
-                        success_count += 1
-                    else:
-                        failed_pairs.append((inst_id, "Failed to create order"))
-                    
-                except Exception as e:
-                    logger.error(f"❌ Error processing {inst_id}: {e}")
-                    failed_pairs.append((inst_id, str(e)))
-                    continue
-                
-                # Rate limiting: OKX allows 5 requests per 2 seconds
-                time.sleep(0.5)
+                # Collect results as they complete
+                for future in as_completed(future_to_pair):
+                    inst_id = future_to_pair[future]
+                    try:
+                        result_inst_id, reason, success = future.result()
+                        if success:
+                            success_count += 1
+                        else:
+                            if reason and "Blacklisted" in reason:
+                                skipped_blacklist += 1
+                            failed_pairs.append((result_inst_id, reason))
+                    except Exception as e:
+                        logger.error(f"❌ Exception processing {inst_id}: {e}")
+                        failed_pairs.append((inst_id, str(e)))
             
             logger.info("\n" + "=" * 60)
             logger.info(f"📊 Summary: {success_count}/{total_count} orders created successfully")
@@ -470,8 +487,54 @@ class OKXAlgoTrigger:
             logger.error(f"❌ Error processing limits from database: {e}")
             logger.debug(f"Traceback: {traceback.format_exc()}")
     
+    def _process_single_7day_drop_pair(self, inst_id, config, blacklisted_cryptos):
+        """Process a single crypto pair for 7day drop strategy (for parallel processing)"""
+        drop_ratio = config.get('drop_ratio')
+        
+        if drop_ratio is None:
+            return (inst_id, "no drop_ratio found", False)
+        
+        # Extract base currency from inst_id (e.g., "BTC-USDT" -> "BTC")
+        base_currency = inst_id.split('-')[0] if '-' in inst_id else inst_id
+        
+        # Check if cryptocurrency is blacklisted
+        if base_currency in blacklisted_cryptos:
+            reason = self.blacklist_manager.get_blacklist_reason(base_currency)
+            return (inst_id, f"Blacklisted: {reason}", False)
+        
+        logger.info(f"\n🔄 Processing {inst_id}...")
+        
+        try:
+            # Get 7-day data: max high and current price
+            max_high, current_price = self.get_7day_data(inst_id)
+            
+            if max_high is None or current_price is None:
+                logger.warning(f"⚠️  Skipping {inst_id}: could not get 7-day data or current price")
+                return (inst_id, "Failed to get 7-day data or current price", False)
+            
+            # Calculate buy price: max_high × (1 - drop_ratio)
+            drop_ratio_decimal = Decimal(str(drop_ratio))
+            buy_price = max_high * (Decimal('1') - drop_ratio_decimal)
+            
+            logger.info(f"📊 {inst_id} | Max high: ${max_high} | Drop ratio: {drop_ratio} | Buy price: ${buy_price} | Current price: ${current_price}")
+            
+            # Check condition: current price <= buy price
+            if current_price > buy_price:
+                logger.info(f"⏭️  {inst_id} | Skipping: Current price (${current_price}) > Buy price (${buy_price})")
+                return (inst_id, f"Current price (${current_price}) > Buy price (${buy_price})", False)
+            
+            # Create buy trigger order at buy_price
+            if self.create_7day_drop_trigger_order(inst_id, buy_price):
+                return (inst_id, None, True)
+            else:
+                return (inst_id, "Failed to create order", False)
+            
+        except Exception as e:
+            logger.error(f"❌ Error processing {inst_id}: {e}")
+            return (inst_id, str(e), False)
+
     def process_7day_drop_from_database(self):
-        """Process 7day drop strategy from database and create algo trigger orders"""
+        """Process 7day drop strategy from database and create algo trigger orders (optimized with parallel processing)"""
         try:
             # Load 7day drop configuration from database
             db = Database()
@@ -498,67 +561,48 @@ class OKXAlgoTrigger:
             
             logger.info("=" * 60)
             logger.info("📊 Processing 7day Drop Strategy")
+            logger.info("🚀 Processing with parallel execution (max 5 workers)")
             logger.info("=" * 60)
             
             success_count = 0
             total_count = len(crypto_configs)
             failed_pairs = []
             skipped_blacklist = 0
+            skipped_conditions = 0
             
-            for inst_id, config in crypto_configs.items():
-                drop_ratio = config.get('drop_ratio')
+            # Process in parallel (max 5 workers to respect OKX rate limits: 5 requests/2 seconds)
+            with ThreadPoolExecutor(max_workers=5) as executor:
+                # Submit all tasks
+                future_to_pair = {
+                    executor.submit(self._process_single_7day_drop_pair, inst_id, config, blacklisted_cryptos): inst_id
+                    for inst_id, config in crypto_configs.items()
+                }
                 
-                if drop_ratio is None:
-                    logger.warning(f"⚠️  Skipping {inst_id}: no drop_ratio found")
-                    continue
-                
-                # Extract base currency from inst_id (e.g., "BTC-USDT" -> "BTC")
-                base_currency = inst_id.split('-')[0] if '-' in inst_id else inst_id
-                
-                # Check if cryptocurrency is blacklisted
-                if base_currency in blacklisted_cryptos:
-                    reason = self.blacklist_manager.get_blacklist_reason(base_currency)
-                    logger.warning(f"🚫 Skipping {inst_id}: blacklisted ({reason})")
-                    failed_pairs.append((inst_id, f"Blacklisted: {reason}"))
-                    skipped_blacklist += 1
-                    continue
-                
-                logger.info(f"\n🔄 Processing {inst_id}...")
-                
-                try:
-                    # Get 7-day data: max high and current price
-                    max_high, current_price = self.get_7day_data(inst_id)
-                    
-                    if max_high is None or current_price is None:
-                        logger.warning(f"⚠️  Skipping {inst_id}: could not get 7-day data or current price")
-                        failed_pairs.append((inst_id, "Failed to get 7-day data or current price"))
-                        continue
-                    
-                    # Calculate buy price: max_high × (1 - drop_ratio)
-                    drop_ratio_decimal = Decimal(str(drop_ratio))
-                    buy_price = max_high * (Decimal('1') - drop_ratio_decimal)
-                    
-                    logger.info(f"📊 {inst_id} | Max high: ${max_high} | Drop ratio: {drop_ratio} | Buy price: ${buy_price} | Current price: ${current_price}")
-                    
-                    # Create buy trigger order at buy_price (waiting for price to drop to buy_price)
-                    if self.create_7day_drop_trigger_order(inst_id, buy_price):
-                        success_count += 1
-                    else:
-                        failed_pairs.append((inst_id, "Failed to create order"))
-                    
-                except Exception as e:
-                    logger.error(f"❌ Error processing {inst_id}: {e}")
-                    failed_pairs.append((inst_id, str(e)))
-                    continue
-                
-                # Rate limiting: OKX allows 5 requests per 2 seconds
-                time.sleep(0.5)
+                # Collect results as they complete
+                for future in as_completed(future_to_pair):
+                    inst_id = future_to_pair[future]
+                    try:
+                        result_inst_id, reason, success = future.result()
+                        if success:
+                            success_count += 1
+                        else:
+                            if reason and "Blacklisted" in reason:
+                                skipped_blacklist += 1
+                            elif reason and ("Current price" in reason or "Buy price" in reason):
+                                skipped_conditions += 1
+                            failed_pairs.append((result_inst_id, reason))
+                    except Exception as e:
+                        logger.error(f"❌ Exception processing {inst_id}: {e}")
+                        failed_pairs.append((inst_id, str(e)))
             
             logger.info("\n" + "=" * 60)
             logger.info(f"📊 7day Drop Summary: {success_count}/{total_count} orders created successfully")
             
             if skipped_blacklist > 0:
                 logger.info(f"🚫 Skipped due to blacklist: {skipped_blacklist}")
+            
+            if skipped_conditions > 0:
+                logger.info(f"⏭️  Skipped due to conditions: {skipped_conditions}")
             
             if failed_pairs:
                 logger.warning(f"⚠️  Failed pairs: {len(failed_pairs)}")
