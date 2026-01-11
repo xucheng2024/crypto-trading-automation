@@ -79,6 +79,7 @@ MANIFEST
 config.json
 secrets.json
 limits.json
+7day_limit.json
 
 # Coverage directory used by tools like istanbul
 coverage/
