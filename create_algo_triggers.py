@@ -441,7 +441,7 @@ class OKXAlgoTrigger:
                 logger.info("✅ No blacklisted cryptocurrencies found")
             
             logger.info("=" * 60)
-            logger.info("🚀 Processing with parallel execution (max 5 workers)")
+            logger.info("🚀 Processing with parallel execution (max 2 workers)")
             logger.info("=" * 60)
             
             success_count = 0
@@ -449,8 +449,10 @@ class OKXAlgoTrigger:
             failed_pairs = []
             skipped_blacklist = 0
             
-            # Process in parallel (max 5 workers to respect OKX rate limits: 5 requests/2 seconds)
-            with ThreadPoolExecutor(max_workers=5) as executor:
+            # Process in parallel (max 2 workers to respect OKX rate limits: 5 requests/2 seconds)
+            # Reduced from 5 to 2 because each worker makes 2-3 API calls (candlesticks + ticker + order)
+            # 2 workers × 3 calls = 6 requests, but with retry backoff this should be safe
+            with ThreadPoolExecutor(max_workers=2) as executor:
                 # Submit all tasks
                 future_to_pair = {
                     executor.submit(self._process_single_limit_pair, inst_id, config, blacklisted_cryptos): inst_id
@@ -518,12 +520,8 @@ class OKXAlgoTrigger:
             
             logger.info(f"📊 {inst_id} | Max high: ${max_high} | Drop ratio: {drop_ratio} | Buy price: ${buy_price} | Current price: ${current_price}")
             
-            # Check condition: current price <= buy price
-            if current_price > buy_price:
-                logger.info(f"⏭️  {inst_id} | Skipping: Current price (${current_price}) > Buy price (${buy_price})")
-                return (inst_id, f"Current price (${current_price}) > Buy price (${buy_price})", False)
-            
-            # Create buy trigger order at buy_price
+            # Create buy trigger order at buy_price (trigger will execute when price drops to buy_price)
+            # Note: We create the trigger regardless of current price, as the trigger order will wait for price to drop
             if self.create_7day_drop_trigger_order(inst_id, buy_price):
                 return (inst_id, None, True)
             else:
@@ -561,17 +559,18 @@ class OKXAlgoTrigger:
             
             logger.info("=" * 60)
             logger.info("📊 Processing 7day Drop Strategy")
-            logger.info("🚀 Processing with parallel execution (max 5 workers)")
+            logger.info("🚀 Processing with parallel execution (max 2 workers)")
             logger.info("=" * 60)
             
             success_count = 0
             total_count = len(crypto_configs)
             failed_pairs = []
             skipped_blacklist = 0
-            skipped_conditions = 0
             
-            # Process in parallel (max 5 workers to respect OKX rate limits: 5 requests/2 seconds)
-            with ThreadPoolExecutor(max_workers=5) as executor:
+            # Process in parallel (max 2 workers to respect OKX rate limits: 5 requests/2 seconds)
+            # Reduced from 5 to 2 because each worker makes 2-3 API calls (candlesticks + ticker + order)
+            # 2 workers × 3 calls = 6 requests, but with retry backoff this should be safe
+            with ThreadPoolExecutor(max_workers=2) as executor:
                 # Submit all tasks
                 future_to_pair = {
                     executor.submit(self._process_single_7day_drop_pair, inst_id, config, blacklisted_cryptos): inst_id
@@ -588,8 +587,6 @@ class OKXAlgoTrigger:
                         else:
                             if reason and "Blacklisted" in reason:
                                 skipped_blacklist += 1
-                            elif reason and ("Current price" in reason or "Buy price" in reason):
-                                skipped_conditions += 1
                             failed_pairs.append((result_inst_id, reason))
                     except Exception as e:
                         logger.error(f"❌ Exception processing {inst_id}: {e}")
@@ -600,9 +597,6 @@ class OKXAlgoTrigger:
             
             if skipped_blacklist > 0:
                 logger.info(f"🚫 Skipped due to blacklist: {skipped_blacklist}")
-            
-            if skipped_conditions > 0:
-                logger.info(f"⏭️  Skipped due to conditions: {skipped_conditions}")
             
             if failed_pairs:
                 logger.warning(f"⚠️  Failed pairs: {len(failed_pairs)}")
