@@ -504,7 +504,6 @@ class OKXAlgoTrigger:
             total_count = len(crypto_configs)
             failed_pairs = []
             skipped_blacklist = 0
-            skipped_conditions = 0
             
             for inst_id, config in crypto_configs.items():
                 drop_ratio = config.get('drop_ratio')
@@ -541,13 +540,7 @@ class OKXAlgoTrigger:
                     
                     logger.info(f"📊 {inst_id} | Max high: ${max_high} | Drop ratio: {drop_ratio} | Buy price: ${buy_price} | Current price: ${current_price}")
                     
-                    # Check condition: current price <= buy price
-                    if current_price > buy_price:
-                        logger.info(f"⏭️  {inst_id} | Skipping: Current price (${current_price}) > Buy price (${buy_price})")
-                        skipped_conditions += 1
-                        continue
-                    
-                    # Create buy trigger order at buy_price
+                    # Create buy trigger order at buy_price (waiting for price to drop to buy_price)
                     if self.create_7day_drop_trigger_order(inst_id, buy_price):
                         success_count += 1
                     else:
@@ -566,9 +559,6 @@ class OKXAlgoTrigger:
             
             if skipped_blacklist > 0:
                 logger.info(f"🚫 Skipped due to blacklist: {skipped_blacklist}")
-            
-            if skipped_conditions > 0:
-                logger.info(f"⏭️  Skipped due to conditions: {skipped_conditions}")
             
             if failed_pairs:
                 logger.warning(f"⚠️  Failed pairs: {len(failed_pairs)}")
