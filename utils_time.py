@@ -53,6 +53,14 @@ def get_today_start_utc_timestamp_ms() -> int:
     return datetime_to_timestamp_ms(today_start)
 
 
+def get_today_start_sgt_timestamp_ms() -> int:
+    """获取今天00:00:00 新加坡时间(SGT) 对应的 UTC 毫秒时间戳。用于「当日」按新加坡日判断。"""
+    sgt = timezone(timedelta(hours=8))
+    now_sgt = datetime.now(timezone.utc).astimezone(sgt)
+    today_sgt = now_sgt.replace(hour=0, minute=0, second=0, microsecond=0)
+    return int(today_sgt.timestamp() * 1000)
+
+
 def format_datetime_utc(dt: Optional[datetime], format_str: str = '%Y-%m-%d %H:%M:%S UTC') -> str:
     """格式化datetime为UTC时间字符串"""
     if dt is None:

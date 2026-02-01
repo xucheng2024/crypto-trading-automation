@@ -30,8 +30,9 @@ except ImportError:
 
 from okx_client import OKXClient
 from utils_time import (
-    get_utc_now_naive, get_today_start_utc_timestamp_ms,
-    timestamp_to_utc_datetime_naive, format_datetime_utc, get_log_filename
+    get_utc_now, get_utc_now_naive, get_today_start_sgt_timestamp_ms,
+    timestamp_to_utc_datetime_naive, format_datetime_utc, get_log_filename,
+    datetime_to_timestamp_ms,
 )
 
 def setup_logging():
@@ -125,9 +126,12 @@ class AutoSellOrders:
             return 0.01
 
     def get_orders_ready_to_sell(self):
-        """Get all orders that are ready to sell: non-today buy orders"""
-        # Get today's date in UTC (start of day at 00:00:00) using unified time utility
-        today_start_ts = get_today_start_utc_timestamp_ms()
+        """Get orders ready to sell: 新加坡时间非当日买入 且 sell_time 已到。
+        - ts < today_start_sgt_ts: 按新加坡日，避免当日买当日卖。
+        - sell_time <= now: 次日收盘时刻已到才卖。
+        """
+        today_start_ts = get_today_start_sgt_timestamp_ms()
+        now_ms = datetime_to_timestamp_ms(get_utc_now())
         
         self.cursor.execute('''
             SELECT instId, ordId, tradeId, fillSz, side, ts, sell_time, fillPx
@@ -136,13 +140,15 @@ class AutoSellOrders:
               AND side = 'buy'
               AND ts IS NOT NULL
               AND CAST(ts AS BIGINT) < %s
+              AND sell_time IS NOT NULL
+              AND CAST(sell_time AS BIGINT) <= %s
             ORDER BY CAST(ts AS BIGINT) ASC
-        ''', (today_start_ts,))
+        ''', (today_start_ts, now_ms))
         
         orders = self.cursor.fetchall()
         
         if orders:
-            self.logger.info(f"🔍 Found {len(orders)} non-today buy orders ready to sell")
+            self.logger.info(f"🔍 Found {len(orders)} non-today buy orders with sell_time reached, ready to sell")
             for order in orders:
                 inst_id, ord_id, trade_id, fill_sz, side, ts, sell_time, fill_px = order
                 buy_datetime = timestamp_to_utc_datetime_naive(int(ts)) if ts else None
@@ -150,7 +156,7 @@ class AutoSellOrders:
                 buy_price = self.format_price(fill_px)
                 self.logger.info(f"   📋 {inst_id} | ordId: {ord_id} | tradeId: {trade_id} | fillSz: {fill_sz} | Buy: ${buy_price} @ {buy_date_str}")
         else:
-            self.logger.info("🔍 No non-today buy orders found to sell")
+            self.logger.info("🔍 No non-today buy orders with sell_time reached found to sell")
         
         return orders
 
