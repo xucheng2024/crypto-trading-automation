@@ -126,12 +126,11 @@ class AutoSellOrders:
             return 0.01
 
     def get_orders_ready_to_sell(self):
-        """Get orders ready to sell: 新加坡时间非当日买入 且 sell_time 已到。
+        """Get orders ready to sell: 新加坡时间非当日买入即可卖出。
         - ts < today_start_sgt_ts: 按新加坡日，避免当日买当日卖。
-        - sell_time <= now: 次日收盘时刻已到才卖。
+        - 次日 23:55 自动卖出，不需要检查 sell_time。
         """
         today_start_ts = get_today_start_sgt_timestamp_ms()
-        now_ms = datetime_to_timestamp_ms(get_utc_now())
         
         self.cursor.execute('''
             SELECT instId, ordId, tradeId, fillSz, side, ts, sell_time, fillPx
@@ -140,15 +139,13 @@ class AutoSellOrders:
               AND side = 'buy'
               AND ts IS NOT NULL
               AND CAST(ts AS BIGINT) < %s
-              AND sell_time IS NOT NULL
-              AND CAST(sell_time AS BIGINT) <= %s
             ORDER BY CAST(ts AS BIGINT) ASC
-        ''', (today_start_ts, now_ms))
+        ''', (today_start_ts,))
         
         orders = self.cursor.fetchall()
         
         if orders:
-            self.logger.info(f"🔍 Found {len(orders)} non-today buy orders with sell_time reached, ready to sell")
+            self.logger.info(f"🔍 Found {len(orders)} non-today buy orders, ready to sell")
             for order in orders:
                 inst_id, ord_id, trade_id, fill_sz, side, ts, sell_time, fill_px = order
                 buy_datetime = timestamp_to_utc_datetime_naive(int(ts)) if ts else None
@@ -156,7 +153,7 @@ class AutoSellOrders:
                 buy_price = self.format_price(fill_px)
                 self.logger.info(f"   📋 {inst_id} | ordId: {ord_id} | tradeId: {trade_id} | fillSz: {fill_sz} | Buy: ${buy_price} @ {buy_date_str}")
         else:
-            self.logger.info("🔍 No non-today buy orders with sell_time reached found to sell")
+            self.logger.info("🔍 No non-today buy orders found to sell")
         
         return orders
 
