@@ -370,6 +370,89 @@ class OKXFilledOrdersFetcher:
 
 
 
+    def auto_mark_manual_sells(self):
+        """自动检测并标记手动卖出的订单（通过检查账户余额）"""
+        try:
+            # 获取所有未标记为已卖的币种
+            self.cursor.execute('''
+                SELECT DISTINCT instId
+                FROM filled_orders 
+                WHERE side = 'buy' 
+                AND (sold_status IS NULL OR sold_status != 'SOLD')
+            ''')
+            
+            unsold_instruments = [row[0] for row in self.cursor.fetchall()]
+            
+            if not unsold_instruments:
+                return
+            
+            logger.info(f"🔍 Checking balances for {len(unsold_instruments)} instruments with unsold orders")
+            
+            marked_count = 0
+            
+            # 检查每个币种的余额
+            for inst_id in unsold_instruments:
+                try:
+                    base_ccy = inst_id.split('-')[0].upper()
+                    
+                    # 获取账户余额
+                    account_api = self.okx_client.get_account_api()
+                    if not account_api:
+                        continue
+                    
+                    result = account_api.get_account_balance(ccy=base_ccy)
+                    
+                    if not result or result.get('code') != '0':
+                        continue
+                    
+                    data = result.get('data', [])
+                    if not data:
+                        continue
+                    
+                    details = data[0].get('details', [])
+                    balance = 0.0
+                    
+                    for detail in details:
+                        if detail.get('ccy', '').upper() == base_ccy:
+                            avail_str = detail.get('availBal')
+                            if avail_str:
+                                balance = float(avail_str)
+                            break
+                    
+                    # 如果余额为0或非常小（< 0.0001），标记为已卖出
+                    if balance < 0.0001:
+                        logger.info(f"💰 {inst_id}: Balance is {balance}, marking all orders as SOLD")
+                        
+                        # 标记该币种的所有订单为已卖出
+                        self.cursor.execute('''
+                            UPDATE filled_orders 
+                            SET sold_status = 'SOLD'
+                            WHERE side = 'buy' 
+                            AND instId = %s
+                            AND (sold_status IS NULL OR sold_status != 'SOLD')
+                        ''', (inst_id,))
+                        
+                        self.conn.commit()
+                        affected = self.cursor.rowcount
+                        
+                        if affected > 0:
+                            marked_count += affected
+                            logger.info(f"✅ Marked {affected} {inst_id} orders as SOLD (manual sell detected)")
+                    
+                    # Rate limiting
+                    time.sleep(0.1)
+                    
+                except Exception as e:
+                    logger.warning(f"⚠️ Error checking balance for {inst_id}: {e}")
+                    continue
+            
+            if marked_count > 0:
+                logger.info(f"📊 Auto-marked {marked_count} manually sold orders")
+            
+        except Exception as e:
+            logger.error(f"❌ Error in auto_mark_manual_sells: {e}")
+            logger.debug(f"Traceback: {traceback.format_exc()}")
+
     def count_active_trading_currencies(self):
         """Count active trading orders (not sold yet) - includes multiple orders per currency"""
         try:
@@ -518,6 +601,10 @@ class OKXFilledOrdersFetcher:
     def check_and_cancel_triggers_if_needed(self):
         """Check if 4+ orders are in trading, cancel all trigger orders if so"""
         try:
+            # 首先自动检测并标记手动卖出的订单
+            self.auto_mark_manual_sells()
+            
+            # 然后统计真实的持仓数
             active_count = self.count_active_trading_currencies()
             logger.info(f"📊 Currently {active_count} active trading orders")
             
