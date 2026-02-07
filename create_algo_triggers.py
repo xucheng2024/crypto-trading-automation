@@ -260,6 +260,20 @@ class OKXAlgoTrigger:
             logger.debug(f"Traceback: {traceback.format_exc()}")
             return None, None
     
+    def get_current_price(self, inst_id):
+        """Get current price from ticker API"""
+        try:
+            ticker_result = self.market_api.get_ticker(instId=inst_id)
+            if ticker_result.get('code') == '0' and ticker_result.get('data'):
+                ticker_data = ticker_result['data']
+                if ticker_data and len(ticker_data) > 0:
+                    price = Decimal(ticker_data[0].get('last', '0'))
+                    return price if price > 0 else None
+            return None
+        except Exception as e:
+            logger.warning(f"⚠️ Error getting current price for {inst_id}: {e}")
+            return None
+    
     def _calculate_precision(self, price):
         """Calculate precision based on price value"""
         if price < Decimal('0.00001'):
@@ -282,6 +296,41 @@ class OKXAlgoTrigger:
         """Round price to appropriate precision"""
         precision_context = Decimal('0.' + '0' * (precision - 1) + '1') if precision > 0 else Decimal('1')
         return price.quantize(precision_context, rounding=ROUND_HALF_UP)
+    
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=4, max=10),
+        retry=retry_if_exception_type((Exception,))
+    )
+    def _place_market_buy_order(self, inst_id, buy_price, strategy_name=""):
+        """Place market buy order directly (no trigger). Used when current price already below buy_price.
+        Market order executes immediately, avoiding cancellation by cancel_pending_limits (runs every 5 min)."""
+        try:
+            strategy_prefix = f"{strategy_name} " if strategy_name else ""
+            logger.info(f"💰 {inst_id} | {strategy_prefix}Market buy (price already below ${buy_price}, no trigger)")
+            
+            # Market buy: sz in USDT (quote_ccy), executes immediately
+            result = self.trade_api.place_order(
+                instId=inst_id,
+                tdMode="cash",
+                side="buy",
+                ordType="market",
+                sz=str(self.order_size),
+                tgtCcy="quote_ccy"  # sz = USDT amount
+            )
+            
+            if result.get('code') == '0':
+                order_id = result.get('data', [{}])[0].get('ordId', 'N/A')
+                logger.info(f"✅ {inst_id} {strategy_prefix}market buy order placed - Order ID: {order_id}")
+                return True
+            else:
+                error_msg = result.get('msg', 'Unknown error')
+                logger.error(f"❌ {inst_id} {strategy_prefix}market buy failed: {error_msg}")
+                return False
+        except Exception as e:
+            strategy_prefix = f"{strategy_name} " if strategy_name else ""
+            logger.error(f"❌ {inst_id} {strategy_prefix}market buy exception: {e}")
+            raise
     
     @retry(
         stop=stop_after_attempt(3),
@@ -408,8 +457,21 @@ class OKXAlgoTrigger:
                 logger.warning(f"⚠️  Skipping {inst_id}: could not get open price")
                 return (inst_id, "Failed to get open price", False)
             
-            # Create algo trigger order
-            if self.create_algo_trigger_order(inst_id, best_limit, open_price):
+            # Calculate trigger price: open_price × best_limit / 100
+            trigger_price = open_price * Decimal(str(best_limit)) / Decimal('100')
+            
+            # If current price already below trigger_price, place market buy directly (no trigger)
+            current_price = self.get_current_price(inst_id)
+            if current_price is not None and current_price < trigger_price:
+                logger.info(f"📊 {inst_id} | Current price ${current_price} < trigger ${trigger_price}, placing market buy directly (no trigger)")
+                if self._place_market_buy_order(inst_id, trigger_price, ""):
+                    return (inst_id, None, True)
+                else:
+                    return (inst_id, "Failed to place market order", False)
+            
+            logger.info(f"📊 {inst_id} | Open: ${open_price} | Limit: {best_limit}% | Trigger: ${trigger_price}")
+            
+            if self._create_trigger_order_internal(inst_id, trigger_price, ""):
                 return (inst_id, None, True)
             else:
                 return (inst_id, "Failed to create order", False)
@@ -520,8 +582,14 @@ class OKXAlgoTrigger:
             
             logger.info(f"📊 {inst_id} | Max high: ${max_high} | Drop ratio: {drop_ratio} | Buy price: ${buy_price} | Current price: ${current_price}")
             
-            # Create buy trigger order at buy_price (trigger will execute when price drops to buy_price)
-            # Note: We create the trigger regardless of current price, as the trigger order will wait for price to drop
+            # If current price already below buy_price, place market buy directly (no trigger)
+            if current_price < buy_price:
+                logger.info(f"📊 {inst_id} | Current price < buy_price, placing market buy directly (no trigger)")
+                if self._place_market_buy_order(inst_id, buy_price, "10day Drop"):
+                    return (inst_id, None, True)
+                else:
+                    return (inst_id, "Failed to place market order", False)
+            
             if self.create_10day_drop_trigger_order(inst_id, buy_price):
                 return (inst_id, None, True)
             else:
