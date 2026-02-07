@@ -10,7 +10,7 @@ import sys
 import logging
 import logging.handlers
 from datetime import datetime, timezone
-from decimal import Decimal, getcontext, ROUND_HALF_UP
+from decimal import Decimal, getcontext, ROUND_HALF_UP, ROUND_DOWN
 import time
 import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -105,6 +105,8 @@ class OKXAlgoTrigger:
         # Data cache to avoid redundant API calls
         # Key: inst_id, Value: {'candlestick_data': [...], 'current_price': Decimal, 'max_high': Decimal}
         self.data_cache = {}
+        # Instrument metadata cache to enforce exchange precision rules
+        self.instrument_rules_cache = {}
     
     @retry(
         stop=stop_after_attempt(3),
@@ -137,8 +139,8 @@ class OKXAlgoTrigger:
                     data = result['data']
                 else:
                     error_msg = result.get('msg', 'Unknown error')
-                    logger.warning(f"⚠️ Failed to get historical data for {inst_id}: {error_msg}, allowing trigger creation")
-                    return None, True  # Allow if API call fails
+                    logger.warning(f"⚠️ Failed to get historical data for {inst_id}: {error_msg}")
+                    return None, True  # Continue process; pair may still be skipped later due to missing open price
             
             if data and len(data) >= 2:
                 # Data is ordered from newest to oldest
@@ -173,18 +175,18 @@ class OKXAlgoTrigger:
                 logger.info(f"✅ {inst_id} | OK - Yesterday volatility within limits")
                 return today_open, True  # Return today's price, True for filter
             else:
-                logger.warning(f"⚠️ {inst_id} | Insufficient historical data, allowing trigger creation")
+                logger.warning(f"⚠️ {inst_id} | Insufficient historical data")
                 # If we have at least today's data, use it
                 if data and len(data) > 0:
                     today_open = Decimal(data[0][1])
                     logger.info(f"📊 {inst_id}: ${today_open} (limited historical data)")
                     return today_open, True
-                return None, True  # Allow if we don't have enough data
+                return None, True  # Continue process; pair may still be skipped later due to missing open price
             
         except Exception as e:
-            logger.warning(f"⚠️ Error getting data for {inst_id}: {e}, allowing trigger creation")
+            logger.warning(f"⚠️ Error getting data for {inst_id}: {e}")
             logger.debug(f"Traceback: {traceback.format_exc()}")
-            return None, True  # Allow if exception occurs
+            return None, True  # Continue process; pair may still be skipped later due to missing open price
     
     @retry(
         stop=stop_after_attempt(3),
@@ -296,6 +298,86 @@ class OKXAlgoTrigger:
         """Round price to appropriate precision"""
         precision_context = Decimal('0.' + '0' * (precision - 1) + '1') if precision > 0 else Decimal('1')
         return price.quantize(precision_context, rounding=ROUND_HALF_UP)
+
+    def _to_plain_decimal_str(self, value: Decimal) -> str:
+        """Convert Decimal to plain string without scientific notation."""
+        result = format(value, 'f')
+        if '.' in result:
+            result = result.rstrip('0').rstrip('.')
+        return result or '0'
+
+    def _round_to_step(self, value: Decimal, step: Decimal, rounding_mode=ROUND_HALF_UP):
+        """Round value to exchange step size."""
+        if step is None or step <= 0:
+            return value
+        units = (value / step).to_integral_value(rounding=rounding_mode)
+        return units * step
+
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=4, max=10),
+        retry=retry_if_exception_type((Exception,))
+    )
+    def get_instrument_rules(self, inst_id):
+        """Get and cache instrument precision rules from OKX."""
+        try:
+            if inst_id in self.instrument_rules_cache:
+                return self.instrument_rules_cache[inst_id]
+
+            if not self.market_api:
+                logger.warning("⚠️ Market API unavailable, fallback to local precision rules")
+                self.instrument_rules_cache[inst_id] = None
+                return None
+
+            result = self.market_api.get_instruments(instType="SPOT", instId=inst_id)
+            if result.get('code') != '0' or not result.get('data'):
+                logger.warning(f"⚠️ {inst_id} | Failed to load instrument rules, using fallback precision")
+                self.instrument_rules_cache[inst_id] = None
+                return None
+
+            item = result['data'][0]
+            tick_sz = Decimal(item.get('tickSz', '0'))
+            lot_sz = Decimal(item.get('lotSz', '0'))
+            min_sz = Decimal(item.get('minSz', '0'))
+            if tick_sz <= 0 or lot_sz <= 0:
+                logger.warning(f"⚠️ {inst_id} | Invalid tick/lot size from exchange, using fallback precision")
+                self.instrument_rules_cache[inst_id] = None
+                return None
+
+            rules = {
+                'tick_sz': tick_sz,
+                'lot_sz': lot_sz,
+                'min_sz': min_sz if min_sz > 0 else lot_sz
+            }
+            self.instrument_rules_cache[inst_id] = rules
+            return rules
+        except Exception as e:
+            logger.warning(f"⚠️ {inst_id} | Failed to load/parse instrument rules ({e}), using fallback precision")
+            self.instrument_rules_cache[inst_id] = None
+            return None
+
+    def _normalize_order_params(self, inst_id, target_price: Decimal, token_quantity: Decimal, strategy_prefix=""):
+        """Normalize price/size to exchange precision rules."""
+        rules = self.get_instrument_rules(inst_id)
+        if rules:
+            adjusted_price = self._round_to_step(target_price, rules['tick_sz'], ROUND_HALF_UP)
+            adjusted_size = self._round_to_step(token_quantity, rules['lot_sz'], ROUND_DOWN)
+            if adjusted_price <= 0:
+                return None, None, f"{strategy_prefix}invalid adjusted price after tick rounding"
+            if adjusted_size < rules['min_sz']:
+                return None, None, (
+                    f"{strategy_prefix}size too small after lot rounding: "
+                    f"{adjusted_size} < minSz {rules['min_sz']}"
+                )
+            return adjusted_price, adjusted_size, None
+
+        # Fallback precision path if exchange metadata is unavailable
+        precision = self._calculate_precision(target_price)
+        adjusted_price = self._round_price(target_price, precision)
+        adjusted_size = Decimal(self._format_quantity(token_quantity))
+        if adjusted_price <= 0 or adjusted_size <= 0:
+            return None, None, f"{strategy_prefix}invalid price/size after fallback rounding"
+        return adjusted_price, adjusted_size, None
     
     @retry(
         stop=stop_after_attempt(3),
@@ -306,28 +388,45 @@ class OKXAlgoTrigger:
         """Place limit buy order directly (no trigger). Used when current price already below buy_price.
         Limit typically fills since price is below target; if not, cancel_pending_limits will cancel it."""
         try:
+            strategy_prefix = f"{strategy_name} " if strategy_name else ""
+            if not self.trade_api:
+                logger.error(f"❌ {inst_id} {strategy_prefix}Trade API unavailable")
+                return False
+
             if isinstance(buy_price, str):
                 buy_price_decimal = Decimal(buy_price)
             else:
                 buy_price_decimal = Decimal(str(buy_price))
-            
-            precision = self._calculate_precision(buy_price_decimal)
-            buy_price_decimal = self._round_price(buy_price_decimal, precision)
-            
+
+            if buy_price_decimal <= 0:
+                logger.error(f"❌ {inst_id} {strategy_prefix}invalid buy price: {buy_price_decimal}")
+                return False
+
             usdt_amount = Decimal(self.order_size)
+            if usdt_amount <= 0:
+                logger.error(f"❌ {inst_id} {strategy_prefix}invalid order size: {self.order_size}")
+                return False
+
             token_quantity = usdt_amount / buy_price_decimal
-            adjusted_order_size = self._format_quantity(token_quantity)
-            
-            strategy_prefix = f"{strategy_name} " if strategy_name else ""
-            logger.info(f"💰 {inst_id} | {strategy_prefix}Limit buy at ${buy_price_decimal} (price already below target, no trigger)")
+            adjusted_price, adjusted_size, normalize_error = self._normalize_order_params(
+                inst_id, buy_price_decimal, token_quantity, strategy_prefix
+            )
+            if normalize_error:
+                logger.warning(f"⚠️ {inst_id} | {normalize_error}, skip placing order")
+                return False
+
+            adjusted_price_str = self._to_plain_decimal_str(adjusted_price)
+            adjusted_size_str = self._to_plain_decimal_str(adjusted_size)
+
+            logger.info(f"💰 {inst_id} | {strategy_prefix}Limit buy at ${adjusted_price_str} (price already below target, no trigger)")
             
             result = self.trade_api.place_order(
                 instId=inst_id,
                 tdMode="cash",
                 side="buy",
                 ordType="limit",
-                px=str(buy_price_decimal),
-                sz=adjusted_order_size,
+                px=adjusted_price_str,
+                sz=adjusted_size_str,
                 tgtCcy="base_ccy"
             )
             
@@ -352,26 +451,40 @@ class OKXAlgoTrigger:
     def _create_trigger_order_internal(self, inst_id, trigger_price, strategy_name=""):
         """Internal method to create trigger order (common logic)"""
         try:
+            strategy_prefix = f"{strategy_name} " if strategy_name else ""
+            if not self.trade_api:
+                logger.error(f"❌ {inst_id} {strategy_prefix}Trade API unavailable")
+                return False
+
             # Convert trigger_price to Decimal
             if isinstance(trigger_price, str):
                 trigger_price_decimal = Decimal(trigger_price)
             else:
                 trigger_price_decimal = Decimal(str(trigger_price))
-            
-            # Calculate precision and round price
-            precision = self._calculate_precision(trigger_price_decimal)
-            trigger_price_decimal = self._round_price(trigger_price_decimal, precision)
-            
-            strategy_prefix = f"{strategy_name} " if strategy_name else ""
-            logger.info(f"🎯 {inst_id} | {strategy_prefix}Trigger: ${trigger_price_decimal}")
+
+            if trigger_price_decimal <= 0:
+                logger.error(f"❌ {inst_id} {strategy_prefix}invalid trigger price: {trigger_price_decimal}")
+                return False
             
             # Calculate token quantity based on trigger price
             usdt_amount = Decimal(self.order_size)
+            if usdt_amount <= 0:
+                logger.error(f"❌ {inst_id} {strategy_prefix}invalid order size: {self.order_size}")
+                return False
+
             token_quantity = usdt_amount / trigger_price_decimal
-            
-            # Format token quantity
-            adjusted_order_size = self._format_quantity(token_quantity)
-            logger.info(f"📊 {inst_id} | Size: {adjusted_order_size} tokens")
+            adjusted_price, adjusted_size, normalize_error = self._normalize_order_params(
+                inst_id, trigger_price_decimal, token_quantity, strategy_prefix
+            )
+            if normalize_error:
+                logger.warning(f"⚠️ {inst_id} | {normalize_error}, skip placing trigger")
+                return False
+
+            adjusted_price_str = self._to_plain_decimal_str(adjusted_price)
+            adjusted_size_str = self._to_plain_decimal_str(adjusted_size)
+
+            logger.info(f"🎯 {inst_id} | {strategy_prefix}Trigger: ${adjusted_price_str}")
+            logger.info(f"📊 {inst_id} | Size: {adjusted_size_str} tokens")
             
             # Create trigger order
             result = self.trade_api.place_algo_order(
@@ -379,9 +492,9 @@ class OKXAlgoTrigger:
                 tdMode="cash",
                 side="buy",
                 ordType="trigger",
-                sz=adjusted_order_size,
-                triggerPx=str(trigger_price_decimal),
-                orderPx=str(trigger_price_decimal)
+                sz=adjusted_size_str,
+                triggerPx=adjusted_price_str,
+                orderPx=adjusted_price_str
             )
             
             if result.get('code') == '0':
@@ -543,7 +656,8 @@ class OKXAlgoTrigger:
                         else:
                             if reason and "Blacklisted" in reason:
                                 skipped_blacklist += 1
-                            failed_pairs.append((result_inst_id, reason))
+                            else:
+                                failed_pairs.append((result_inst_id, reason))
                     except Exception as e:
                         logger.error(f"❌ Exception processing {inst_id}: {e}")
                         failed_pairs.append((inst_id, str(e)))
@@ -558,10 +672,12 @@ class OKXAlgoTrigger:
                 logger.warning(f"⚠️  Failed pairs: {len(failed_pairs)}")
                 for pair, reason in failed_pairs:
                     logger.warning(f"   {pair}: {reason}")
-            
+
+            return len(failed_pairs) == 0
         except Exception as e:
             logger.error(f"❌ Error processing limits from database: {e}")
             logger.debug(f"Traceback: {traceback.format_exc()}")
+            return False
     
     def _process_single_10day_drop_pair(self, inst_id, config, blacklisted_cryptos):
         """Process a single crypto pair for 10day drop strategy (for parallel processing)"""
@@ -667,7 +783,8 @@ class OKXAlgoTrigger:
                         else:
                             if reason and "Blacklisted" in reason:
                                 skipped_blacklist += 1
-                            failed_pairs.append((result_inst_id, reason))
+                            else:
+                                failed_pairs.append((result_inst_id, reason))
                     except Exception as e:
                         logger.error(f"❌ Exception processing {inst_id}: {e}")
                         failed_pairs.append((inst_id, str(e)))
@@ -682,10 +799,12 @@ class OKXAlgoTrigger:
                 logger.warning(f"⚠️  Failed pairs: {len(failed_pairs)}")
                 for pair, reason in failed_pairs:
                     logger.warning(f"   {pair}: {reason}")
-            
+
+            return len(failed_pairs) == 0
         except Exception as e:
             logger.error(f"❌ Error processing 10day drop strategy: {e}")
             logger.debug(f"Traceback: {traceback.format_exc()}")
+            return False
 
 def main():
     try:
@@ -701,10 +820,17 @@ def main():
         okx_client = OKXAlgoTrigger(order_size=order_size)
         
         # Process 10day drop strategy first (cache 10day data)
-        okx_client.process_10day_drop_from_database()
+        drop_success = okx_client.process_10day_drop_from_database()
         
         # Process regular limits strategy (can use cached 10day data if available)
-        okx_client.process_limits_from_database()
+        limits_success = okx_client.process_limits_from_database()
+
+        if not drop_success or not limits_success:
+            logger.error(
+                "❌ Script completed with failures "
+                f"(10day_drop_success={drop_success}, limits_success={limits_success})"
+            )
+            sys.exit(1)
         
         logger.info("✅ Script completed successfully")
         

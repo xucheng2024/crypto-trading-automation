@@ -227,7 +227,7 @@ class OKXFilledOrdersFetcher:
             # Use ts field from trade data
             ts = trade.get('ts', '')
             
-            # 新加坡时间：当天买入，次日收盘卖出 → sell_time = (买入日 SGT + 2 天) 00:00 SGT
+            # 新加坡时间策略：当天买入，次日 23:55 触发卖出
             sell_time = None
             if ts:
                 try:
@@ -235,8 +235,10 @@ class OKXFilledOrdersFetcher:
                     ts_utc = datetime.fromtimestamp(int(ts) / 1000, tz=timezone.utc)
                     ts_sgt = ts_utc.astimezone(sgt)
                     buy_date_sgt = ts_sgt.date()
-                    next_next_day_sgt = buy_date_sgt + timedelta(days=2)
-                    sell_time_sgt = datetime(next_next_day_sgt.year, next_next_day_sgt.month, next_next_day_sgt.day, 0, 0, 0, tzinfo=sgt)
+                    next_day_sgt = buy_date_sgt + timedelta(days=1)
+                    sell_time_sgt = datetime(
+                        next_day_sgt.year, next_day_sgt.month, next_day_sgt.day, 23, 55, 0, tzinfo=sgt
+                    )
                     sell_time = str(int(sell_time_sgt.timestamp() * 1000))
                 except (ValueError, TypeError) as e:
                     logger.warning(f"⚠️  Could not calculate sell time for order {ord_id}: {e}")
