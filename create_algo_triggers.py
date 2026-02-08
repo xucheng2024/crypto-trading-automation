@@ -307,8 +307,8 @@ class OKXAlgoTrigger:
         return adjusted_price, adjusted_size, None
     
     @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=4, max=10),
+        stop=stop_after_attempt(5),
+        wait=wait_exponential(multiplier=1, min=6, max=30),
         retry=retry_if_exception_type((Exception,))
     )
     def _place_limit_buy_order(self, inst_id, buy_price, strategy_name=""):
@@ -346,7 +346,7 @@ class OKXAlgoTrigger:
             adjusted_size_str = self._to_plain_decimal_str(adjusted_size)
 
             logger.info(f"💰 {inst_id} | {strategy_prefix}Limit buy at ${adjusted_price_str} (price already below target, no trigger)")
-            
+            time.sleep(2.0)
             result = self.trade_api.place_order(
                 instId=inst_id,
                 tdMode="cash",
@@ -371,8 +371,8 @@ class OKXAlgoTrigger:
             raise
     
     @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=4, max=10),
+        stop=stop_after_attempt(5),
+        wait=wait_exponential(multiplier=1, min=6, max=30),
         retry=retry_if_exception_type((Exception,))
     )
     def _create_trigger_order_internal(self, inst_id, trigger_price, strategy_name=""):
@@ -413,6 +413,8 @@ class OKXAlgoTrigger:
             logger.info(f"🎯 {inst_id} | {strategy_prefix}Trigger: ${adjusted_price_str}")
             logger.info(f"📊 {inst_id} | Size: {adjusted_size_str} tokens")
             
+            # Small delay to avoid connection overload / "Server disconnected"
+            time.sleep(2.0)
             # Create trigger order
             result = self.trade_api.place_algo_order(
                 instId=inst_id,
@@ -539,7 +541,7 @@ class OKXAlgoTrigger:
                 logger.info("✅ No blacklisted cryptocurrencies found")
             
             logger.info("=" * 60)
-            logger.info("🚀 Processing with parallel execution (max 2 workers)")
+            logger.info("🚀 Processing with sequential execution (avoids Server disconnected)")
             logger.info("=" * 60)
             
             success_count = 0
@@ -547,10 +549,8 @@ class OKXAlgoTrigger:
             failed_pairs = []
             skipped_blacklist = 0
             
-            # Process in parallel (max 2 workers to respect OKX rate limits: 5 requests/2 seconds)
-            # Reduced from 5 to 2 because each worker makes 2-3 API calls (candlesticks + ticker + order)
-            # 2 workers × 3 calls = 6 requests, but with retry backoff this should be safe
-            with ThreadPoolExecutor(max_workers=2) as executor:
+            # Sequential (max_workers=1) to avoid connection overload / "Server disconnected"
+            with ThreadPoolExecutor(max_workers=1) as executor:
                 # Submit all tasks
                 future_to_pair = {
                     executor.submit(self._process_single_limit_pair, inst_id, config, blacklisted_cryptos): inst_id
