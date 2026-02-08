@@ -141,16 +141,11 @@ class Database:
             except Exception:
                 pass  # Columns may already exist
             
-            # Create crypto 7day drops table (only store crypto-specific config, strategy logic is in code)
-            self.cursor.execute('''
-                CREATE TABLE IF NOT EXISTS crypto_7day_drops (
-                    id SERIAL PRIMARY KEY,
-                    inst_id VARCHAR(50) NOT NULL UNIQUE,
-                    drop_ratio VARCHAR(10) NOT NULL,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            ''')
+            # Drop 7day/10day strategy table (strategy removed)
+            try:
+                self.cursor.execute('DROP TABLE IF EXISTS crypto_7day_drops')
+            except Exception:
+                pass
             
             self.conn.commit()
             print("✅ Database tables created successfully")
@@ -371,86 +366,6 @@ class Database:
             print(f"❌ Failed to get crypto config for {inst_id}: {e}")
             return None
     
-    def save_7day_drop_config(self, config_data):
-        """Save 7day drop configuration to database (only crypto-specific config, strategy logic is in code)"""
-        try:
-            # Clear existing config first
-            self.cursor.execute('DELETE FROM crypto_7day_drops')
-            
-            # Insert crypto configs (only drop_ratio is needed, strategy logic is in code)
-            crypto_configs = config_data.get('crypto_configs', {})
-            for inst_id, config in crypto_configs.items():
-                drop_ratio = config.get('drop_ratio')
-                if drop_ratio:
-                    self.cursor.execute('''
-                        INSERT INTO crypto_7day_drops (inst_id, drop_ratio)
-                        VALUES (%s, %s)
-                        ON CONFLICT (inst_id) DO UPDATE SET drop_ratio = EXCLUDED.drop_ratio, updated_at = CURRENT_TIMESTAMP
-                    ''', (inst_id, drop_ratio))
-            
-            self.conn.commit()
-            print(f"✅ Saved 7day drop configuration with {len(crypto_configs)} crypto pairs")
-            return True
-        except Exception as e:
-            try:
-                if self.conn:
-                    self.conn.rollback()
-            except Exception:
-                pass
-            print(f"❌ Failed to save 7day drop config: {e}")
-            return False
-    
-    def load_7day_drop_config(self):
-        """Load 7day drop configuration from database (returns dict with crypto_configs)"""
-        try:
-            # Load crypto configs
-            self.cursor.execute('''
-                SELECT inst_id, drop_ratio
-                FROM crypto_7day_drops ORDER BY inst_id
-            ''')
-            crypto_rows = self.cursor.fetchall()
-            
-            if not crypto_rows:
-                print("❌ No 7day drop configuration found in database")
-                return None
-            
-            # Build config structure
-            config_data = {
-                'crypto_configs': {}
-            }
-            
-            # Add crypto configs
-            for row in crypto_rows:
-                inst_id = row[0]
-                config_data['crypto_configs'][inst_id] = {
-                    'drop_ratio': row[1]
-                }
-            
-            print(f"✅ Loaded 7day drop configuration with {len(crypto_rows)} crypto pairs")
-            return config_data
-        except Exception as e:
-            print(f"❌ Failed to load 7day drop config: {e}")
-            return None
-    
-    def get_7day_drop_config(self, inst_id):
-        """Get 7day drop configuration for specific crypto pair"""
-        try:
-            self.cursor.execute('''
-                SELECT inst_id, drop_ratio
-                FROM crypto_7day_drops WHERE inst_id = %s
-            ''', (inst_id,))
-            row = self.cursor.fetchone()
-            
-            if not row:
-                return None
-            
-            return {
-                'drop_ratio': row[1]
-            }
-        except Exception as e:
-            print(f"❌ Failed to get 7day drop config for {inst_id}: {e}")
-            return None
-
 def init_database():
     """Initialize database and create tables"""
     db = Database()

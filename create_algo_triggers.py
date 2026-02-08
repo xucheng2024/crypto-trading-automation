@@ -28,7 +28,6 @@ except ImportError:
 
 from okx_client import OKXClient
 from blacklist_manager import BlacklistManager
-from lib.database import Database
 
 # Set Decimal precision to handle very small prices
 getcontext().prec = 28
@@ -116,7 +115,7 @@ class OKXAlgoTrigger:
     def get_crypto_data(self, inst_id):
         """Get crypto data: today's open price and yesterday's volatility check"""
         try:
-            # Check cache first (if 10day data was already fetched)
+            # Check cache first (if candlestick data was already fetched)
             if inst_id in self.data_cache and 'candlestick_data' in self.data_cache[inst_id]:
                 cached_data = self.data_cache[inst_id]['candlestick_data']
                 if len(cached_data) >= 2:
@@ -187,80 +186,6 @@ class OKXAlgoTrigger:
             logger.warning(f"⚠️ Error getting data for {inst_id}: {e}")
             logger.debug(f"Traceback: {traceback.format_exc()}")
             return None, True  # Continue process; pair may still be skipped later due to missing open price
-    
-    @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=4, max=10),
-        retry=retry_if_exception_type((Exception,))
-    )
-    def get_10day_data(self, inst_id):
-        """Get past 10 days of data (including today) and calculate max high, and get current price"""
-        try:
-            # Check cache first
-            if inst_id in self.data_cache:
-                cached = self.data_cache[inst_id]
-                if 'max_high' in cached and 'current_price' in cached:
-                    logger.debug(f"📦 {inst_id} | Using cached 10day data")
-                    return cached['max_high'], cached['current_price']
-            
-            # Get past 10 days of data (including today)
-            result = self.market_api.get_candlesticks(
-                instId=inst_id,
-                bar="1D",
-                limit="10"  # Get 10 days of data (including today)
-            )
-            
-            if result.get('code') == '0' and result.get('data'):
-                data = result['data']
-                if len(data) < 10:
-                    logger.warning(f"⚠️ {inst_id} | Insufficient 10-day data: {len(data)} days")
-                    return None, None
-                
-                # Data is ordered from newest to oldest
-                # data[0] = today, data[1] = yesterday, ... data[9] = 10 days ago
-                
-                # Find max high in past 10 days (including today)
-                max_high = Decimal(data[0][2])  # Start with today's high
-                for i in range(1, 10):
-                    day_high = Decimal(data[i][2])
-                    if day_high > max_high:
-                        max_high = day_high
-                
-                # Get current price using ticker API
-                ticker_result = self.market_api.get_ticker(instId=inst_id)
-                if ticker_result.get('code') == '0' and ticker_result.get('data'):
-                    ticker_data = ticker_result['data']
-                    if ticker_data and len(ticker_data) > 0:
-                        current_price = Decimal(ticker_data[0].get('last', '0'))  # Current last traded price
-                        if current_price > 0:
-                            logger.info(f"📊 {inst_id} | 10-day max high: ${max_high} | Current price: ${current_price}")
-                            
-                            # Cache the data for potential reuse
-                            self.data_cache[inst_id] = {
-                                'candlestick_data': data,
-                                'current_price': current_price,
-                                'max_high': max_high
-                            }
-                            
-                            return max_high, current_price
-                        else:
-                            logger.warning(f"⚠️ {inst_id} | Invalid current price from ticker")
-                    else:
-                        logger.warning(f"⚠️ {inst_id} | No ticker data returned")
-                else:
-                    ticker_error = ticker_result.get('msg', 'Unknown error')
-                    logger.warning(f"⚠️ {inst_id} | Failed to get ticker: {ticker_error}")
-                
-                return None, None
-            
-            error_msg = result.get('msg', 'Unknown error')
-            logger.warning(f"⚠️ Failed to get 10-day data for {inst_id}: {error_msg}")
-            return None, None
-            
-        except Exception as e:
-            logger.warning(f"⚠️ Error getting 10-day data for {inst_id}: {e}")
-            logger.debug(f"Traceback: {traceback.format_exc()}")
-            return None, None
     
     def get_current_price(self, inst_id):
         """Get current price from ticker API"""
@@ -537,22 +462,6 @@ class OKXAlgoTrigger:
             logger.debug(f"Traceback: {traceback.format_exc()}")
             raise  # Re-raise for retry mechanism
     
-    @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=4, max=10),
-        retry=retry_if_exception_type((Exception,))
-    )
-    def create_10day_drop_trigger_order(self, inst_id, trigger_price):
-        """Create single trigger order at target price (for 10day drop strategy)"""
-        try:
-            # Use common method to create order
-            return self._create_trigger_order_internal(inst_id, trigger_price, "10day Drop")
-                
-        except Exception as e:
-            logger.error(f"❌ Error creating 10day drop trigger order for {inst_id}: {e}")
-            logger.debug(f"Traceback: {traceback.format_exc()}")
-            raise  # Re-raise for retry mechanism
-    
     def _process_single_limit_pair(self, inst_id, config, blacklisted_cryptos):
         """Process a single crypto pair for limits strategy (for parallel processing)"""
         best_limit = config.get('best_limit')
@@ -678,133 +587,6 @@ class OKXAlgoTrigger:
             logger.error(f"❌ Error processing limits from database: {e}")
             logger.debug(f"Traceback: {traceback.format_exc()}")
             return False
-    
-    def _process_single_10day_drop_pair(self, inst_id, config, blacklisted_cryptos):
-        """Process a single crypto pair for 10day drop strategy (for parallel processing)"""
-        drop_ratio = config.get('drop_ratio')
-        
-        if drop_ratio is None:
-            return (inst_id, "no drop_ratio found", False)
-        
-        # Extract base currency from inst_id (e.g., "BTC-USDT" -> "BTC")
-        base_currency = inst_id.split('-')[0] if '-' in inst_id else inst_id
-        
-        # Check if cryptocurrency is blacklisted
-        if base_currency in blacklisted_cryptos:
-            reason = self.blacklist_manager.get_blacklist_reason(base_currency)
-            return (inst_id, f"Blacklisted: {reason}", False)
-        
-        logger.info(f"\n🔄 Processing {inst_id}...")
-        
-        try:
-            # Get 10-day data: max high and current price
-            max_high, current_price = self.get_10day_data(inst_id)
-            
-            if max_high is None or current_price is None:
-                logger.warning(f"⚠️  Skipping {inst_id}: could not get 10-day data or current price")
-                return (inst_id, "Failed to get 10-day data or current price", False)
-            
-            # Calculate buy price: max_high × (1 - drop_ratio)
-            drop_ratio_decimal = Decimal(str(drop_ratio))
-            buy_price = max_high * (Decimal('1') - drop_ratio_decimal)
-            
-            logger.info(f"📊 {inst_id} | Max high: ${max_high} | Drop ratio: {drop_ratio} | Buy price: ${buy_price} | Current price: ${current_price}")
-            
-            # If current price already below buy_price, place limit buy directly (no trigger)
-            if current_price < buy_price:
-                logger.info(f"📊 {inst_id} | Current price < buy_price, placing limit buy directly (no trigger)")
-                if self._place_limit_buy_order(inst_id, buy_price, "10day Drop"):
-                    return (inst_id, None, True)
-                else:
-                    return (inst_id, "Failed to place limit order", False)
-            
-            if self.create_10day_drop_trigger_order(inst_id, buy_price):
-                return (inst_id, None, True)
-            else:
-                return (inst_id, "Failed to create order", False)
-            
-        except Exception as e:
-            logger.error(f"❌ Error processing {inst_id}: {e}")
-            return (inst_id, str(e), False)
-
-    def process_10day_drop_from_database(self):
-        """Process 10day drop strategy from database and create algo trigger orders (optimized with parallel processing)"""
-        try:
-            # Load 10day drop configuration from database
-            db = Database()
-            if not db.connect():
-                logger.error("❌ Failed to connect to database")
-                return False
-            
-            config_data = db.load_7day_drop_config()  # Database table name still uses 7day, but logic is now 10day
-            db.disconnect()
-            
-            if not config_data:
-                logger.error("❌ No 10day drop configuration found in database")
-                return False
-            
-            crypto_configs = config_data.get('crypto_configs', {})
-            logger.info(f"📋 Found {len(crypto_configs)} crypto pairs in 10day drop configuration")
-            
-            # Load blacklisted cryptocurrencies
-            blacklisted_cryptos = self.blacklist_manager.get_blacklisted_cryptos()
-            if blacklisted_cryptos:
-                logger.info(f"🚫 Blacklisted cryptocurrencies: {sorted(blacklisted_cryptos)}")
-            else:
-                logger.info("✅ No blacklisted cryptocurrencies found")
-            
-            logger.info("=" * 60)
-            logger.info("📊 Processing 10day Drop Strategy")
-            logger.info("🚀 Processing with parallel execution (max 2 workers)")
-            logger.info("=" * 60)
-            
-            success_count = 0
-            total_count = len(crypto_configs)
-            failed_pairs = []
-            skipped_blacklist = 0
-            
-            # Process in parallel (max 2 workers to respect OKX rate limits: 5 requests/2 seconds)
-            # Reduced from 5 to 2 because each worker makes 2-3 API calls (candlesticks + ticker + order)
-            # 2 workers × 3 calls = 6 requests, but with retry backoff this should be safe
-            with ThreadPoolExecutor(max_workers=2) as executor:
-                # Submit all tasks
-                future_to_pair = {
-                    executor.submit(self._process_single_10day_drop_pair, inst_id, config, blacklisted_cryptos): inst_id
-                    for inst_id, config in crypto_configs.items()
-                }
-                
-                # Collect results as they complete
-                for future in as_completed(future_to_pair):
-                    inst_id = future_to_pair[future]
-                    try:
-                        result_inst_id, reason, success = future.result()
-                        if success:
-                            success_count += 1
-                        else:
-                            if reason and "Blacklisted" in reason:
-                                skipped_blacklist += 1
-                            else:
-                                failed_pairs.append((result_inst_id, reason))
-                    except Exception as e:
-                        logger.error(f"❌ Exception processing {inst_id}: {e}")
-                        failed_pairs.append((inst_id, str(e)))
-            
-            logger.info("\n" + "=" * 60)
-            logger.info(f"📊 10day Drop Summary: {success_count}/{total_count} orders created successfully")
-            
-            if skipped_blacklist > 0:
-                logger.info(f"🚫 Skipped due to blacklist: {skipped_blacklist}")
-            
-            if failed_pairs:
-                logger.warning(f"⚠️  Failed pairs: {len(failed_pairs)}")
-                for pair, reason in failed_pairs:
-                    logger.warning(f"   {pair}: {reason}")
-
-            return len(failed_pairs) == 0
-        except Exception as e:
-            logger.error(f"❌ Error processing 10day drop strategy: {e}")
-            logger.debug(f"Traceback: {traceback.format_exc()}")
-            return False
 
 def main():
     try:
@@ -819,17 +601,10 @@ def main():
         # Create OKX client and process limits from database
         okx_client = OKXAlgoTrigger(order_size=order_size)
         
-        # Process 10day drop strategy first (cache 10day data)
-        drop_success = okx_client.process_10day_drop_from_database()
-        
-        # Process regular limits strategy (can use cached 10day data if available)
         limits_success = okx_client.process_limits_from_database()
 
-        if not drop_success or not limits_success:
-            logger.error(
-                "❌ Script completed with failures "
-                f"(10day_drop_success={drop_success}, limits_success={limits_success})"
-            )
+        if not limits_success:
+            logger.error("❌ Script completed with failures")
             sys.exit(1)
         
         logger.info("✅ Script completed successfully")
