@@ -249,12 +249,14 @@ class OKXAlgoTrigger:
             if inst_id in self.instrument_rules_cache:
                 return self.instrument_rules_cache[inst_id]
 
-            if not self.market_api:
-                logger.warning("⚠️ Market API unavailable, fallback to local precision rules")
+            # Use PublicAPI (has get_instruments); MarketAPI does not
+            api = self.okx_client.get_public_api() or self.market_api
+            if not api or not hasattr(api, 'get_instruments'):
+                logger.warning("⚠️ No API with get_instruments, fallback to local precision rules")
                 self.instrument_rules_cache[inst_id] = None
                 return None
 
-            result = self.market_api.get_instruments(instType="SPOT", instId=inst_id)
+            result = api.get_instruments(instType="SPOT", instId=inst_id)
             if result.get('code') != '0' or not result.get('data'):
                 logger.warning(f"⚠️ {inst_id} | Failed to load instrument rules, using fallback precision")
                 self.instrument_rules_cache[inst_id] = None

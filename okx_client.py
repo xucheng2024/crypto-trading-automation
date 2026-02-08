@@ -14,6 +14,7 @@ OKX_VERSION = "unknown"
 Funding = None
 Trade = None
 MarketData = None
+PublicData = None
 Account = None
 
 # Try to import OKX SDK
@@ -45,6 +46,13 @@ try:
         MarketData = None
     
     try:
+        import okx.PublicData as PublicData
+        logging.info("✅ PublicData module imported successfully")
+    except ImportError as e:
+        logging.warning(f"⚠️ PublicData module import failed: {e}")
+        PublicData = None
+    
+    try:
         import okx.Account as Account
         logging.info("✅ Account module imported successfully")
     except ImportError as e:
@@ -52,7 +60,7 @@ try:
         Account = None
     
     # Check if any modules are available
-    if any([Funding, Trade, MarketData, Account]):
+    if any([Funding, Trade, MarketData, Account, PublicData]):
         OKX_AVAILABLE = True
         logging.info("✅ OKX SDK partial modules available")
     else:
@@ -75,6 +83,7 @@ class OKXClient:
         self.trade_api = None
         self.market_api = None
         self.account_api = None
+        self.public_api = None
         
         self._init_clients()
     
@@ -99,6 +108,17 @@ class OKXClient:
                     self.logger.info("✅ Market API initialized successfully")
                 except Exception as e:
                     self.logger.warning(f"⚠️ Market API initialization failed: {e}")
+            
+            # Initialize Public API (for get_instruments - tickSz, lotSz, minSz)
+            if PublicData:
+                try:
+                    self.public_api = PublicData.PublicAPI(
+                        flag=okx_flag,
+                        debug=False
+                    )
+                    self.logger.info("✅ Public API initialized successfully")
+                except Exception as e:
+                    self.logger.warning(f"⚠️ Public API initialization failed: {e}")
             
             # Check authentication API credentials
             if all([self.api_key, self.secret_key, self.passphrase]):
@@ -164,6 +184,7 @@ class OKXClient:
             self.funding_api = None
             self.trade_api = None
             self.market_api = None
+            self.public_api = None
     
     def is_available(self) -> bool:
         """Check if OKX client is available"""
@@ -180,6 +201,10 @@ class OKXClient:
     def get_market_api(self):
         """Get Market API instance"""
         return self.market_api
+    
+    def get_public_api(self):
+        """Get Public API instance (for instruments, etc.)"""
+        return self.public_api
     
     def get_account_api(self):
         """Get Account API instance"""
