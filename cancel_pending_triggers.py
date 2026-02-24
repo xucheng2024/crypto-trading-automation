@@ -207,8 +207,8 @@ class OKXOrderManager:
             logger.debug(f"Traceback: {traceback.format_exc()}")
             raise  # Re-raise for retry mechanism
     
-    def cancel_all_pending_triggers(self):
-        """Cancel all pending trigger orders (both buy and sell)"""
+    def cancel_all_pending_triggers(self, inst_ids=None):
+        """Cancel pending trigger orders. If inst_ids is provided (set/list of inst_id e.g. BTC-USDT), only cancel those; otherwise cancel all."""
         try:
             logger.info("🚀 OKX Pending Trigger Order Canceller")
             logger.info("=" * 60)
@@ -226,8 +226,14 @@ class OKXOrderManager:
             # Filter for trigger orders only
             trigger_orders = [order for order in pending_orders if order.get('ordType') == 'trigger']
             
+            # If inst_ids provided, keep only orders for those instruments
+            if inst_ids is not None:
+                inst_set = set(inst_ids)
+                trigger_orders = [o for o in trigger_orders if o.get('instId') in inst_set]
+                logger.info(f"🎯 Filtering to {len(trigger_orders)} trigger(s) for inst_ids: {sorted(inst_set)}")
+            
             if not trigger_orders:
-                logger.info("✅ No pending trigger orders found")
+                logger.info("✅ No pending trigger orders to cancel" + (" for given inst_ids" if inst_ids else ""))
                 return
             
             # Count by side for logging
@@ -321,6 +327,9 @@ class OKXOrderManager:
                     try:
                         remaining_pending = self.get_pending_algo_orders()
                         remaining_trigger_orders = [order for order in remaining_pending if order.get('ordType') == 'trigger']
+                        if inst_ids is not None:
+                            inst_set = set(inst_ids)
+                            remaining_trigger_orders = [o for o in remaining_trigger_orders if o.get('instId') in inst_set]
                         
                         if remaining_trigger_orders:
                             logger.warning(f"⚠️  {len(remaining_trigger_orders)} trigger orders still pending after attempt {attempt}")
@@ -360,12 +369,23 @@ def main():
         if not os.path.exists(".env"):
             logger.info("ℹ️ .env not found; using environment variables from environment/CI")
         
+        import argparse
+        parser = argparse.ArgumentParser(description='Cancel OKX pending trigger orders')
+        parser.add_argument('--inst-ids', type=str, default=None,
+                            help='Comma-separated inst_ids to cancel (e.g. BTC-USDT,ETH-USDT). If omitted, cancel all.')
+        args = parser.parse_args()
+        
+        inst_ids = None
+        if args.inst_ids:
+            inst_ids = [s.strip() for s in args.inst_ids.split(',') if s.strip()]
+            logger.info(f"🎯 Cancel only triggers for inst_ids: {inst_ids}")
+        
         logger.info("🚀 Starting OKX Trigger Order Cancellation Process")
         logger.info(f"⏰ Start time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         
         # Create OKX client and cancel pending triggers
         okx_client = OKXOrderManager()
-        okx_client.cancel_all_pending_triggers()
+        okx_client.cancel_all_pending_triggers(inst_ids=inst_ids)
         
         logger.info("✅ Script completed successfully")
         logger.info(f"⏰ End time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")

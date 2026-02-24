@@ -257,24 +257,7 @@ class OKXDelistMonitor:
             notes=f"Protection executed for {len(affected_cryptos)} cryptocurrencies"
         )
         
-        # Recreate algo triggers after protection operations
-        self.logger.info("🔄 Recreating algo triggers after protection operations...")
-        try:
-            import subprocess
-            result = subprocess.run(['python', 'create_algo_triggers.py'], 
-                                  capture_output=True, text=True, timeout=300)
-            if result.returncode == 0:
-                self.logger.info("✅ Algo triggers recreated successfully")
-                print("\n✅ Algo triggers recreated successfully")
-            else:
-                self.logger.error(f"❌ Failed to recreate algo triggers: {result.stderr}")
-                print(f"\n❌ Failed to recreate algo triggers: {result.stderr}")
-        except subprocess.TimeoutExpired:
-            self.logger.error("❌ Algo trigger recreation timed out")
-            print("\n❌ Algo trigger recreation timed out")
-        except Exception as e:
-            self.logger.error(f"❌ Error recreating algo triggers: {e}")
-            print(f"\n❌ Error recreating algo triggers: {e}")
+        # No need to recreate all algo triggers: we only cancelled affected inst_ids; other triggers stay.
     
     def send_info_alert(self, announcement: Dict[str, Any]):
         """Send information alert (does not execute protection operations)"""

@@ -20,28 +20,33 @@ class ProtectionManager:
         self.okx_client = okx_client or OKXClient()
         self.logger = logger or logging.getLogger(__name__)
     
-    def execute_cancellation_scripts(self) -> bool:
-        """Execute order cancellation scripts"""
-        self.logger.info("🚨 Starting automatic order cancellation...")
+    def execute_cancellation_scripts(self, inst_ids=None) -> bool:
+        """Execute order cancellation scripts. If inst_ids is provided (list of e.g. BTC-USDT), only cancel orders for those; otherwise cancel all."""
+        self.logger.info("🚨 Starting automatic order cancellation" + (" (affected inst_ids only)" if inst_ids else " (all orders)"))
         
-        # Script paths
+        # Script paths and their optional args
         scripts = [
-            ("cancel_pending_triggers.py", "Cancel all pending trigger orders"),
-            ("cancel_pending_limits.py", "Cancel all pending limit orders")
+            ("cancel_pending_triggers.py", "Cancel pending trigger orders", ["--inst-ids"] if inst_ids else []),
+            ("cancel_pending_limits.py", "Cancel pending limit orders", ["--inst-ids"] if inst_ids else []),
         ]
         
         success_count = 0
+        inst_ids_arg = ",".join(inst_ids) if inst_ids else None
         
-        for script_name, description in scripts:
+        for script_name, description, extra_args in scripts:
             try:
                 self.logger.info(f"Executing script: {script_name} - {description}")
                 
-                # Execute script
+                cmd = [sys.executable, script_name]
+                if extra_args and inst_ids_arg:
+                    cmd.extend(extra_args)
+                    cmd.append(inst_ids_arg)
+                
                 result = subprocess.run(
-                    [sys.executable, script_name],
+                    cmd,
                     capture_output=True,
                     text=True,
-                    timeout=300  # 5 minute timeout
+                    timeout=300
                 )
                 
                 if result.returncode == 0:
@@ -101,7 +106,10 @@ class ProtectionManager:
             self.logger.info("ℹ️ No affected cryptocurrencies, skipping protection operations")
             return {'status': 'skipped', 'reason': 'no_affected_cryptos'}
         
-        self.logger.warning(f"🚨 Starting complete protection workflow, affected cryptocurrencies: {sorted(affected_cryptos)}")
+        # Build inst_ids for cancel (e.g. BTC -> BTC-USDT)
+        inst_ids = [f"{c}-USDT" for c in affected_cryptos]
+        
+        self.logger.warning(f"🚨 Starting complete protection workflow, affected: {sorted(affected_cryptos)} (inst_ids: {inst_ids})")
         
         results = {
             'status': 'completed',
@@ -111,9 +119,9 @@ class ProtectionManager:
         }
         
         try:
-            # Step 1: Cancel all pending orders
-            self.logger.info("📋 Step 1: Cancel all pending orders")
-            results['cancellation_success'] = self.execute_cancellation_scripts()
+            # Step 1: Cancel only pending orders for affected inst_ids (not all)
+            self.logger.info("📋 Step 1: Cancel pending trigger/limit orders for affected inst_ids only")
+            results['cancellation_success'] = self.execute_cancellation_scripts(inst_ids=inst_ids)
             
             # Step 2: Check and sell affected balances
             self.logger.info("💰 Step 2: Check and sell affected balances")

@@ -199,8 +199,8 @@ class OKXLimitOrderManager:
 
 
 
-    def cancel_all_pending_limits(self, side=None):
-        """Cancel all pending limit orders"""
+    def cancel_all_pending_limits(self, side=None, inst_ids=None):
+        """Cancel pending limit orders. If inst_ids is provided (set/list of inst_id e.g. BTC-USDT), only cancel those; otherwise cancel all."""
         try:
             # Get pending orders
             side_text = f" {side}" if side else ""
@@ -209,6 +209,16 @@ class OKXLimitOrderManager:
             
             if not pending_orders:
                 logger.info("🎯 No pending limit orders to cancel")
+                return
+            
+            # If inst_ids provided, keep only orders for those instruments
+            if inst_ids is not None:
+                inst_set = set(inst_ids)
+                pending_orders = [o for o in pending_orders if o.get('instId') in inst_set]
+                logger.info(f"🎯 Filtering to {len(pending_orders)} limit order(s) for inst_ids: {sorted(inst_set)}")
+            
+            if not pending_orders:
+                logger.info("🎯 No pending limit orders to cancel" + (" for given inst_ids" if inst_ids else ""))
                 return
             
             logger.info(f"🎯 Found {len(pending_orders)} pending limit orders")
@@ -280,7 +290,13 @@ def main():
     import argparse
     parser = argparse.ArgumentParser(description='Cancel OKX pending limit orders')
     parser.add_argument('--side', choices=['buy', 'sell'], help='Only cancel orders with specified side (buy or sell)')
+    parser.add_argument('--inst-ids', type=str, default=None,
+                        help='Comma-separated inst_ids to cancel (e.g. BTC-USDT,ETH-USDT). If omitted, cancel all.')
     args = parser.parse_args()
+    
+    inst_ids = None
+    if args.inst_ids:
+        inst_ids = [s.strip() for s in args.inst_ids.split(',') if s.strip()]
     
     side_text = f" ({args.side})" if args.side else ""
     logger.info(f"🚀 Starting OKX Limit Order Cancellation Process{side_text}")
@@ -293,8 +309,8 @@ def main():
         logger.info("🔧 Initializing OKX API connection...")
         order_manager = OKXLimitOrderManager()
         
-        # Cancel all pending limit orders (with optional side filter)
-        order_manager.cancel_all_pending_limits(args.side)
+        # Cancel pending limit orders (with optional side and inst_ids filter)
+        order_manager.cancel_all_pending_limits(side=args.side, inst_ids=inst_ids)
         
         logger.info("🎉 Process completed successfully")
         
