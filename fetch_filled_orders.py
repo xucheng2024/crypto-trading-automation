@@ -353,7 +353,7 @@ class OKXFilledOrdersFetcher:
 
 
 
-    def fetch_and_save_filled_trades(self, minutes=None):
+    def fetch_and_save_filled_trades(self, minutes=None, run_protection_check_on_empty=False):
         """Fetch filled trades using incremental approach based on last trade timestamp"""
         try:
             self.ensure_database_initialized()
@@ -376,6 +376,9 @@ class OKXFilledOrdersFetcher:
             
             if not trades:
                 logger.info("🎯 No new filled trades found")
+                if run_protection_check_on_empty:
+                    logger.info("🛡️ Running trigger protection check despite empty fetch")
+                    self.check_and_cancel_triggers_if_needed()
                 return
             
             # Save trades to database using batch insert (optimized)
@@ -485,11 +488,11 @@ class OKXFilledOrdersFetcher:
             logger.debug(f"Traceback: {traceback.format_exc()}")
 
     def count_active_trading_currencies(self):
-        """Count active trading orders (not sold yet) - includes multiple orders per currency"""
+        """Count active trading instruments (not sold yet), deduplicated by instId."""
         try:
             self.ensure_database_initialized()
             self.cursor.execute('''
-                SELECT COUNT(*) as order_count
+                SELECT COUNT(DISTINCT instId) as instrument_count
                 FROM filled_orders 
                 WHERE side = 'buy' 
                 AND (sold_status IS NULL OR sold_status != 'SOLD')
@@ -499,7 +502,7 @@ class OKXFilledOrdersFetcher:
                 return int(result[0])
             return 0
         except Exception as e:
-            logger.warning(f"⚠️ Failed to count active trading orders: {e}")
+            logger.warning(f"⚠️ Failed to count active trading instruments: {e}")
             return 0
 
     @retry(
@@ -541,8 +544,7 @@ class OKXFilledOrdersFetcher:
                     time.sleep(0.1)
                 else:
                     error_msg = result.get('msg', 'Unknown error')
-                    logger.error(f"❌ Failed to get pending orders: {error_msg}")
-                    break
+                    raise RuntimeError(f"Failed to get pending orders: {error_msg}")
             
             return all_orders
                 
@@ -584,7 +586,7 @@ class OKXFilledOrdersFetcher:
             raise
 
     def cancel_all_trigger_orders(self):
-        """Cancel all pending trigger orders"""
+        """Cancel all pending trigger orders and verify they are gone."""
         try:
             logger.info("🔍 Checking for pending trigger orders...")
             pending_orders = self.get_pending_algo_orders()
@@ -598,32 +600,65 @@ class OKXFilledOrdersFetcher:
             
             if not trigger_orders:
                 logger.info("✅ No pending trigger orders found")
-                return
+                return True
             
             logger.info(f"🎯 Found {len(trigger_orders)} pending trigger orders to cancel")
-            
-            # Process orders in batches of 10
             batch_size = 10
+            max_attempts = 3
+            attempt = 1
+            remaining_orders = trigger_orders.copy()
+            failed_orders = []
             success_count = 0
-            
-            for i in range(0, len(trigger_orders), batch_size):
-                batch = trigger_orders[i : i + batch_size]
-                batch_num = i // batch_size + 1
-                total_batches = (len(trigger_orders) + batch_size - 1) // batch_size
-                
-                logger.info(f"🔄 Processing batch {batch_num}/{total_batches}...")
-                
-                try:
-                    if self.cancel_algo_orders_batch(batch):
-                        success_count += len(batch)
-                    
+            total_count = len(trigger_orders)
+
+            while remaining_orders and attempt <= max_attempts:
+                logger.info(f"🔄 Cancellation attempt {attempt}/{max_attempts} | Remaining orders: {len(remaining_orders)}")
+                total_batches = (len(remaining_orders) + batch_size - 1) // batch_size
+
+                for i in range(0, len(remaining_orders), batch_size):
+                    batch = remaining_orders[i : i + batch_size]
+                    batch_num = i // batch_size + 1
+                    logger.info(f"🔄 Processing batch {batch_num}/{total_batches}...")
+
+                    try:
+                        if self.cancel_algo_orders_batch(batch):
+                            success_count += len(batch)
+                        else:
+                            failed_orders.extend(
+                                (order.get('instId', ''), order.get('algoId', ''), f"API returned error (attempt {attempt})")
+                                for order in batch
+                            )
+                    except Exception as e:
+                        logger.error(f"❌ Exception while cancelling batch {batch_num}: {e}")
+                        failed_orders.extend(
+                            (order.get('instId', ''), order.get('algoId', ''), f"{str(e)} (attempt {attempt})")
+                            for order in batch
+                        )
+
                     if batch_num < total_batches:
                         time.sleep(0.2)
-                except Exception as e:
-                    logger.error(f"❌ Exception while cancelling batch {batch_num}: {e}")
-                    continue
-            
-            logger.info(f"📊 Summary: {success_count}/{len(trigger_orders)} trigger orders cancelled")
+
+                logger.info(f"🔍 Verifying cancellation results (attempt {attempt})...")
+                time.sleep(2)
+
+                remaining_pending = self.get_pending_algo_orders()
+                remaining_orders = [order for order in remaining_pending if order.get('ordType') == 'trigger']
+                if remaining_orders:
+                    logger.warning(f"⚠️ {len(remaining_orders)} trigger orders still pending after attempt {attempt}")
+                    attempt += 1
+                else:
+                    logger.info("✅ All trigger orders successfully cancelled!")
+                    break
+
+            logger.info(f"📊 Summary: {success_count}/{total_count} trigger orders cancelled")
+
+            if failed_orders:
+                logger.warning(f"⚠️ Failed batches recorded: {len(failed_orders)}")
+
+            if remaining_orders:
+                raise RuntimeError(f"Failed to cancel all trigger orders after {max_attempts} attempts; {len(remaining_orders)} remain")
+
+            return True
             
         except Exception as e:
             logger.error(f"❌ Error cancelling trigger orders: {e}")
@@ -692,7 +727,10 @@ def main():
 
         if should_run_db_flow:
             # Fetch and save filled trades
-            fetcher.fetch_and_save_filled_trades(minutes=args.minutes)
+            fetcher.fetch_and_save_filled_trades(
+                minutes=args.minutes,
+                run_protection_check_on_empty=args.force_db,
+            )
         
         logger.info("✅ Process completed")
         
