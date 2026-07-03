@@ -8,6 +8,10 @@ on:
         description: 'Comma-separated scripts to run (e.g., cancel_pending_triggers,create_algo_triggers)'
         required: false
         default: 'monitor_delist,cancel_pending_limits,fetch_filled_orders,auto_sell_orders'
+      force_db_fetch:
+        description: 'Force fetch_filled_orders.py to connect to DB even when OKX recent fills are empty'
+        required: false
+        default: 'false'
 
   # Cloudflare Worker trigger
   repository_dispatch:
@@ -42,10 +46,12 @@ jobs:
           echo "=========================================="
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             echo "🎯 MANUAL TRIGGER - Scripts: ${{ github.event.inputs.scripts }}"
+            echo "🛡️ Force DB fetch: ${{ github.event.inputs.force_db_fetch }}"
           elif [ "${{ github.event_name }}" = "repository_dispatch" ]; then
             echo "🤖 AUTO TRIGGER - Scripts: ${{ join(github.event.client_payload.scripts, ', ') }}"
             echo "📅 Cron schedule: ${{ github.event.client_payload.cron_schedule }}"
             echo "⏰ Interval: ${{ github.event.client_payload.interval }}"
+            echo "🛡️ Force DB fetch: ${{ github.event.client_payload.force_db_fetch }}"
           fi
           echo "=========================================="
         
@@ -114,11 +120,14 @@ jobs:
             SCRIPTS_RAW="${{ github.event.inputs.scripts }}"
             # Convert comma-separated to space-separated
             SCRIPTS=$(echo "$SCRIPTS_RAW" | tr ',' ' ')
+            FORCE_DB_FETCH="${{ github.event.inputs.force_db_fetch }}"
           else
             SCRIPTS="${{ join(github.event.client_payload.scripts, ' ') }}"
+            FORCE_DB_FETCH="${{ github.event.client_payload.force_db_fetch }}"
           fi
           
           echo "Will run scripts: $SCRIPTS"
+          echo "Force DB fetch: ${FORCE_DB_FETCH:-false}"
           echo "Scripts to execute: $SCRIPTS" >> logs/executed_scripts.txt
           
           # Execute each script
@@ -136,7 +145,11 @@ jobs:
                 ;;
               fetch_filled_orders)
                 echo "🔄 Running fetch_filled_orders.py..."
-                python fetch_filled_orders.py || echo "⚠️ fetch_filled_orders.py completed with warnings"
+                FETCH_ARGS=""
+                if [ "${FORCE_DB_FETCH}" = "true" ]; then
+                  FETCH_ARGS="--force-db"
+                fi
+                python fetch_filled_orders.py $FETCH_ARGS || echo "⚠️ fetch_filled_orders.py completed with warnings"
                 echo "fetch_filled_orders.py" >> logs/executed_scripts.txt
                 ;;
               auto_sell_orders)

@@ -93,7 +93,7 @@ logger = setup_logging()
 
 class OKXFilledOrdersFetcher:
     def __init__(self):
-        """Initialize OKX API connection and database"""
+        """Initialize OKX API connection and defer database connection until needed"""
         try:
             self.api_key = os.getenv('OKX_API_KEY')
             self.secret_key = os.getenv('OKX_SECRET_KEY')
@@ -118,12 +118,10 @@ class OKXFilledOrdersFetcher:
             # Initialize OKX Client
             self.okx_client = OKXClient(logger)
             self.trade_api = self.okx_client.get_trade_api()
-            
-            # Initialize database
-            from lib.database import get_database_connection
-            self.conn = get_database_connection()
-            self.cursor = self.conn.cursor()
-            logger.info("✅ Connected to PostgreSQL database")
+
+            self.conn = None
+            self.cursor = None
+            self.database_initialized = False
             
             logger.info(f"🚀 OKX Filled Orders Fetcher - {'Demo' if self.testnet else 'Live'}")
             logger.info(f"🔑 API: {'✅ Configured' if self.api_key else '❌ Not Configured'}")
@@ -132,6 +130,33 @@ class OKXFilledOrdersFetcher:
             logger.error(f"❌ Failed to initialize OKX API: {e}")
             logger.debug(f"Traceback: {traceback.format_exc()}")
             raise
+
+    def ensure_database_initialized(self):
+        """Connect to PostgreSQL only when persistence or DB-backed checks are required."""
+        if self.database_initialized:
+            return
+
+        from lib.database import get_database_connection
+
+        self.conn = get_database_connection()
+        self.cursor = self.conn.cursor()
+        self.database_initialized = True
+        logger.info("✅ Connected to PostgreSQL database")
+
+    def has_recent_buy_fills(self, hours=48, limit=100):
+        """Check recent OKX buy fills before touching the database."""
+        begin_time = datetime.utcnow() - timedelta(hours=hours)
+        begin_ts = int(begin_time.timestamp() * 1000)
+
+        logger.info(f"🧪 Pre-checking OKX buy fills for the last {hours} hours")
+
+        try:
+            trades = self.get_filled_trades(begin_ts=begin_ts, limit=limit)
+            logger.info(f"🧪 Pre-check found {len(trades)} recent buy fills")
+            return len(trades) > 0
+        except Exception as e:
+            logger.warning(f"⚠️ Recent fill pre-check failed, falling back to DB-backed flow: {e}")
+            return None
 
 
 
@@ -142,6 +167,7 @@ class OKXFilledOrdersFetcher:
     def get_last_trade_timestamp(self):
         """Get the timestamp of the last trade from database"""
         try:
+            self.ensure_database_initialized()
             self.cursor.execute('''
                 SELECT MAX(CAST(ts AS BIGINT)) as last_ts
                 FROM filled_orders 
@@ -266,6 +292,7 @@ class OKXFilledOrdersFetcher:
             return 0, 0
         
         try:
+            self.ensure_database_initialized()
             # Prepare all trade data
             trade_data_list = []
             valid_trades = []
@@ -329,6 +356,7 @@ class OKXFilledOrdersFetcher:
     def fetch_and_save_filled_trades(self, minutes=None):
         """Fetch filled trades using incremental approach based on last trade timestamp"""
         try:
+            self.ensure_database_initialized()
             # Get the timestamp of the last trade from database
             last_trade_ts = self.get_last_trade_timestamp()
             
@@ -375,6 +403,7 @@ class OKXFilledOrdersFetcher:
     def auto_mark_manual_sells(self):
         """自动检测并标记手动卖出的订单（通过检查账户余额）"""
         try:
+            self.ensure_database_initialized()
             # 获取所有未标记为已卖的币种
             self.cursor.execute('''
                 SELECT DISTINCT instId
@@ -458,6 +487,7 @@ class OKXFilledOrdersFetcher:
     def count_active_trading_currencies(self):
         """Count active trading orders (not sold yet) - includes multiple orders per currency"""
         try:
+            self.ensure_database_initialized()
             self.cursor.execute('''
                 SELECT COUNT(*) as order_count
                 FROM filled_orders 
@@ -622,7 +652,7 @@ class OKXFilledOrdersFetcher:
 
     def close(self):
         """Close database connection"""
-        if hasattr(self, 'conn'):
+        if getattr(self, 'conn', None):
             self.conn.close()
             logger.info("🗄️  Database connection closed")
 
@@ -634,6 +664,8 @@ def main():
     import argparse
     parser = argparse.ArgumentParser(description='Fetch OKX filled limit orders and save to database')
     parser.add_argument('--minutes', type=int, default=15, help='Number of minutes to look back (default: 15)')
+    parser.add_argument('--precheck-hours', type=int, default=48, help='Skip DB if OKX has no buy fills in this recent window (default: 48)')
+    parser.add_argument('--force-db', action='store_true', help='Bypass OKX pre-check and force the legacy DB-backed flow')
     args = parser.parse_args()
     
     # Determine time range
@@ -647,9 +679,20 @@ def main():
     try:
         # Initialize fetcher
         fetcher = OKXFilledOrdersFetcher()
-        
-        # Fetch and save filled trades
-        fetcher.fetch_and_save_filled_trades(minutes=args.minutes)
+
+        should_run_db_flow = args.force_db
+        if args.force_db:
+            logger.info("🛡️ Force DB fetch enabled, bypassing OKX pre-check")
+        else:
+            precheck_result = fetcher.has_recent_buy_fills(hours=args.precheck_hours)
+            if precheck_result is False:
+                logger.info("💤 No recent OKX buy fills detected, skipping Neon connection")
+            else:
+                should_run_db_flow = True
+
+        if should_run_db_flow:
+            # Fetch and save filled trades
+            fetcher.fetch_and_save_filled_trades(minutes=args.minutes)
         
         logger.info("✅ Process completed")
         
