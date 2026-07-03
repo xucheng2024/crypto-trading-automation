@@ -218,7 +218,7 @@ class OKXOrderManager:
             
             if not pending_orders:
                 logger.info("✅ No pending orders found")
-                return
+                return True
             
             logger.info("\n📋 Pending Orders Details:")
             logger.info("=" * 60)
@@ -234,7 +234,7 @@ class OKXOrderManager:
             
             if not trigger_orders:
                 logger.info("✅ No pending trigger orders to cancel" + (" for given inst_ids" if inst_ids else ""))
-                return
+                return True
             
             # Count by side for logging
             buy_count = sum(1 for order in trigger_orders if order.get('side') == 'buy')
@@ -337,6 +337,7 @@ class OKXOrderManager:
                             remaining_orders = remaining_trigger_orders
                             attempt += 1
                         else:
+                            remaining_orders = []
                             logger.info("✅ All trigger orders successfully cancelled!")
                             break
                     except Exception as e:
@@ -357,6 +358,11 @@ class OKXOrderManager:
                 logger.warning(f"⚠️  Failed orders: {len(failed_orders)}")
                 for inst_id, algo_id, reason in failed_orders:
                     logger.warning(f"   {inst_id} ({algo_id}): {reason}")
+            
+            operation_succeeded = len(failed_orders) == 0 and not remaining_orders
+            if not operation_succeeded:
+                logger.error("❌ Trigger cancellation completed with failures")
+            return operation_succeeded
             
         except Exception as e:
             logger.error(f"❌ Error in cancel_all_pending_triggers: {e}")
@@ -385,9 +391,12 @@ def main():
         
         # Create OKX client and cancel pending triggers
         okx_client = OKXOrderManager()
-        okx_client.cancel_all_pending_triggers(inst_ids=inst_ids)
-        
-        logger.info("✅ Script completed successfully")
+        operation_succeeded = okx_client.cancel_all_pending_triggers(inst_ids=inst_ids)
+        if operation_succeeded:
+            logger.info("✅ Script completed successfully")
+        else:
+            logger.error("❌ Script completed with trigger cancellation failures")
+            sys.exit(1)
         logger.info(f"⏰ End time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         
     except KeyboardInterrupt:

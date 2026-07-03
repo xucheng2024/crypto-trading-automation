@@ -4,7 +4,7 @@
 
 ### 1. Neon PostgreSQL Database
 ```bash
-export DATABASE_URL="postgresql://neondb_owner:npg_F4epMLXJ8ity@ep-wispy-smoke-a1qg30ip-pooler.ap-southeast-1.aws.neon.tech/crypto_trading?sslmode=require&channel_binding=require"
+export DATABASE_URL="postgresql://<user>:<password>@<host>/<database>?sslmode=require"
 ```
 
 ### 2. OKX API Credentials

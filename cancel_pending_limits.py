@@ -209,7 +209,7 @@ class OKXLimitOrderManager:
             
             if not pending_orders:
                 logger.info("🎯 No pending limit orders to cancel")
-                return
+                return True
             
             # If inst_ids provided, keep only orders for those instruments
             if inst_ids is not None:
@@ -219,7 +219,7 @@ class OKXLimitOrderManager:
             
             if not pending_orders:
                 logger.info("🎯 No pending limit orders to cancel" + (" for given inst_ids" if inst_ids else ""))
-                return
+                return True
             
             logger.info(f"🎯 Found {len(pending_orders)} pending limit orders")
             logger.info("🔄 Starting cancellation process...")
@@ -275,7 +275,12 @@ class OKXLimitOrderManager:
             
             success_rate = (successful_cancellations / total_orders * 100) if total_orders > 0 else 0
             logger.info(f"📈 Success rate: {success_rate:.1f}%")
-            logger.info("✅ Script completed successfully")
+            operation_succeeded = not failed_orders and skipped_orders == 0
+            if operation_succeeded:
+                logger.info("✅ Script completed successfully")
+            else:
+                logger.error("❌ Script completed with cancellation failures")
+            return operation_succeeded
             
         except Exception as e:
             logger.error(f"❌ Error in cancel_all_pending_limits: {e}")
@@ -310,9 +315,14 @@ def main():
         order_manager = OKXLimitOrderManager()
         
         # Cancel pending limit orders (with optional side and inst_ids filter)
-        order_manager.cancel_all_pending_limits(side=args.side, inst_ids=inst_ids)
+        operation_succeeded = order_manager.cancel_all_pending_limits(side=args.side, inst_ids=inst_ids)
+        if not operation_succeeded:
+            exit_code = 1
         
-        logger.info("🎉 Process completed successfully")
+        if exit_code == 0:
+            logger.info("🎉 Process completed successfully")
+        else:
+            logger.error("❌ Process completed with cancellation failures")
         
     except KeyboardInterrupt:
         logger.info("⏹️  Script interrupted by user")

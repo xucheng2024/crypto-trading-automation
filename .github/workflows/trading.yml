@@ -129,49 +129,59 @@ jobs:
           echo "Will run scripts: $SCRIPTS"
           echo "Force DB fetch: ${FORCE_DB_FETCH:-false}"
           echo "Scripts to execute: $SCRIPTS" >> logs/executed_scripts.txt
+          FAILED_SCRIPTS=""
+
+          run_script() {
+            local script_name="$1"
+            shift
+            echo "🔄 Running ${script_name}..."
+            if "$@"; then
+              echo "${script_name}" >> logs/executed_scripts.txt
+              return 0
+            fi
+
+            echo "⚠️ ${script_name} failed"
+            echo "${script_name} (failed)" >> logs/executed_scripts.txt
+            FAILED_SCRIPTS="${FAILED_SCRIPTS} ${script_name}"
+            return 1
+          }
           
           # Execute each script
           for script in $SCRIPTS; do
             case "$script" in
               monitor_delist)
-                echo "🔄 Running monitor_delist.py..."
-                python monitor_delist.py || echo "⚠️ monitor_delist.py completed with warnings"
-                echo "monitor_delist.py" >> logs/executed_scripts.txt
+                run_script "monitor_delist.py" python monitor_delist.py || true
                 ;;
               cancel_pending_limits)
-                echo "🔄 Running cancel_pending_limits.py..."
-                python cancel_pending_limits.py --side buy || echo "⚠️ cancel_pending_limits.py completed with warnings"
-                echo "cancel_pending_limits.py" >> logs/executed_scripts.txt
+                run_script "cancel_pending_limits.py" python cancel_pending_limits.py --side buy || true
                 ;;
               fetch_filled_orders)
-                echo "🔄 Running fetch_filled_orders.py..."
                 FETCH_ARGS=""
                 if [ "${FORCE_DB_FETCH}" = "true" ]; then
                   FETCH_ARGS="--force-db"
                 fi
-                python fetch_filled_orders.py $FETCH_ARGS || echo "⚠️ fetch_filled_orders.py completed with warnings"
-                echo "fetch_filled_orders.py" >> logs/executed_scripts.txt
+                run_script "fetch_filled_orders.py" python fetch_filled_orders.py $FETCH_ARGS || true
                 ;;
               auto_sell_orders)
-                echo "🔄 Running auto_sell_orders.py..."
-                python auto_sell_orders.py || echo "⚠️ auto_sell_orders.py completed with warnings"
-                echo "auto_sell_orders.py" >> logs/executed_scripts.txt
+                run_script "auto_sell_orders.py" python auto_sell_orders.py || true
                 ;;
               cancel_pending_triggers)
-                echo "🔄 Running cancel_pending_triggers.py..."
-                python cancel_pending_triggers.py || echo "⚠️ cancel_pending_triggers.py completed with warnings"
-                echo "cancel_pending_triggers.py" >> logs/executed_scripts.txt
+                run_script "cancel_pending_triggers.py" python cancel_pending_triggers.py || true
                 ;;
               create_algo_triggers)
-                echo "🔄 Running create_algo_triggers.py..."
-                python create_algo_triggers.py || echo "⚠️ create_algo_triggers.py completed with warnings"
-                echo "create_algo_triggers.py" >> logs/executed_scripts.txt
+                run_script "create_algo_triggers.py" python create_algo_triggers.py || true
                 ;;
               *)
                 echo "❌ Unknown script: $script"
+                FAILED_SCRIPTS="${FAILED_SCRIPTS} unknown:${script}"
                 ;;
             esac
           done
+
+          if [ -n "$FAILED_SCRIPTS" ]; then
+            echo "Failed scripts:${FAILED_SCRIPTS}"
+            exit 1
+          fi
 
       - name: Write run summary
         if: always()
@@ -184,7 +194,12 @@ jobs:
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "### 🚀 Executed Scripts" >> "$GITHUB_STEP_SUMMARY"
           if [ -s logs/executed_scripts.txt ]; then
-            grep -v "Scripts to execute:" logs/executed_scripts.txt | sort -u | sed 's/^/- ✅ /' >> "$GITHUB_STEP_SUMMARY"
+            grep -v "Scripts to execute:" logs/executed_scripts.txt | grep -v "(failed)" | sort -u | sed 's/^/- ✅ /' >> "$GITHUB_STEP_SUMMARY" || true
+            if grep -q "(failed)" logs/executed_scripts.txt; then
+              echo "" >> "$GITHUB_STEP_SUMMARY"
+              echo "### ❌ Failed Scripts" >> "$GITHUB_STEP_SUMMARY"
+              grep "(failed)" logs/executed_scripts.txt | sort -u | sed 's/^/- /' >> "$GITHUB_STEP_SUMMARY"
+            fi
           else
             echo "- ❌ None" >> "$GITHUB_STEP_SUMMARY"
           fi
