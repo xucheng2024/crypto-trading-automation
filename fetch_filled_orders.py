@@ -143,7 +143,7 @@ class OKXFilledOrdersFetcher:
         self.database_initialized = True
         logger.info("✅ Connected to PostgreSQL database")
 
-    def has_recent_buy_fills(self, hours=48, limit=100):
+    def has_recent_buy_fills(self, hours=24, limit=100):
         """Check recent OKX buy fills before touching the database."""
         begin_time = datetime.utcnow() - timedelta(hours=hours)
         begin_ts = int(begin_time.timestamp() * 1000)
@@ -664,7 +664,7 @@ def main():
     import argparse
     parser = argparse.ArgumentParser(description='Fetch OKX filled limit orders and save to database')
     parser.add_argument('--minutes', type=int, default=15, help='Number of minutes to look back (default: 15)')
-    parser.add_argument('--precheck-hours', type=int, default=48, help='Skip DB if OKX has no buy fills in this recent window (default: 48)')
+    parser.add_argument('--precheck-hours', type=int, default=24, help='Skip DB if OKX has no buy fills in this recent window (default: 24)')
     parser.add_argument('--force-db', action='store_true', help='Bypass OKX pre-check and force the legacy DB-backed flow')
     args = parser.parse_args()
     
