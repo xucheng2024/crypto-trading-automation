@@ -58,13 +58,35 @@ class OKXDelistMonitor:
         # Setup logging
         self.setup_logging()
         
-        # Initialize managers
-        self.config_manager = ConfigManager(logger=self.logger)
-        self.crypto_matcher = CryptoMatcher(self.config_manager, self.logger)
-        self.protection_manager = ProtectionManager(self.config_manager, logger=self.logger)
-        self.blacklist_manager = BlacklistManager(logger=self.logger)
+        # Delay DB-backed manager creation until we know we need stateful checks.
+        self.config_manager = None
+        self.crypto_matcher = None
+        self.protection_manager = None
+        self.blacklist_manager = None
         
         self.logger.info("🚀 OKX Delist Monitor initialization completed")
+
+    def ensure_state_managers(self):
+        """Initialize DB-backed managers on demand."""
+        if self.config_manager is None:
+            self.config_manager = ConfigManager(logger=self.logger)
+        if self.crypto_matcher is None:
+            self.crypto_matcher = CryptoMatcher(self.config_manager, self.logger)
+        if self.protection_manager is None:
+            self.protection_manager = ProtectionManager(self.config_manager, logger=self.logger)
+        if self.blacklist_manager is None:
+            self.blacklist_manager = BlacklistManager(logger=self.logger)
+
+    def ensure_blacklist_manager(self):
+        """Initialize lightweight announcement/blacklist state access on demand."""
+        if self.blacklist_manager is None:
+            self.blacklist_manager = BlacklistManager(logger=self.logger)
+
+    def log_config_stats(self):
+        """Log configured crypto count when DB-backed managers are available."""
+        self.ensure_state_managers()
+        stats = self.config_manager.get_config_stats()
+        self.logger.info(f"📋 Monitoring {stats.get('total_cryptos', 0)} configured cryptocurrencies")
     
     def setup_logging(self):
         """Setup logging system"""
@@ -303,45 +325,69 @@ class OKXDelistMonitor:
                 self.logger.info("ℹ️ No announcements found - ending check")
                 self._found_announcements = False
                 return
-            
-            # Check for recent delist spot announcements (past 24 hours)
+
+            # Cheap filters first: if nothing recent/spot-like exists, skip DB setup entirely.
+            recent_announcements = [ann for ann in announcements if self.is_recent_announcement(ann)]
+            if not recent_announcements:
+                self.logger.info("✅ No new delist spot announcements found")
+                self._found_announcements = False
+                return
+
+            recent_spot_candidates = [
+                ann for ann in recent_announcements
+                if 'title' in ann and 'pTime' in ann and self.is_spot_related_announcement(ann)
+            ]
+            if not recent_spot_candidates:
+                self.logger.info("✅ No new delist spot announcements found")
+                self._found_announcements = False
+                return
+
+            self.ensure_blacklist_manager()
+
             recent_spot_announcements = []
             recent_affected_announcements = []
-            
-            for ann in announcements:
-                if self.is_recent_announcement(ann):
-                    # Generate unique ID (using title and timestamp)
-                    announcement_id = f"{ann['title']}_{ann['pTime']}"
-                    
-                    # Check if it's a new announcement (using database)
-                    if not self.blacklist_manager.is_announcement_processed(announcement_id):
-                        # Check if it's a spot-related announcement
-                        if self.crypto_matcher.is_spot_related(ann):
-                            recent_spot_announcements.append(ann)
-                            
-                            # Also check if it affects configured cryptocurrencies
-                            is_affected, affected_cryptos = self.crypto_matcher.check_announcement_impact(ann)
-                            if is_affected:
-                                # Filter out cryptocurrencies that are already blacklisted
-                                non_blacklisted_cryptos = set()
-                                already_blacklisted = set()
-                                
-                                for crypto in affected_cryptos:
-                                    if self.blacklist_manager.is_blacklisted(crypto):
-                                        already_blacklisted.add(crypto)
-                                    else:
-                                        non_blacklisted_cryptos.add(crypto)
-                                
-                                # Log blacklisted cryptos
-                                if already_blacklisted:
-                                    self.logger.info(f"🚫 Skipping already blacklisted cryptocurrencies: {sorted(already_blacklisted)}")
-                                
-                                # Only process non-blacklisted cryptos
-                                if non_blacklisted_cryptos:
-                                    ann['affected_cryptos'] = non_blacklisted_cryptos
-                                    recent_affected_announcements.append(ann)
-                                else:
-                                    self.logger.info(f"ℹ️ All affected cryptocurrencies are already blacklisted, skipping protection operations")
+            unprocessed_spot_announcements = []
+
+            for ann in recent_spot_candidates:
+                announcement_id = f"{ann['title']}_{ann['pTime']}"
+
+                # Check if it's a new announcement (using database)
+                if not self.blacklist_manager.is_announcement_processed(announcement_id):
+                    unprocessed_spot_announcements.append(ann)
+
+            if not unprocessed_spot_announcements:
+                self.logger.info("✅ No new delist spot announcements found")
+                self._found_announcements = False
+                return
+
+            self.log_config_stats()
+
+            for ann in unprocessed_spot_announcements:
+                recent_spot_announcements.append(ann)
+
+                # Also check if it affects configured cryptocurrencies
+                is_affected, affected_cryptos = self.crypto_matcher.check_announcement_impact(ann)
+                if is_affected:
+                    # Filter out cryptocurrencies that are already blacklisted
+                    non_blacklisted_cryptos = set()
+                    already_blacklisted = set()
+
+                    for crypto in affected_cryptos:
+                        if self.blacklist_manager.is_blacklisted(crypto):
+                            already_blacklisted.add(crypto)
+                        else:
+                            non_blacklisted_cryptos.add(crypto)
+
+                    # Log blacklisted cryptos
+                    if already_blacklisted:
+                        self.logger.info(f"🚫 Skipping already blacklisted cryptocurrencies: {sorted(already_blacklisted)}")
+
+                    # Only process non-blacklisted cryptos
+                    if non_blacklisted_cryptos:
+                        ann['affected_cryptos'] = non_blacklisted_cryptos
+                        recent_affected_announcements.append(ann)
+                    else:
+                        self.logger.info("ℹ️ All affected cryptocurrencies are already blacklisted, skipping protection operations")
             
             # Play alert sound for all new delist spot announcements
             if recent_spot_announcements:
@@ -365,6 +411,11 @@ class OKXDelistMonitor:
         except Exception as e:
             self.logger.error(f"❌ Error during check: {e}")
             self._found_announcements = False
+
+    def is_spot_related_announcement(self, announcement: Dict[str, Any]) -> bool:
+        """Cheap spot-related check that does not require DB-backed matchers."""
+        title = announcement.get('title', '').lower()
+        return 'spot' in title or 'spot trading' in title
     
     def run_monitor(self):
         """Run monitoring (continuous mode)"""
@@ -377,11 +428,7 @@ class OKXDelistMonitor:
         if not all([self.api_key, self.secret_key, self.passphrase]):
             self.logger.error("❌ Environment variables not fully configured, please check .env file")
             return
-        
-        # Display configuration statistics
-        stats = self.config_manager.get_config_stats()
-        self.logger.info(f"📋 Monitoring {stats.get('total_cryptos', 0)} configured cryptocurrencies")
-        
+
         print("\nStarting monitoring... (Press Ctrl+C to stop)")
         
         try:
@@ -405,11 +452,7 @@ class OKXDelistMonitor:
         if not all([self.api_key, self.secret_key, self.passphrase]):
             self.logger.error("❌ Environment variables not fully configured, please check .env file")
             return
-        
-        # Display configuration statistics
-        stats = self.config_manager.get_config_stats()
-        self.logger.info(f"📋 Monitoring {stats.get('total_cryptos', 0)} configured cryptocurrencies")
-        
+
         # Perform a single check
         self.check_for_new_announcements()
         
