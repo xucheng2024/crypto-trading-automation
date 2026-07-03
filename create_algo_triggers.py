@@ -32,6 +32,9 @@ from blacklist_manager import BlacklistManager
 # Set Decimal precision to handle very small prices
 getcontext().prec = 28
 
+MAX_ACTIVE_TRADING_CURRENCIES = 4
+NON_USDT_ASSET_GATE_USD = 1.0
+
 
 
 def setup_logging():
@@ -106,6 +109,48 @@ class OKXAlgoTrigger:
         self.data_cache = {}
         # Instrument metadata cache to enforce exchange precision rules
         self.instrument_rules_cache = {}
+
+    def _safe_float(self, value, default=0.0):
+        """Safely parse float values from API responses."""
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+
+    def _get_significant_non_usdt_assets(self):
+        """Return non-USDT trading account assets above the USD threshold."""
+        account_api = self.okx_client.get_account_api()
+        if not account_api:
+            logger.error("❌ Account API unavailable for active position checks")
+            return None
+
+        try:
+            result = account_api.get_account_balance()
+            if not result or result.get('code') != '0':
+                logger.error(f"❌ Failed to query trading account balances: {result}")
+                return None
+
+            data = result.get('data', [])
+            if not data:
+                logger.info("🔍 Trading account balance returned no data")
+                return []
+
+            details = data[0].get('details', [])
+            significant_assets = []
+
+            for detail in details:
+                ccy = (detail.get('ccy') or '').upper()
+                if not ccy or ccy == 'USDT':
+                    continue
+
+                eq_usd = self._safe_float(detail.get('eqUsd'))
+                if eq_usd > NON_USDT_ASSET_GATE_USD:
+                    significant_assets.append((ccy, eq_usd))
+
+            return significant_assets
+        except Exception as e:
+            logger.error(f"❌ Error checking trading account balances: {e}")
+            return None
     
     @retry(
         stop=stop_after_attempt(3),
@@ -532,6 +577,30 @@ class OKXAlgoTrigger:
             
             crypto_configs = limits_data.get('crypto_configs', {})
             logger.info(f"📋 Found {len(crypto_configs)} crypto pairs in database")
+
+            significant_assets = self._get_significant_non_usdt_assets()
+            if significant_assets is None:
+                logger.error("❌ Unable to verify OKX account holdings; aborting trigger creation")
+                return False
+
+            active_count = len(significant_assets)
+
+            logger.info(
+                f"📊 Active trading instruments: {active_count}/{MAX_ACTIVE_TRADING_CURRENCIES}"
+            )
+            if significant_assets:
+                assets_text = ", ".join(
+                    f"{ccy}:${eq_usd:.4f}" for ccy, eq_usd in significant_assets[:10]
+                )
+                logger.info(
+                    f"📌 Active OKX holdings above ${NON_USDT_ASSET_GATE_USD}: {assets_text}"
+                )
+
+            if active_count >= MAX_ACTIVE_TRADING_CURRENCIES:
+                logger.warning(
+                    f"⚠️  Active trading instruments already at limit (>= {MAX_ACTIVE_TRADING_CURRENCIES}); skip creating new triggers"
+                )
+                return True
             
             # Load blacklisted cryptocurrencies
             blacklisted_cryptos = self.blacklist_manager.get_blacklisted_cryptos()
