@@ -36,6 +36,8 @@ from utils_time import (
     datetime_to_timestamp_ms,
 )
 
+NON_USDT_ASSET_GATE_USD = 1.0
+
 def setup_logging():
     """Setup logging with file rotation"""
     log_filename = get_log_filename('auto_sell_orders')
@@ -74,6 +76,9 @@ class AutoSellOrders:
     def __init__(self):
         """Initialize with environment variables and API connection"""
         self.logger = setup_logging()
+        self.conn = None
+        self.cursor = None
+        self.min_usd_value = 0.01
         
         # Load environment variables
         self.api_key = os.getenv('OKX_API_KEY')
@@ -85,20 +90,11 @@ class AutoSellOrders:
         if not all([self.api_key, self.secret_key, self.passphrase]):
             raise ValueError("Missing required environment variables: OKX_API_KEY, OKX_SECRET_KEY, OKX_PASSPHRASE")
         
-        # Load auto-sell configuration
-        self.min_usd_value = self.load_auto_sell_config()
-        
         # Initialize OKX Client
         self.okx_client = OKXClient(self.logger)
         self.trade_api = self.okx_client.get_trade_api()
-        
-        # Initialize database
-        from lib.database import get_database_connection
-        self.conn = get_database_connection()
-        self.cursor = self.conn.cursor()
-        self.logger.info("✅ Connected to PostgreSQL database")
-        
-        self.logger.info(f"🚀 Auto Sell Orders - {'Demo' if self.testnet else 'Live'} mode | Min USD: ${self.min_usd_value}")
+
+        self.logger.info(f"🚀 Auto Sell Orders - {'Demo' if self.testnet else 'Live'} mode")
 
     def format_price(self, price_str):
         """Format price string using Decimal for consistency"""
@@ -125,6 +121,64 @@ class AutoSellOrders:
         except Exception as e:
             self.logger.warning(f"⚠️  Failed to load auto-sell config from database, using default: ${0.01} - {e}")
             return 0.01
+
+    def ensure_database_initialized(self):
+        """Initialize DB connection and DB-backed config only when processing is needed."""
+        if self.conn and self.cursor:
+            return
+
+        self.min_usd_value = self.load_auto_sell_config()
+
+        from lib.database import get_database_connection
+        self.conn = get_database_connection()
+        self.cursor = self.conn.cursor()
+        self.logger.info("✅ Connected to PostgreSQL database")
+        self.logger.info(f"⚙️  Auto-sell threshold loaded: ${self.min_usd_value}")
+
+    def has_significant_non_usdt_assets(self):
+        """Check trading account for non-USDT assets with meaningful USD value.
+
+        Uses OKX account balance because it returns only non-zero assets and includes
+        per-currency USD valuation (`eqUsd`) in the trading account response.
+        """
+        account_api = self.okx_client.get_account_api()
+        if not account_api:
+            self.logger.warning("⚠️ Account API not initialized, falling back to DB-backed auto-sell flow")
+            return True
+
+        try:
+            result = account_api.get_account_balance()
+            if not result or result.get('code') != '0':
+                self.logger.warning(f"⚠️ Failed to query trading account balances, falling back to DB-backed auto-sell flow: {result}")
+                return True
+
+            data = result.get('data', [])
+            if not data:
+                self.logger.info("🔍 Trading account balance returned no data; skipping DB-backed auto-sell check")
+                return False
+
+            details = data[0].get('details', [])
+            significant_assets = []
+
+            for detail in details:
+                ccy = (detail.get('ccy') or '').upper()
+                if not ccy or ccy == 'USDT':
+                    continue
+
+                eq_usd = self._safe_float(detail.get('eqUsd'))
+                if eq_usd > NON_USDT_ASSET_GATE_USD:
+                    significant_assets.append((ccy, eq_usd))
+
+            if significant_assets:
+                assets_text = ", ".join(f"{ccy}:${eq_usd:.4f}" for ccy, eq_usd in significant_assets[:10])
+                self.logger.info(f"🔍 Found non-USDT assets above ${NON_USDT_ASSET_GATE_USD}: {assets_text}")
+                return True
+
+            self.logger.info(f"🔍 No non-USDT assets above ${NON_USDT_ASSET_GATE_USD}; skipping DB-backed auto-sell check")
+            return False
+        except Exception as e:
+            self.logger.warning(f"⚠️ Error checking trading account balances, falling back to DB-backed auto-sell flow: {e}")
+            return True
 
     def get_orders_ready_to_sell(self):
         """Get orders ready to sell.
@@ -399,6 +453,10 @@ class AutoSellOrders:
 
     def process_sell_orders(self):
         """Process all orders ready to sell"""
+        if not self.has_significant_non_usdt_assets():
+            return
+
+        self.ensure_database_initialized()
         orders = self.get_orders_ready_to_sell()
         
         if not orders:
@@ -489,7 +547,7 @@ class AutoSellOrders:
 
     def close(self):
         """Close database connection"""
-        if hasattr(self, 'conn'):
+        if self.conn:
             self.conn.close()
             self.logger.info("🗄️  Database connection closed")
 
