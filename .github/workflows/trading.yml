@@ -37,21 +37,21 @@ jobs:
         
       - name: Show payload and execution info
         run: |
-          echo "🕐 Workflow started at: $(date -u)"
-          echo "🕐 UTC time: $(date -u +%Y-%m-%d\ %H:%M:%S\ UTC)"
-          echo "🕐 Event type: ${{ github.event_name }}"
+          echo "[time] Workflow started at: $(date -u)"
+          echo "[time] UTC time: $(date -u +%Y-%m-%d\ %H:%M:%S\ UTC)"
+          echo "[time] Event type: ${{ github.event_name }}"
           echo "=========================================="
-          echo "📋 Full payload:"
+          echo "[payload] Full payload:"
           echo '${{ toJson(github.event.client_payload) }}' | jq .
           echo "=========================================="
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "🎯 MANUAL TRIGGER - Scripts: ${{ github.event.inputs.scripts }}"
-            echo "🛡️ Force DB fetch: ${{ github.event.inputs.force_db_fetch }}"
+            echo "[manual] Scripts: ${{ github.event.inputs.scripts }}"
+            echo "[manual] Force DB fetch: ${{ github.event.inputs.force_db_fetch }}"
           elif [ "${{ github.event_name }}" = "repository_dispatch" ]; then
-            echo "🤖 AUTO TRIGGER - Scripts: ${{ join(github.event.client_payload.scripts, ', ') }}"
-            echo "📅 Cron schedule: ${{ github.event.client_payload.cron_schedule }}"
-            echo "⏰ Interval: ${{ github.event.client_payload.interval }}"
-            echo "🛡️ Force DB fetch: ${{ github.event.client_payload.force_db_fetch }}"
+            echo "[auto] Scripts: ${{ join(github.event.client_payload.scripts, ', ') }}"
+            echo "[auto] Cron schedule: ${{ github.event.client_payload.cron_schedule }}"
+            echo "[auto] Interval: ${{ github.event.client_payload.interval }}"
+            echo "[auto] Force DB fetch: ${{ github.event.client_payload.force_db_fetch }}"
           fi
           echo "=========================================="
         
@@ -77,7 +77,7 @@ jobs:
       - name: Install dependencies (optimized)
         run: |
           mkdir -p logs
-          echo "📦 Starting optimized dependency installation..."
+          echo "[deps] Starting optimized dependency installation..."
           
           # Upgrade pip first (usually cached)
           pip install --upgrade pip
@@ -91,7 +91,7 @@ jobs:
             -r requirements.txt \
             2>&1 | tee logs/pip_install.log
           
-          echo "✅ Dependencies installed successfully"
+          echo "[deps] Dependencies installed successfully"
       
       - name: Initialize executed scripts list
         run: |
@@ -99,10 +99,10 @@ jobs:
           
       - name: Verify installation
         run: |
-          echo "🔍 Verifying Python environment..."
+          echo "[verify] Verifying Python environment..."
           python --version
           pip list | grep -E "(requests|python-okx|psycopg2|tenacity|python-dotenv)" || echo "Some packages not found"
-          echo "✅ Environment verification complete"
+          echo "[verify] Environment verification complete"
           
       - name: Select and run scripts
         env:
@@ -134,13 +134,13 @@ jobs:
           run_script() {
             local script_name="$1"
             shift
-            echo "🔄 Running ${script_name}..."
+            echo "[run] Running ${script_name}..."
             if "$@"; then
               echo "${script_name}" >> logs/executed_scripts.txt
               return 0
             fi
 
-            echo "⚠️ ${script_name} failed"
+            echo "[warn] ${script_name} failed"
             echo "${script_name} (failed)" >> logs/executed_scripts.txt
             FAILED_SCRIPTS="${FAILED_SCRIPTS} ${script_name}"
             return 1
@@ -172,7 +172,7 @@ jobs:
                 run_script "create_algo_triggers.py" python create_algo_triggers.py || true
                 ;;
               *)
-                echo "❌ Unknown script: $script"
+                echo "[error] Unknown script: $script"
                 FAILED_SCRIPTS="${FAILED_SCRIPTS} unknown:${script}"
                 ;;
             esac
@@ -186,22 +186,22 @@ jobs:
       - name: Write run summary
         if: always()
         run: |
-          echo "### 📊 Execution Summary" >> "$GITHUB_STEP_SUMMARY"
+          echo "### Execution Summary" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "**Workflow:** ${{ github.workflow }}" >> "$GITHUB_STEP_SUMMARY"
           echo "**Trigger:** ${{ github.event_name }}" >> "$GITHUB_STEP_SUMMARY"
           echo "**Time:** $(date -u)" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "### 🚀 Executed Scripts" >> "$GITHUB_STEP_SUMMARY"
+          echo "### Executed Scripts" >> "$GITHUB_STEP_SUMMARY"
           if [ -s logs/executed_scripts.txt ]; then
-            grep -v "Scripts to execute:" logs/executed_scripts.txt | grep -v "(failed)" | sort -u | sed 's/^/- ✅ /' >> "$GITHUB_STEP_SUMMARY" || true
+            grep -v "Scripts to execute:" logs/executed_scripts.txt | grep -v "(failed)" | sort -u | sed 's/^/- /' >> "$GITHUB_STEP_SUMMARY" || true
             if grep -q "(failed)" logs/executed_scripts.txt; then
               echo "" >> "$GITHUB_STEP_SUMMARY"
-              echo "### ❌ Failed Scripts" >> "$GITHUB_STEP_SUMMARY"
+              echo "### Failed Scripts" >> "$GITHUB_STEP_SUMMARY"
               grep "(failed)" logs/executed_scripts.txt | sort -u | sed 's/^/- /' >> "$GITHUB_STEP_SUMMARY"
             fi
           else
-            echo "- ❌ None" >> "$GITHUB_STEP_SUMMARY"
+            echo "- None" >> "$GITHUB_STEP_SUMMARY"
           fi
           
       - name: Upload logs
