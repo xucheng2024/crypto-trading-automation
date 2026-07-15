@@ -12,6 +12,10 @@ on:
         description: 'Force fetch_filled_orders.py to connect to DB even when OKX recent fills are empty'
         required: false
         default: 'false'
+      verify_daily_close:
+        description: 'Verify at daily close that buy orders from before today (SGT) are sold'
+        required: false
+        default: 'false'
 
   # Cloudflare Worker trigger
   repository_dispatch:
@@ -47,11 +51,13 @@ jobs:
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             echo "[manual] Scripts: ${{ github.event.inputs.scripts }}"
             echo "[manual] Force DB fetch: ${{ github.event.inputs.force_db_fetch }}"
+            echo "[manual] Verify daily close: ${{ github.event.inputs.verify_daily_close }}"
           elif [ "${{ github.event_name }}" = "repository_dispatch" ]; then
             echo "[auto] Scripts: ${{ join(github.event.client_payload.scripts, ', ') }}"
             echo "[auto] Cron schedule: ${{ github.event.client_payload.cron_schedule }}"
             echo "[auto] Interval: ${{ github.event.client_payload.interval }}"
             echo "[auto] Force DB fetch: ${{ github.event.client_payload.force_db_fetch }}"
+            echo "[auto] Verify daily close: ${{ github.event.client_payload.verify_daily_close }}"
           fi
           echo "=========================================="
         
@@ -121,9 +127,11 @@ jobs:
             # Convert comma-separated to space-separated
             SCRIPTS=$(echo "$SCRIPTS_RAW" | tr ',' ' ')
             FORCE_DB_FETCH="${{ github.event.inputs.force_db_fetch }}"
+            VERIFY_DAILY_CLOSE="${{ github.event.inputs.verify_daily_close }}"
           else
             SCRIPTS="${{ join(github.event.client_payload.scripts, ' ') }}"
             FORCE_DB_FETCH="${{ github.event.client_payload.force_db_fetch }}"
+            VERIFY_DAILY_CLOSE="${{ github.event.client_payload.verify_daily_close }}"
           fi
           
           echo "Will run scripts: $SCRIPTS"
@@ -163,7 +171,11 @@ jobs:
                 run_script "fetch_filled_orders.py" python fetch_filled_orders.py $FETCH_ARGS || true
                 ;;
               auto_sell_orders)
-                run_script "auto_sell_orders.py" python auto_sell_orders.py || true
+                AUTO_SELL_ARGS=""
+                if [ "${VERIFY_DAILY_CLOSE}" = "true" ]; then
+                  AUTO_SELL_ARGS="--verify-daily-close"
+                fi
+                run_script "auto_sell_orders.py" python auto_sell_orders.py $AUTO_SELL_ARGS || true
                 ;;
               cancel_pending_triggers)
                 run_script "cancel_pending_triggers.py" python cancel_pending_triggers.py || true

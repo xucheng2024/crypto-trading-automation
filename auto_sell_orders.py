@@ -235,6 +235,70 @@ class AutoSellOrders:
         
         return orders
 
+    def normalize_pending_sell_times(self):
+        """Migrate unsold legacy orders to the 24-hour holding period.
+
+        Existing rows retain their original sell_time during filled-order upserts.
+        Normalize them here only after the effective-position pre-check has
+        passed, so the change takes effect immediately without touching the DB
+        for empty or dust-only accounts.
+        """
+        self.cursor.execute('''
+            UPDATE filled_orders
+            SET sell_time = CAST(CAST(ts AS BIGINT) + %s AS TEXT)
+            WHERE side = 'buy'
+              AND sold_status IS NULL
+              AND ts IS NOT NULL
+              AND ts != ''
+              AND ts ~ '^[0-9]+$'
+              AND sell_time IS DISTINCT FROM CAST(CAST(ts AS BIGINT) + %s AS TEXT)
+        ''', (24 * 60 * 60 * 1000, 24 * 60 * 60 * 1000))
+        updated_count = self.cursor.rowcount
+        if updated_count:
+            self.conn.commit()
+            self.logger.info(f"🕐 Updated {updated_count} unsold buy order(s) to a 24-hour sell time")
+        return updated_count
+
+    def log_unsettled_orders_before_today(self):
+        """Log any buy orders from before today (SGT) that remain unsold.
+
+        This is a daily-close safety check. It runs only after the OKX account
+        pre-check has confirmed an effective non-USDT position, so empty and
+        dust-only accounts never cause a database query.
+        """
+        today_start_ts = get_today_start_sgt_timestamp_ms()
+        self.cursor.execute('''
+            SELECT instId, tradeId, ts, sell_time, sold_status
+            FROM filled_orders
+            WHERE side = 'buy'
+              AND (sold_status IS NULL OR sold_status != 'SOLD')
+              AND ts IS NOT NULL
+              AND ts != ''
+              AND ts ~ '^[0-9]+$'
+              AND CAST(ts AS BIGINT) < %s
+            ORDER BY CAST(ts AS BIGINT) ASC
+        ''', (today_start_ts,))
+        orders = self.cursor.fetchall()
+
+        if orders:
+            self.logger.warning(
+                f"⚠️ Daily-close check: {len(orders)} buy order(s) from before today remain unsold"
+            )
+            for inst_id, trade_id, ts, sell_time, sold_status in orders:
+                buy_time = format_datetime_utc(timestamp_to_utc_datetime_naive(int(ts)))
+                planned_sell_time = (
+                    format_datetime_utc(timestamp_to_utc_datetime_naive(int(sell_time)))
+                    if sell_time else 'N/A'
+                )
+                self.logger.warning(
+                    f"   📋 {inst_id} | tradeId: {trade_id} | Status: {sold_status or 'PENDING'} | "
+                    f"Buy: {buy_time} | Plan Sell: {planned_sell_time}"
+                )
+        else:
+            self.logger.info("✅ Daily-close check: all buy orders from before today are sold")
+
+        return orders
+
     def mark_trade_processing(self, trade_id):
         """Mark trade as PROCESSING to avoid duplicate processing"""
         try:
@@ -451,12 +515,13 @@ class AutoSellOrders:
 
 
 
-    def process_sell_orders(self):
+    def process_sell_orders(self, verify_daily_close=False):
         """Process all orders ready to sell"""
         if not self.has_significant_non_usdt_assets():
             return
 
         self.ensure_database_initialized()
+        self.normalize_pending_sell_times()
         orders = self.get_orders_ready_to_sell()
         
         if not orders:
@@ -519,6 +584,9 @@ class AutoSellOrders:
             self.logger.info(f"📊 Summary: {successful_sells} sold, {failed_sells} failed")
             self.logger.info("─" * 50)
 
+        if verify_daily_close:
+            self.log_unsettled_orders_before_today()
+
     def run_continuous_monitoring(self, interval_minutes=15):
         """Run continuous monitoring with specified interval"""
         self.logger.info(f"🔄 Continuous monitoring - check every {interval_minutes}min")
@@ -557,6 +625,7 @@ def main():
     parser = argparse.ArgumentParser(description='Auto sell orders when sell_time is reached')
     parser.add_argument('--continuous', action='store_true', help='Run continuously (default: run once and exit)')
     parser.add_argument('--interval', type=int, default=15, help='Monitoring interval in minutes (default: 15)')
+    parser.add_argument('--verify-daily-close', action='store_true', help='Check that buy orders from before today (SGT) are sold')
     args = parser.parse_args()
     
     start_time = datetime.now()
@@ -574,7 +643,7 @@ def main():
         if args.continuous:
             auto_seller.run_continuous_monitoring(interval_minutes=args.interval)
         else:
-            auto_seller.process_sell_orders()
+            auto_seller.process_sell_orders(verify_daily_close=args.verify_daily_close)
             logger.info("🎯 Single run completed")
         
         logger.info("🎉 Process completed successfully")

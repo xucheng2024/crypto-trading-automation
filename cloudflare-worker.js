@@ -80,6 +80,7 @@ export default {
       }
 
       const forceDbFetch = cron === "10 16 * * *";
+      const verifyDailyClose = cron === "55 15 * * *";
       
       // 触发 GitHub repository_dispatch
       const githubOwner = env.GITHUB_OWNER || DEFAULT_GITHUB_OWNER;
@@ -99,6 +100,7 @@ export default {
             cron_schedule: cron,
             scripts: scripts,
             force_db_fetch: forceDbFetch,
+            verify_daily_close: verifyDailyClose,
             interval: event.cron === "1,6,11,16,21,26,31,36,41,46,51,56 * * * *" ? '5min' : 
                       event.cron === "0,15,30,45 * * * *" ? '15min' : 
                       (event.cron === "55 15 * * *" || event.cron === "5 16 * * *" || event.cron === "10 16 * * *") ? 'daily' : 'other'
