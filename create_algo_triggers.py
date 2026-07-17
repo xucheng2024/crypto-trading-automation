@@ -563,6 +563,14 @@ class OKXAlgoTrigger:
             logger.error(f"❌ Error processing {inst_id}: {e}")
             return (inst_id, str(e), False)
 
+    @staticmethod
+    def _is_expected_skip_reason(reason):
+        """Return whether a pair was intentionally excluded by strategy rules."""
+        return bool(reason) and (
+            reason.startswith("Blacklisted:")
+            or reason == "Skipped due to high yesterday volatility"
+        )
+
     def process_limits_from_database(self):
         """Process limits from database and create algo trigger orders"""
         try:
@@ -616,7 +624,7 @@ class OKXAlgoTrigger:
             success_count = 0
             total_count = len(crypto_configs)
             failed_pairs = []
-            skipped_blacklist = 0
+            skipped_pairs = []
             
             # Sequential (max_workers=1) to avoid connection overload / "Server disconnected"
             with ThreadPoolExecutor(max_workers=1) as executor:
@@ -634,8 +642,8 @@ class OKXAlgoTrigger:
                         if success:
                             success_count += 1
                         else:
-                            if reason and "Blacklisted" in reason:
-                                skipped_blacklist += 1
+                            if self._is_expected_skip_reason(reason):
+                                skipped_pairs.append((result_inst_id, reason))
                             else:
                                 failed_pairs.append((result_inst_id, reason))
                     except Exception as e:
@@ -645,8 +653,10 @@ class OKXAlgoTrigger:
             logger.info("\n" + "=" * 60)
             logger.info(f"📊 Summary: {success_count}/{total_count} orders created successfully")
             
-            if skipped_blacklist > 0:
-                logger.info(f"🚫 Skipped due to blacklist: {skipped_blacklist}")
+            if skipped_pairs:
+                logger.info(f"⏭️  Strategy-skipped pairs: {len(skipped_pairs)}")
+                for pair, reason in skipped_pairs:
+                    logger.info(f"   {pair}: {reason}")
             
             if failed_pairs:
                 logger.warning(f"⚠️  Failed pairs: {len(failed_pairs)}")

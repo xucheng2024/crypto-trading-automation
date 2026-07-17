@@ -5,6 +5,7 @@ from unittest.mock import patch
 from auto_sell_orders import AutoSellOrders
 from cancel_pending_limits import OKXLimitOrderManager
 from cancel_pending_triggers import OKXOrderManager
+from create_algo_triggers import OKXAlgoTrigger
 from fetch_filled_orders import OKXFilledOrdersFetcher
 from okx_client import OKXClient, get_order_operation_error
 from monitor_delist import OKXDelistMonitor
@@ -236,6 +237,11 @@ class OrderSafetyTests(unittest.TestCase):
         })()
         with self.assertRaisesRegex(RuntimeError, 'pending trigger-orders API error'):
             trigger_manager.get_pending_algo_orders.__wrapped__(trigger_manager)
+
+    def test_strategy_skips_do_not_count_as_trigger_creation_failures(self):
+        self.assertTrue(OKXAlgoTrigger._is_expected_skip_reason("Skipped due to high yesterday volatility"))
+        self.assertTrue(OKXAlgoTrigger._is_expected_skip_reason("Blacklisted: delisted"))
+        self.assertFalse(OKXAlgoTrigger._is_expected_skip_reason("Failed to create order"))
 
 
 if __name__ == '__main__':
