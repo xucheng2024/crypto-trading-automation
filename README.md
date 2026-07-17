@@ -88,10 +88,10 @@ python monitor_delist.py
 
 ### Cloudflare Workers Cron Schedule ⭐
 ```yaml
-# Every 5 minutes (staggered to avoid overlap) - Monitoring and protection
+# Every 5 minutes (staggered to avoid overlap) - Monitoring, fill synchronization, and trigger protection
 - cron: '1,6,11,16,21,26,31,36,41,46,51,56 * * * *'
 
-# Every 15 minutes - Fetch filled orders + Auto sell orders
+# Every 15 minutes - Auto sell orders
 - cron: '0,15,30,45 * * * *'
 
 # Daily at 15:55 UTC (23:55 SGT) - Cancel pending trigger orders
@@ -102,8 +102,8 @@ python monitor_delist.py
 ```
 
 ### Execution Strategy
-- **5-Minute Tasks (Staggered)**: `monitor_delist.py` + `cancel_pending_limits.py`
-- **15-Minute Tasks**: `fetch_filled_orders.py` + `auto_sell_orders.py`
+- **5-Minute Tasks (Staggered)**: `monitor_delist.py` + `cancel_pending_limits.py` + `fetch_filled_orders.py`
+- **15-Minute Tasks**: `auto_sell_orders.py`
 - **Daily Tasks**: `cancel_pending_triggers.py` (15:55 UTC = 23:55 SGT) + `create_algo_triggers.py` (16:05 UTC = 00:05 SGT)
 
 ### Automation Scripts

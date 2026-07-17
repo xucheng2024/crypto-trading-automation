@@ -1,6 +1,6 @@
 /**
  * Cloudflare Worker for triggering GitHub Actions
- * Cron triggers: 每5分钟和每15分钟执行不同脚本组合
+ * Cron triggers: every 5 minutes for monitoring/fill protection and every 15 minutes for auto-sells
  */
 
 // GitHub 配置 - 默认值
@@ -53,8 +53,8 @@ export default {
     try {
       // 使用Map精确分流，避免时间判断错误和隐性空转
       const cronMap = new Map([
-        ["1,6,11,16,21,26,31,36,41,46,51,56 * * * *", ['monitor_delist', 'cancel_pending_limits']],
-        ["0,15,30,45 * * * *", ['fetch_filled_orders', 'auto_sell_orders']],
+        ["1,6,11,16,21,26,31,36,41,46,51,56 * * * *", ['monitor_delist', 'cancel_pending_limits', 'fetch_filled_orders']],
+        ["0,15,30,45 * * * *", ['auto_sell_orders']],
         ["55 15 * * *", ['auto_sell_orders', 'cancel_pending_triggers']], // 15:55 UTC = 23:55 SGT
         ["5 16 * * *", ['create_algo_triggers']],     // 16:05 UTC = 00:05 SGT
         ["10 16 * * *", ['fetch_filled_orders']],     // 16:10 UTC = 00:10 SGT daily DB fallback
@@ -68,11 +68,11 @@ export default {
       
       // 根据脚本类型输出日志
       if (scripts.includes('monitor_delist')) {
-        console.log('📅 5-minute interval (staggered): monitor_delist + cancel_pending_limits');
+        console.log('📅 5-minute interval (staggered): monitor_delist + cancel_pending_limits + fetch_filled_orders');
       } else if (cron === "10 16 * * *") {
         console.log('🛡️ Daily fallback (UTC 16:10 = SGT 00:10): force DB-backed fetch_filled_orders');
       } else if (scripts.includes('fetch_filled_orders')) {
-        console.log('📅 15-minute interval: fetch_filled_orders + auto_sell_orders (retry overdue sells)');
+        console.log('📅 fetch_filled_orders trigger protection check');
       } else if (scripts.includes('auto_sell_orders')) {
         console.log('🌙 Nightly (UTC 15:55 = SGT 23:55): auto_sell_orders + cancel_pending_triggers');
       } else if (scripts.includes('create_algo_triggers')) {
@@ -145,8 +145,8 @@ export default {
       <hr>
       <h2>📅 Cron Schedule:</h2>
       <ul>
-        <li><strong>每5分钟 (1,6,11,16,21,26,31,36,41,46,51,56 * * * *)</strong>: monitor_delist.py + cancel_pending_limits.py</li>
-        <li><strong>每15分钟 (0,15,30,45 * * * *)</strong>: fetch_filled_orders.py + auto_sell_orders.py</li>
+        <li><strong>每5分钟 (1,6,11,16,21,26,31,36,41,46,51,56 * * * *)</strong>: monitor_delist.py + cancel_pending_limits.py + fetch_filled_orders.py</li>
+        <li><strong>每15分钟 (0,15,30,45 * * * *)</strong>: auto_sell_orders.py</li>
         <li><strong>每天15:55 UTC = 23:55 SGT (55 15 * * *)</strong>: auto_sell_orders.py + cancel_pending_triggers.py</li>
         <li><strong>每天16:05 UTC = 00:05 SGT (5 16 * * *)</strong>: create_algo_triggers.py</li>
         <li><strong>每天16:10 UTC = 00:10 SGT (10 16 * * *)</strong>: fetch_filled_orders.py (force DB fallback)</li>
@@ -154,8 +154,8 @@ export default {
       <hr>
       <h2>🔧 执行逻辑:</h2>
       <ul>
-        <li>5分钟间隔: 监控和保护 + 取消限价单</li>
-        <li>15分钟间隔: 获取已完成订单 + 重试卖出到期订单</li>
+        <li>5分钟间隔: 监控、成交同步、trigger 保护和取消限价单</li>
+        <li>15分钟间隔: 重试卖出到期订单</li>
         <li>夜间任务: 23:55 SGT 强制执行自动卖出 + 取消待处理触发器</li>
         <li>早晨任务: 创建算法触发器</li>
         <li>每日托底: 00:10 SGT 强制执行一次 DB-backed fetch，修正空闲期漏同步风险</li>

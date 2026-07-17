@@ -714,15 +714,14 @@ def main():
         else:
             precheck_result = fetcher.has_recent_buy_fills(hours=args.precheck_hours)
             if precheck_result is False:
-                logger.info("💤 No recent OKX buy fills detected, skipping Neon connection")
-            else:
-                should_run_db_flow = True
+                logger.info("💤 No recent OKX buy fills detected; continuing with trigger protection check")
+            should_run_db_flow = True
 
         if should_run_db_flow:
             # Fetch and save filled trades
             fetcher.fetch_and_save_filled_trades(
                 minutes=args.minutes,
-                run_protection_check_on_empty=args.force_db,
+                run_protection_check_on_empty=True,
             )
         
         logger.info("✅ Process completed")

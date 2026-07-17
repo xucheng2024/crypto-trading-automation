@@ -15,9 +15,9 @@ preview_id = "6a50d25e1cb9432e85c19d32f043e91a"
 
 [triggers]
 crons = [
-  # 每5分钟执行: monitor_delist + cancel_pending_limits (错开整点，避免与15分钟冲突)
+  # 每5分钟执行: monitor_delist + cancel_pending_limits + fetch_filled_orders (错开整点，避免与15分钟冲突)
   "1,6,11,16,21,26,31,36,41,46,51,56 * * * *",
-  # 每15分钟执行: fetch_filled_orders + auto_sell_orders (整点)
+  # 每15分钟执行: auto_sell_orders (整点)
   "0,15,30,45 * * * *",
   # 每天15:55 UTC = 23:55 SGT - 取消待处理触发器
   "55 15 * * *",

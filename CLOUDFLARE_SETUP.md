@@ -61,9 +61,9 @@ wrangler deploy --env staging
 ```toml
 [triggers]
 crons = [
-  # 每5分钟执行: monitor_delist + cancel_pending_limits
+  # 每5分钟执行: monitor_delist + cancel_pending_limits + fetch_filled_orders
   "*/5 * * * *",
-  # 每15分钟执行: fetch_filled_orders + auto_sell_orders
+  # 每15分钟执行: auto_sell_orders
   "*/15 * * * *",
   # 每天23:55 - 取消待处理触发器
   "55 23 * * *",
@@ -76,15 +76,15 @@ crons = [
 
 | 频率 | 时间 | 脚本组合 | 说明 |
 |------|------|----------|------|
-| **每5分钟** | 00, 05, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55分 | `monitor_delist.py` + `cancel_pending_limits.py` | 实时监控和保护 |
-| **每15分钟** | 00, 15, 30, 45分 | `fetch_filled_orders.py` + `auto_sell_orders.py` | 订单管理和自动卖出 |
+| **每5分钟** | 01, 06, 11, 16, 21, 26, 31, 36, 41, 46, 51, 56分 | `monitor_delist.py` + `cancel_pending_limits.py` + `fetch_filled_orders.py` | 实时监控、成交同步和 trigger 保护 |
+| **每15分钟** | 00, 15, 30, 45分 | `auto_sell_orders.py` | 自动卖出 |
 | **每天夜间** | 23:55 | `cancel_pending_triggers.py` | 取消待处理触发器 |
 | **每天早晨** | 00:05 | `create_algo_triggers.py` | 创建算法触发器 |
 
 ### 智能分组逻辑
 
-- **5分钟间隔**: 执行监控和保护相关脚本
-- **15分钟间隔**: 执行订单管理和自动卖出脚本
+- **5分钟间隔**: 执行监控、成交同步和 trigger 保护相关脚本
+- **15分钟间隔**: 执行自动卖出脚本
 - **夜间任务**: 系统维护和清理
 - **早晨任务**: 系统初始化和重建
 
