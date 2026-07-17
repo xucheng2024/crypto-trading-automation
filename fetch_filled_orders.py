@@ -49,7 +49,7 @@ except ImportError:
         pass
     load_dotenv()
 
-from okx_client import OKXClient
+from okx_client import OKXClient, get_order_operation_error
 
 # Configure logging with rotation
 def setup_logging():
@@ -165,17 +165,17 @@ class OKXFilledOrdersFetcher:
         """Run trigger protection from OKX balances without opening the database."""
         account_api = self.okx_client.get_account_api()
         if not account_api:
-            logger.warning("⚠️ Account API unavailable; skip account-only trigger protection")
-            return False
+            raise RuntimeError("Account API unavailable; cannot verify trigger protection")
 
         try:
             result = account_api.get_account_balance()
             if not result or result.get('code') != '0':
-                logger.warning(f"⚠️ Unable to query OKX balances; skip account-only trigger protection: {result}")
-                return False
+                raise RuntimeError(f"Unable to query OKX balances: {result}")
 
             data = result.get('data', [])
-            details = data[0].get('details', []) if data else []
+            if not data or not isinstance(data[0].get('details'), list):
+                raise RuntimeError("OKX balance response contained no valid account details")
+            details = data[0]['details']
             active_assets = []
             for detail in details:
                 ccy = (detail.get('ccy') or '').upper()
@@ -198,14 +198,16 @@ class OKXFilledOrdersFetcher:
                     f"⚠️ {active_count} active OKX positions (>= {MAX_ACTIVE_TRADING_CURRENCIES}); "
                     f"cancelling all triggers | {assets_text}"
                 )
-                return self.cancel_all_trigger_orders()
+                if not self.cancel_all_trigger_orders():
+                    raise RuntimeError("Failed to cancel trigger orders at position capacity")
+                return True
 
             logger.info("✅ Account-only trigger protection: capacity remains available")
             return True
         except Exception as e:
             logger.error(f"❌ Error in account-only trigger protection: {e}")
             logger.debug(f"Traceback: {traceback.format_exc()}")
-            return False
+            raise
 
 
 
@@ -253,8 +255,7 @@ class OKXFilledOrdersFetcher:
             result = self.trade_api.get_fills(**params)
             
             if not result:
-                logger.warning("⚠️  Empty response from API")
-                return []
+                raise RuntimeError("Empty response from OKX filled-trades API")
             
             # Log the full API response for debugging
             logger.debug(f"🔍 Full API response: {result}")
@@ -280,7 +281,7 @@ class OKXFilledOrdersFetcher:
                 error_msg = result.get('msg', 'Unknown error')
                 logger.error(f"❌ API Error getting filled orders: {error_msg}")
                 logger.debug(f"Full API response: {result}")
-                return []
+                raise RuntimeError(f"OKX filled-trades API error: {error_msg}")
                 
         except Exception as e:
             logger.error(f"❌ Exception getting filled trades: {e}")
@@ -612,13 +613,13 @@ class OKXFilledOrdersFetcher:
             
             result = self.trade_api.cancel_algo_order(algo_orders)
             
-            if result.get('code') == '0':
+            error_msg = get_order_operation_error(result, require_data=True)
+            if not error_msg:
                 order_ids = [order['algoId'] for order in orders_batch]
                 inst_ids = [order['instId'] for order in orders_batch]
                 logger.info(f"✅ Cancelled {len(orders_batch)} trigger orders | Instruments: {', '.join(inst_ids)}")
                 return True
             else:
-                error_msg = result.get('msg', 'Unknown error')
                 logger.error(f"❌ Failed to cancel batch: {error_msg}")
                 return False
                 
@@ -725,6 +726,7 @@ class OKXFilledOrdersFetcher:
         except Exception as e:
             logger.error(f"❌ Error checking trading orders: {e}")
             logger.debug(f"Traceback: {traceback.format_exc()}")
+            raise
 
 
     def close(self):
@@ -764,7 +766,8 @@ def main():
             precheck_result = fetcher.has_recent_buy_fills(hours=args.precheck_hours)
             if precheck_result is False:
                 logger.info("💤 No recent OKX buy fills detected; running account-only trigger protection")
-                fetcher.check_and_cancel_triggers_by_account_balance()
+                if not fetcher.check_and_cancel_triggers_by_account_balance():
+                    raise RuntimeError("Account-only trigger protection did not complete")
             else:
                 should_run_db_flow = True
 

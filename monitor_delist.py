@@ -73,7 +73,7 @@ class OKXDelistMonitor:
         if self.crypto_matcher is None:
             self.crypto_matcher = CryptoMatcher(self.config_manager, self.logger)
         if self.protection_manager is None:
-            self.protection_manager = ProtectionManager(self.config_manager, logger=self.logger)
+            self.protection_manager = ProtectionManager(logger=self.logger)
         if self.blacklist_manager is None:
             self.blacklist_manager = BlacklistManager(logger=self.logger)
 
@@ -179,7 +179,10 @@ class OKXDelistMonitor:
                             return []
                     else:
                         self.logger.error(f"❌ OKX API error: {data}")
-                        return []
+                        raise RuntimeError(
+                            f"OKX announcements API returned code {data.get('code')}: "
+                            f"{data.get('msg', 'unknown error')}"
+                        )
                 elif response.status_code == 429:
                     # Rate limit hit - exponential backoff
                     delay = base_delay * (2 ** attempt)
@@ -189,10 +192,12 @@ class OKXDelistMonitor:
                         continue
                     else:
                         self.logger.error(f"❌ Rate limit exceeded after {max_retries} attempts")
-                        return []
+                        raise RuntimeError("OKX announcements API rate limit exceeded")
                 else:
                     self.logger.error(f"❌ Request failed: {response.status_code}")
-                    return []
+                    raise RuntimeError(
+                        f"OKX announcements API request failed with HTTP {response.status_code}"
+                    )
                     
             except Exception as e:
                 self.logger.error(f"❌ Fetch failed (attempt {attempt + 1}): {e}")
@@ -200,7 +205,7 @@ class OKXDelistMonitor:
                     time.sleep(base_delay)
                     continue
                 else:
-                    return []
+                    raise RuntimeError("Unable to fetch OKX delist announcements") from e
         
         return []
     
@@ -237,19 +242,14 @@ class OKXDelistMonitor:
         # 检查是否已经处理过这个公告
         if is_action_processed('delist_protection', announcement_id=announcement_id):
             self.logger.info(f"⚠️ Delist announcement already processed: {announcement_id}")
-            return
-        
-        # 标记为已处理
-        mark_action_processed('delist_protection', announcement_id=announcement_id)
+            return True
         
         # Execute protection operations
         self.logger.warning(f"🚨 Delist announcement affecting configured cryptocurrencies detected: {announcement['title']}")
         self.logger.warning(f"🎯 Affected Cryptocurrencies: {sorted(affected_cryptos)}")
         
-        results = self.protection_manager.execute_full_protection(affected_cryptos)
-        self.protection_manager.print_protection_summary(results)
-        
-        # Add affected cryptocurrencies to blacklist
+        # Blacklist first so later trading jobs cannot open a new position in a
+        # delisted asset while cancellation/selling is retried.
         if affected_cryptos:
             reason = f"Delisted due to OKX announcement: {announcement['title']}"
             notes = f"Announcement URL: {announcement['url']}, Timestamp: {announcement['pTime']}"
@@ -261,15 +261,25 @@ class OKXDelistMonitor:
                 notes=notes
             )
             
-            if added_count > 0:
+            if added_count == len(affected_cryptos):
                 print(f"\n🚫 Added {added_count} affected cryptocurrencies to blacklist")
                 self.logger.info(f"🚫 Added {added_count} affected cryptocurrencies to blacklist")
             else:
                 print("\n⚠️ Failed to add affected cryptocurrencies to blacklist")
                 self.logger.warning("⚠️ Failed to add affected cryptocurrencies to blacklist")
+                return False
+
+        results = self.protection_manager.execute_full_protection(affected_cryptos)
+        self.protection_manager.print_protection_summary(results)
+
+        if results.get('status') != 'completed':
+            self.logger.error(
+                "❌ Delist protection was incomplete; announcement remains unprocessed for retry: %s",
+                results.get('error', results),
+            )
+            return False
         
-        # Mark announcement as processed
-        self.blacklist_manager.mark_announcement_processed(
+        if not self.blacklist_manager.mark_announcement_processed(
             announcement_id=announcement_id,
             title=announcement['title'],
             url=announcement['url'],
@@ -277,7 +287,11 @@ class OKXDelistMonitor:
             affected_cryptos=affected_cryptos,
             protection_executed=True,
             notes=f"Protection executed for {len(affected_cryptos)} cryptocurrencies"
-        )
+        ):
+            self.logger.error("❌ Protection completed but announcement state was not persisted; retry required")
+            return False
+        mark_action_processed('delist_protection', announcement_id=announcement_id)
+        return True
         
         # No need to recreate all algo triggers: we only cancelled affected inst_ids; other triggers stay.
     
@@ -368,26 +382,11 @@ class OKXDelistMonitor:
                 # Also check if it affects configured cryptocurrencies
                 is_affected, affected_cryptos = self.crypto_matcher.check_announcement_impact(ann)
                 if is_affected:
-                    # Filter out cryptocurrencies that are already blacklisted
-                    non_blacklisted_cryptos = set()
-                    already_blacklisted = set()
-
-                    for crypto in affected_cryptos:
-                        if self.blacklist_manager.is_blacklisted(crypto):
-                            already_blacklisted.add(crypto)
-                        else:
-                            non_blacklisted_cryptos.add(crypto)
-
-                    # Log blacklisted cryptos
-                    if already_blacklisted:
-                        self.logger.info(f"🚫 Skipping already blacklisted cryptocurrencies: {sorted(already_blacklisted)}")
-
-                    # Only process non-blacklisted cryptos
-                    if non_blacklisted_cryptos:
-                        ann['affected_cryptos'] = non_blacklisted_cryptos
-                        recent_affected_announcements.append(ann)
-                    else:
-                        self.logger.info("ℹ️ All affected cryptocurrencies are already blacklisted, skipping protection operations")
+                    # A prior failed protection run may already have blacklisted
+                    # the asset.  It must still be cancelled/sold until this
+                    # announcement is durably marked processed.
+                    ann['affected_cryptos'] = affected_cryptos
+                    recent_affected_announcements.append(ann)
             
             # Play alert sound for all new delist spot announcements
             if recent_spot_announcements:
@@ -399,7 +398,8 @@ class OKXDelistMonitor:
                 if recent_affected_announcements:
                     self.logger.warning(f"🎯 Among them {len(recent_affected_announcements)} affect configured cryptocurrencies!")
                     for ann in recent_affected_announcements:
-                        self.send_protection_alert(ann, ann['affected_cryptos'])
+                        if not self.send_protection_alert(ann, ann['affected_cryptos']):
+                            raise RuntimeError(f"Delist protection incomplete for {ann['title']}")
                 else:
                     self.logger.info("✅ These spot announcements do not affect your configured cryptocurrencies")
                     for ann in recent_spot_announcements:
@@ -411,6 +411,7 @@ class OKXDelistMonitor:
         except Exception as e:
             self.logger.error(f"❌ Error during check: {e}")
             self._found_announcements = False
+            raise
 
     def is_spot_related_announcement(self, announcement: Dict[str, Any]) -> bool:
         """Cheap spot-related check that does not require DB-backed matchers."""
@@ -427,7 +428,7 @@ class OKXDelistMonitor:
         
         if not all([self.api_key, self.secret_key, self.passphrase]):
             self.logger.error("❌ Environment variables not fully configured, please check .env file")
-            return
+            raise RuntimeError("OKX credentials are not fully configured")
 
         print("\nStarting monitoring... (Press Ctrl+C to stop)")
         
@@ -451,7 +452,7 @@ class OKXDelistMonitor:
         
         if not all([self.api_key, self.secret_key, self.passphrase]):
             self.logger.error("❌ Environment variables not fully configured, please check .env file")
-            return
+            raise RuntimeError("OKX credentials are not fully configured")
 
         # Perform a single check
         self.check_for_new_announcements()

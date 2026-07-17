@@ -27,7 +27,7 @@ run-name: |
 
 # Concurrency control
 concurrency:
-  group: "trading-${{ github.event.client_payload.scripts || github.event.inputs.scripts || 'default' }}"
+  group: "trading-operations"
   cancel-in-progress: false
 
 jobs:

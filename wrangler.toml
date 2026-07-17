@@ -13,6 +13,14 @@ binding = "DEDUP_KV"
 id = "6a50d25e1cb9432e85c19d32f043e91a"
 preview_id = "6a50d25e1cb9432e85c19d32f043e91a"
 
+[[durable_objects.bindings]]
+name = "CRON_DEDUP"
+class_name = "CronDeduplicator"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["CronDeduplicator"]
+
 [triggers]
 crons = [
   # 每5分钟执行: monitor_delist + cancel_pending_limits + fetch_filled_orders (错开整点，避免与15分钟冲突)
@@ -32,3 +40,4 @@ crons = [
 # GITHUB_OWNER = "your_github_username"  
 # GITHUB_REPO = "your_repo_name"
 # KV_NAMESPACE_ID = "your_kv_namespace_id_here"
+# MANUAL_TRIGGER_TOKEN = "a-long-random-secret-for-authorized-manual-runs"

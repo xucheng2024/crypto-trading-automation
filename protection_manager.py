@@ -80,7 +80,7 @@ class ProtectionManager:
     def handle_affected_balances(self, affected_cryptos: Set[str]) -> Tuple[int, int]:
         """Handle affected balances, return (successful sells, total sells)"""
         if not self.okx_client.is_available() or not affected_cryptos:
-            return 0, 0
+            raise RuntimeError("OKX client is unavailable; cannot verify affected balances")
         
         # Check affected balances
         affected_balances = self.okx_client.get_affected_balances(affected_cryptos)
@@ -128,7 +128,17 @@ class ProtectionManager:
             successful_sells, total_sells = self.handle_affected_balances(affected_cryptos)
             results['sell_results'] = {'successful': successful_sells, 'total': total_sells}
             
-            self.logger.info("🎉 Complete protection workflow executed")
+            if not results['cancellation_success']:
+                results['status'] = 'failed'
+                results['error'] = 'failed to cancel all affected pending orders'
+            elif successful_sells != total_sells:
+                results['status'] = 'failed'
+                results['error'] = f'only sold {successful_sells}/{total_sells} affected balances'
+
+            if results['status'] == 'completed':
+                self.logger.info("🎉 Complete protection workflow executed")
+            else:
+                self.logger.error(f"❌ Protection workflow incomplete: {results['error']}")
             
         except Exception as e:
             self.logger.error(f"❌ Protection workflow failed: {e}")

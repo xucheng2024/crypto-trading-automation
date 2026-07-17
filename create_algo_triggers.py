@@ -26,7 +26,7 @@ except ImportError:
         pass
     load_dotenv()
 
-from okx_client import OKXClient
+from okx_client import OKXClient, get_order_operation_error
 from blacklist_manager import BlacklistManager
 
 # Set Decimal precision to handle very small prices
@@ -402,12 +402,12 @@ class OKXAlgoTrigger:
                 tgtCcy="base_ccy"
             )
             
-            if result.get('code') == '0':
+            error_msg = get_order_operation_error(result, require_data=True)
+            if not error_msg:
                 order_id = result.get('data', [{}])[0].get('ordId', 'N/A')
                 logger.info(f"✅ {inst_id} {strategy_prefix}limit buy order placed - Order ID: {order_id}")
                 return True
             else:
-                error_msg = result.get('msg', 'Unknown error')
                 logger.error(f"❌ {inst_id} {strategy_prefix}limit buy failed: {error_msg}")
                 return False
         except Exception as e:
@@ -471,12 +471,12 @@ class OKXAlgoTrigger:
                 orderPx=adjusted_price_str
             )
             
-            if result.get('code') == '0':
-                order_id = result.get('data', [{}])[0].get('ordId', 'N/A')
-                logger.info(f"✅ {inst_id} {strategy_prefix}trigger order created successfully - Order ID: {order_id}")
+            error_msg = get_order_operation_error(result, require_data=True)
+            if not error_msg:
+                algo_id = result.get('data', [{}])[0].get('algoId', 'N/A')
+                logger.info(f"✅ {inst_id} {strategy_prefix}trigger order created successfully - Algo ID: {algo_id}")
                 return True
             else:
-                error_msg = result.get('msg', 'Unknown error')
                 logger.error(f"❌ {inst_id} {strategy_prefix}trigger order failed: {error_msg}")
                 return False
                 

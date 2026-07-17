@@ -6,6 +6,7 @@ Responsible for interacting with OKX API, including balance queries and trading 
 
 import os
 import logging
+import time
 from typing import Dict, Any, Optional, Tuple
 
 # Initialize variables
@@ -16,6 +17,31 @@ Trade = None
 MarketData = None
 PublicData = None
 Account = None
+
+
+def get_order_operation_error(result, require_data: bool = False) -> Optional[str]:
+    """Return an OKX order-operation error, including per-order failures."""
+    if not result:
+        return "empty response"
+    if result.get('code') != '0':
+        return result.get('msg', 'unknown API error')
+
+    data = result.get('data')
+    if require_data and (not isinstance(data, list) or not data):
+        return "successful response contained no order results"
+    if not isinstance(data, list):
+        return "invalid order results in API response"
+
+    failed_items = [
+        item for item in data
+        if item.get('sCode') not in (None, '', '0', 0)
+    ]
+    if failed_items:
+        return '; '.join(
+            f"{item.get('sCode')}: {item.get('sMsg', 'unknown order error')}"
+            for item in failed_items
+        )
+    return None
 
 # Try to import OKX SDK
 try:
@@ -215,13 +241,12 @@ class OKXClient:
         return self.market_api is not None
     
     def get_affected_balances(self, affected_cryptos: set) -> Dict[str, Dict[str, float]]:
-        """Check balance of affected cryptocurrencies (trading account)"""
+        """Return sellable affected balances, failing closed on uncertain state."""
         if not affected_cryptos:
             return {}
         
         if not self.account_api:
-            self.logger.warning("⚠️ Account API not initialized, cannot check trading account balance")
-            return {}
+            raise RuntimeError("Account API not initialized; cannot verify affected balances")
         
         self.logger.info(f"🔍 Checking trading account balance for affected cryptocurrencies: {sorted(affected_cryptos)}")
         
@@ -230,31 +255,42 @@ class OKXClient:
         try:
             # Get all trading account balances at once
             result = self.account_api.get_account_balance()
-            self.logger.info(f"🔎 Trading account balance returned (ALL): {result}")
             if not result or result.get('code') != '0':
-                self.logger.warning(f"⚠️ Failed to get trading account balance: {result}")
-                return {}
+                raise RuntimeError(f"Failed to get trading account balance: {result}")
             data = result.get('data', [])
             if not data:
-                return {}
+                raise RuntimeError("Trading account balance response contained no data")
             details = data[0].get('details', [])
+            if not isinstance(details, list):
+                raise RuntimeError("Trading account balance response contained invalid details")
+            self.logger.info("🔎 Trading account balance returned %d currency entries", len(details))
             for detail in details:
                 ccy = detail.get('ccy')
                 if not ccy or ccy not in affected_cryptos:
                     continue
                 avail = float(detail.get('availBal', 0))
-                if avail > 0:
-                    affected_balances[ccy] = {'availBal': avail}
-                    self.logger.warning(f"🎯 Found affected trading balance: {ccy} = {avail}")
+                total = max(
+                    float(detail.get('cashBal', 0) or 0),
+                    float(detail.get('eq', 0) or 0),
+                    avail,
+                )
+                if total <= 0:
+                    continue
+                if avail <= 0:
+                    raise RuntimeError(
+                        f"Affected balance for {ccy} is frozen or unavailable (total={total}, available={avail})"
+                    )
+                affected_balances[ccy] = {'availBal': avail}
+                self.logger.warning(f"🎯 Found affected trading balance: {ccy} = {avail}")
             
             if affected_balances:
                 self.logger.warning(f"📊 Found {len(affected_balances)} affected cryptocurrencies with balances in the trading account")
             else:
                 self.logger.info("✅ No affected cryptocurrencies with balances in the trading account")
+            return affected_balances
         except Exception as e:
             self.logger.error(f"❌ Error occurred while checking trading account balance: {e}")
-        
-        return affected_balances
+            raise
     
     def execute_market_sell(self, crypto: str, available_balance: float) -> bool:
         """Execute market sell operation"""
@@ -278,13 +314,28 @@ class OKXClient:
                 tgtCcy="base_ccy"   # Explicitly specify selling by base currency quantity
             )
             
-            if result.get('code') == '0':
+            error_msg = get_order_operation_error(result, require_data=True)
+            if not error_msg:
                 order_data = result.get('data', [{}])[0]
                 order_id = order_data.get('ordId', 'N/A')
-                self.logger.info(f"✅ Market sell successful: {crypto} Order ID: {order_id}")
-                return True
+                if order_id == 'N/A':
+                    self.logger.error(f"❌ Market sell accepted without an order ID: {crypto}")
+                    return False
+
+                for attempt in range(3):
+                    order_result = self.trade_api.get_order(instId=inst_id, ordId=order_id)
+                    order_error = get_order_operation_error(order_result, require_data=True)
+                    if not order_error and order_result['data'][0].get('state') == 'filled':
+                        self.logger.info(f"✅ Market sell filled: {crypto} Order ID: {order_id}")
+                        return True
+                    self.logger.warning(
+                        f"⚠️ Market sell {order_id} for {crypto} not confirmed filled "
+                        f"({attempt + 1}/3): {order_error or order_result['data'][0].get('state')}"
+                    )
+                    if attempt < 2:
+                        time.sleep(1)
+                return False
             else:
-                error_msg = result.get('msg', 'Unknown error')
                 self.logger.error(f"❌ Market sell failed: {crypto} - {error_msg}")
                 return False
                 

@@ -23,7 +23,7 @@ except ImportError:
         pass
     load_dotenv()
 
-from okx_client import OKXClient
+from okx_client import OKXClient, get_order_operation_error
 
 
 
@@ -161,14 +161,14 @@ class OKXOrderManager:
             
             result = self.trade_api.cancel_algo_order(algo_orders)
             
-            if result.get('code') == '0':
+            error_msg = get_order_operation_error(result, require_data=True)
+            if not error_msg:
                 # Log successful batch cancellation
                 order_ids = [order['algoId'] for order in orders_batch]
                 inst_ids = [order['instId'] for order in orders_batch]
                 logger.info(f"✅ Cancelled {len(orders_batch)} orders | Instruments: {', '.join(inst_ids)}")
                 return True
             else:
-                error_msg = result.get('msg', 'Unknown error')
                 logger.error(f"❌ Failed to cancel batch: {error_msg}")
                 logger.debug(f"   Full response: {result}")
                 return False
@@ -193,11 +193,11 @@ class OKXOrderManager:
             
             result = self.trade_api.cancel_algo_order(algo_orders)
             
-            if result.get('code') == '0':
+            error_msg = get_order_operation_error(result, require_data=True)
+            if not error_msg:
                 logger.info(f"✅ Successfully cancelled algo order {algo_id} for {inst_id}")
                 return True
             else:
-                error_msg = result.get('msg', 'Unknown error')
                 logger.error(f"❌ Failed to cancel order {algo_id}: {error_msg}")
                 logger.debug(f"   Full response: {result}")
                 return False

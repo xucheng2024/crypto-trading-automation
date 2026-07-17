@@ -11,10 +11,10 @@ import logging
 import logging.handlers
 # import sqlite3  # Migrated to PostgreSQL
 import time
+import hashlib
 from datetime import datetime
 from decimal import Decimal, getcontext
 import traceback
-from tenacity import retry, stop_after_attempt, wait_exponential
 
 # Set Decimal precision for consistency with create_algo_triggers.py
 getcontext().prec = 28
@@ -29,7 +29,7 @@ except ImportError:
         pass
     load_dotenv()
 
-from okx_client import OKXClient
+from okx_client import OKXClient, get_order_operation_error
 from utils_time import (
     get_utc_now, get_today_start_sgt_timestamp_ms,
     timestamp_to_utc_datetime_naive, format_datetime_utc, get_log_filename,
@@ -132,6 +132,8 @@ class AutoSellOrders:
         from lib.database import get_database_connection
         self.conn = get_database_connection()
         self.cursor = self.conn.cursor()
+        self.cursor.execute('ALTER TABLE filled_orders ADD COLUMN IF NOT EXISTS sell_order_id TEXT')
+        self.conn.commit()
         self.logger.info("✅ Connected to PostgreSQL database")
         self.logger.info(f"⚙️  Auto-sell threshold loaded: ${self.min_usd_value}")
 
@@ -192,9 +194,9 @@ class AutoSellOrders:
         today_start_ts = get_today_start_sgt_timestamp_ms()
         
         self.cursor.execute('''
-            SELECT instId, ordId, tradeId, fillSz, side, ts, sell_time, fillPx
+            SELECT instId, ordId, tradeId, fillSz, side, ts, sell_time, fillPx, sold_status, sell_order_id
             FROM filled_orders 
-            WHERE sold_status IS NULL
+            WHERE (sold_status IS NULL OR sold_status IN ('PROCESSING', 'SELL_SUBMITTED'))
               AND side = 'buy'
               AND (
                 (
@@ -220,7 +222,7 @@ class AutoSellOrders:
         if orders:
             self.logger.info(f"🔍 Found {len(orders)} due buy orders, ready to sell")
             for order in orders:
-                inst_id, ord_id, trade_id, fill_sz, side, ts, sell_time, fill_px = order
+                inst_id, ord_id, trade_id, fill_sz, side, ts, sell_time, fill_px, sold_status, sell_order_id = order
                 buy_datetime = timestamp_to_utc_datetime_naive(int(ts)) if ts else None
                 buy_date_str = format_datetime_utc(buy_datetime) if buy_datetime else 'N/A'
                 buy_price = self.format_price(fill_px)
@@ -323,8 +325,8 @@ class AutoSellOrders:
         try:
             self.cursor.execute('''
                 UPDATE filled_orders 
-                SET sold_status = NULL
-                WHERE tradeId = %s AND sold_status = 'PROCESSING'
+                SET sold_status = NULL, sell_order_id = NULL
+                WHERE tradeId = %s AND sold_status IN ('PROCESSING', 'SELL_SUBMITTED')
             ''', (trade_id,))
             self.conn.commit()
             self.logger.info(f"🔓 Cleared processing lock: {trade_id}")
@@ -361,10 +363,9 @@ class AutoSellOrders:
                 return 0.0, 0.0, 0.0, False, False
             
             result = account_api.get_account_balance(ccy=base_ccy)
-            self.logger.info(f"🔍 Trading account balance API returned: {result}")
             
             if not result or result.get('code') != '0':
-                self.logger.warning(f"⚠️ Cannot get {base_ccy} trading account balance: {result}")
+                self.logger.warning(f"⚠️ Cannot get {base_ccy} trading account balance (OKX code: {result.get('code') if result else 'empty'})")
                 return 0.0, 0.0, 0.0, False, False
             
             data = result.get('data', [])
@@ -408,8 +409,51 @@ class AutoSellOrders:
             self.logger.error(f"❌ Error getting balance for {inst_id}: {e}")
             return 0.0, 0.0, 0.0, False, False
 
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=10))
-    def place_market_sell_order(self, inst_id, size):
+    @staticmethod
+    def _sell_client_order_id(trade_id):
+        """Stable client order ID allows safe recovery after a crash."""
+        return f"sell{hashlib.sha256(str(trade_id).encode()).hexdigest()[:24]}"
+
+    def mark_trade_sell_submitted(self, trade_id, order_id):
+        try:
+            self.cursor.execute('''
+                UPDATE filled_orders
+                SET sold_status = 'SELL_SUBMITTED', sell_order_id = %s
+                WHERE tradeId = %s AND sold_status = 'PROCESSING'
+            ''', (order_id, trade_id))
+            self.conn.commit()
+            return self.cursor.rowcount == 1
+        except Exception as e:
+            self.conn.rollback()
+            self.logger.error(f"❌ Failed to persist submitted sell for {trade_id}: {e}")
+            return False
+
+    def get_market_sell_state(self, inst_id, order_id=None, client_order_id=None):
+        """Return FILLED, PENDING, FAILED, NOT_FOUND, or UNKNOWN without placing an order."""
+        try:
+            result = self.trade_api.get_order(
+                instId=inst_id,
+                ordId=order_id or '',
+                clOrdId=client_order_id or '',
+            )
+            if result and result.get('code') == '51603':
+                return 'NOT_FOUND'
+            error_msg = get_order_operation_error(result, require_data=True)
+            if error_msg:
+                reference = order_id or client_order_id
+                self.logger.warning(f"⚠️ Could not verify market sell {reference} for {inst_id}: {error_msg}")
+                return 'UNKNOWN'
+            state = result['data'][0].get('state')
+            if state == 'filled':
+                return 'FILLED'
+            if state in {'canceled', 'mmp_canceled'}:
+                return 'FAILED'
+            return 'PENDING'
+        except Exception as e:
+            self.logger.warning(f"⚠️ Error verifying market sell {order_id or client_order_id} for {inst_id}: {e}")
+            return 'UNKNOWN'
+
+    def place_market_sell_order(self, inst_id, size, client_order_id):
         """Place market sell order - check balance first, then decide sell amount"""
         self.logger.info(f"📤 Processing {inst_id}: requested size={size}")
         
@@ -418,7 +462,7 @@ class AutoSellOrders:
 
         if not balance_data_ok:
             self.logger.warning(f"⚠️ Balance data unavailable for {inst_id}, keep for retry in next cycle")
-            return False
+            return 'FAILED', None
         
         # Step 2: Check if balance is worth selling
         if available_usd < self.min_usd_value:
@@ -428,26 +472,26 @@ class AutoSellOrders:
                     f"(${total_eq_usd:.6f}) is significant"
                     f"{' and currently frozen' if has_frozen_balance else ''}; keep for retry"
                 )
-                return False
+                return 'FAILED', None
             self.logger.warning(
                 f"💰 {inst_id} available USD value too small (${available_usd:.6f}) < ${self.min_usd_value}, "
                 "marking as sold (dust position)"
             )
-            return "INSUFFICIENT_VALUE"
+            return 'INSUFFICIENT_VALUE', None
         
         if actual_balance <= 0:
             self.logger.warning(f"💰 {inst_id} Balance is 0, cannot sell")
-            return False
+            return 'FAILED', None
         
         if not self.trade_api:
             self.logger.warning(f"⚠️ Trade API not initialized, cannot place sell order for {inst_id}")
-            return False
+            return 'FAILED', None
 
         # Step 3: Determine sell amount - use requested size if available, otherwise use full balance
         requested_size = Decimal(str(size))
         if requested_size <= 0:
             self.logger.warning(f"⚠️ Invalid requested size for {inst_id}: {size}")
-            return False
+            return 'FAILED', None
 
         available_balance = Decimal(str(actual_balance))
         
@@ -460,30 +504,40 @@ class AutoSellOrders:
 
         if sell_amount_decimal <= 0:
             self.logger.warning(f"⚠️ Sell amount resolved to 0 for {inst_id}, keep for retry")
-            return False
+            return 'FAILED', None
 
         sell_amount = self._decimal_to_plain_str(sell_amount_decimal)
         
         # Step 4: Execute the sell order
         self.logger.info(f"📤 Selling {inst_id}: {sell_amount} tokens (Available USD: ${available_usd:.6f})")
         
-        result = self.trade_api.place_order(
-            instId=inst_id,
-            tdMode="cash",
-            side="sell",
-            ordType="market",
-            sz=sell_amount,
-            tgtCcy="base_ccy"  # Explicitly specify selling by base currency quantity
-        )
+        try:
+            result = self.trade_api.place_order(
+                instId=inst_id,
+                tdMode="cash",
+                side="sell",
+                ordType="market",
+                sz=sell_amount,
+                clOrdId=client_order_id,
+                tgtCcy="base_ccy"  # Explicitly specify selling by base currency quantity
+            )
+        except Exception as e:
+            # The exchange may have accepted the request before the client saw
+            # the network failure.  Retain PROCESSING and recover by clOrdId.
+            self.logger.warning(f"⚠️ Sell submission outcome unknown for {inst_id}: {e}")
+            return 'UNKNOWN', None
         
-        if not result or result.get('code') != '0':
-            error_msg = result.get('msg', 'Unknown error') if result else 'Empty response'
+        error_msg = get_order_operation_error(result, require_data=True)
+        if error_msg:
             self.logger.error(f"❌ Sell failed for {inst_id}: {error_msg}")
-            return False
+            return 'FAILED', None
         
-        okx_order_id = result.get('data', [{}])[0].get('ordId', 'Unknown')
-        self.logger.info(f"✅ Sold {inst_id} | Size: {sell_amount} | Available USD: ${available_usd:.6f} | Order: {okx_order_id}")
-        return True
+        okx_order_id = result['data'][0].get('ordId')
+        if not okx_order_id:
+            self.logger.error(f"❌ Sell response for {inst_id} has no order ID")
+            return 'FAILED', None
+
+        return self.get_market_sell_state(inst_id, okx_order_id), okx_order_id
 
     def rebuild_triggers_after_market_sell(self):
         """Recreate triggers only when a successful market sell left none pending.
@@ -530,7 +584,7 @@ class AutoSellOrders:
                 UPDATE filled_orders 
                 SET sold_status = 'SOLD'
                 WHERE tradeId = %s
-                  AND sold_status = 'PROCESSING'
+                  AND sold_status IN ('PROCESSING', 'SELL_SUBMITTED')
             ''', [(trade_id,) for trade_id in trade_ids])
             
             # Single commit for all updates
@@ -551,11 +605,10 @@ class AutoSellOrders:
 
     def process_sell_orders(self, verify_daily_close=False):
         """Process all orders ready to sell"""
-        if not self.has_significant_non_usdt_assets():
-            return
-
+        has_significant_assets = self.has_significant_non_usdt_assets()
         self.ensure_database_initialized()
-        self.normalize_pending_sell_times()
+        if has_significant_assets:
+            self.normalize_pending_sell_times()
         orders = self.get_orders_ready_to_sell()
         
         if not orders:
@@ -567,40 +620,61 @@ class AutoSellOrders:
         trades_to_mark_sold = []  # Collect trade IDs for batch update
         
         for order in orders:
-            inst_id, ord_id, trade_id, fill_sz, side, ts, sell_time, fill_px = order
+            inst_id, ord_id, trade_id, fill_sz, side, ts, sell_time, fill_px, sold_status, sell_order_id = order
             
             try:
                 formatted_price = self.format_price(fill_px)
                 self.logger.info(f"🔄 Processing: {inst_id} | ordId: {ord_id} | tradeId: {trade_id} | Buy: ${formatted_price} | fillSz: {fill_sz}")
                 
-                # Lock this trade to prevent duplicate processing (intra-run or concurrent)
-                if not self.mark_trade_processing(trade_id):
-                    continue
-                
-                sell_result = self.place_market_sell_order(inst_id, fill_sz)
-                
-                if sell_result == True:  # Successfully sold
+                if sold_status in ('PROCESSING', 'SELL_SUBMITTED'):
+                    if not sell_order_id:
+                        client_order_id = self._sell_client_order_id(trade_id)
+                        sell_result = self.get_market_sell_state(
+                            inst_id, client_order_id=client_order_id
+                        )
+                        if sell_result == 'NOT_FOUND':
+                            self.logger.warning(
+                                f"⚠️ No OKX order found for interrupted trade {trade_id}; unlocking for a later retry"
+                            )
+                            self.clear_trade_processing(trade_id)
+                            continue
+                    else:
+                        sell_result = self.get_market_sell_state(inst_id, sell_order_id)
+                else:
+                    if not has_significant_assets:
+                        self.logger.info(f"⏭️ No significant balance for new sell {trade_id}; only reconciling submitted orders")
+                        continue
+                    # Lock this trade before submitting a new sell order.
+                    if not self.mark_trade_processing(trade_id):
+                        continue
+                    client_order_id = self._sell_client_order_id(trade_id)
+                    sell_result, sell_order_id = self.place_market_sell_order(inst_id, fill_sz, client_order_id)
+                    if sell_order_id and not self.mark_trade_sell_submitted(trade_id, sell_order_id):
+                        # The order may exist, but without durable state it is unsafe to submit again.
+                        self.logger.error(f"❌ Retaining PROCESSING lock for {trade_id}; submitted order was not persisted")
+                        continue
+
+                if sell_result == 'FILLED':
                     trades_to_mark_sold.append(trade_id)
                     successful_sells += 1
                     successful_market_sells += 1
-                elif sell_result == "INSUFFICIENT_VALUE":  # USD equivalent too small, mark as processed
+                elif sell_result == 'INSUFFICIENT_VALUE':  # USD equivalent too small, mark as processed
                     trades_to_mark_sold.append(trade_id)
                     self.logger.info(f"✅ Trade {trade_id} will be marked as sold (insufficient USD value)")
                     successful_sells += 1
-                else:  # Selling failed
-                    # Clear PROCESSING to allow future retry
+                elif sell_result in {'FAILED', 'NOT_FOUND'}:
+                    # Terminal failure: clear the lock so a later scheduled run can submit again.
                     self.clear_trade_processing(trade_id)
                     failed_sells += 1
+                else:
+                    # PENDING/UNKNOWN retain the submitted order ID and are verified next run.
+                    self.logger.info(f"⏳ Trade {trade_id} sell remains {sell_result}; no replacement order submitted")
                 
                 # Rate limiting: wait 0.1 seconds between orders
                 time.sleep(0.1)
                 
             except Exception as e:
-                # Clear PROCESSING on unexpected error to avoid stuck state
-                try:
-                    self.clear_trade_processing(trade_id)
-                except Exception:
-                    pass
+                # Keep PROCESSING/SELL_SUBMITTED for recovery by stable clOrdId.
                 failed_sells += 1
                 self.logger.error(f"❌ Error processing sell order {ord_id}: {e}")
                 continue

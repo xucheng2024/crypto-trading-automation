@@ -6,6 +6,53 @@
 // GitHub 配置 - 默认值
 const DEFAULT_GITHUB_OWNER = 'xucheng2024';
 const DEFAULT_GITHUB_REPO = 'crypto-trading-automation';
+const CRON_SCRIPTS = new Map([
+  ["1,6,11,16,21,26,31,36,41,46,51,56 * * * *", ['monitor_delist', 'cancel_pending_limits', 'fetch_filled_orders']],
+  ["0,15,30,45 * * * *", ['auto_sell_orders']],
+  ["55 15 * * *", ['auto_sell_orders', 'cancel_pending_triggers']],
+  ["5 16 * * *", ['create_algo_triggers']],
+  ["10 16 * * *", ['fetch_filled_orders']],
+]);
+const ALLOWED_MANUAL_SCRIPTS = new Set([
+  'monitor_delist', 'cancel_pending_limits', 'fetch_filled_orders',
+  'auto_sell_orders', 'cancel_pending_triggers', 'create_algo_triggers',
+]);
+
+export class CronDeduplicator {
+  constructor(ctx) {
+    this.ctx = ctx;
+  }
+
+  async fetch(request) {
+    const { runKey, action = 'claim' } = await request.json();
+    if (!runKey) {
+      return Response.json({ error: 'runKey is required' }, { status: 400 });
+    }
+
+    const claimed = await this.ctx.storage.transaction(async (txn) => {
+      const now = Date.now();
+      const runs = (await txn.get('runs')) || {};
+      for (const [key, expiresAt] of Object.entries(runs)) {
+        if (expiresAt <= now) {
+          delete runs[key];
+        }
+      }
+      if (action === 'release') {
+        delete runs[runKey];
+        await txn.put('runs', runs);
+        return true;
+      }
+      if (runs[runKey]) {
+        return false;
+      }
+      runs[runKey] = now + 60 * 60 * 1000;
+      await txn.put('runs', runs);
+      return true;
+    });
+
+    return Response.json({ claimed });
+  }
+}
 
 
 export default {
@@ -17,6 +64,12 @@ export default {
     const now = new Date(scheduledTime);
     const minute = now.getUTCMinutes();
     const hour = now.getUTCHours();
+    const scripts = event.scripts || CRON_SCRIPTS.get(cron);
+
+    if (!scripts) {
+      console.log(`⚠️ No scripts mapped for cron: ${cron}`);
+      return new Response('No scripts mapped', { status: 200 });
+    }
     
     // 添加时间戳日志，帮助调试重复执行问题
     const timestamp = now.toISOString();
@@ -24,22 +77,41 @@ export default {
     console.log(`🕐 Cron: ${cron}, Hour: ${hour}, Minute: ${minute}`);
     
     // 去重机制：检查同一分钟是否已经执行过
-    const runKey = `run:${cron}:${now.getUTCFullYear()}${String(now.getUTCMonth() + 1).padStart(2, '0')}${String(now.getUTCDate()).padStart(2, '0')}${String(now.getUTCHours()).padStart(2, '0')}${String(now.getUTCMinutes()).padStart(2, '0')}`;
+    const runKey = `run:${cron}:${scripts.join(',')}:${now.getUTCFullYear()}${String(now.getUTCMonth() + 1).padStart(2, '0')}${String(now.getUTCDate()).padStart(2, '0')}${String(now.getUTCHours()).padStart(2, '0')}${String(now.getUTCMinutes()).padStart(2, '0')}`;
     
+    let deduplicator;
+    let claimedRun = false;
     try {
-      // 尝试从KV获取执行记录
-      const existingRun = await env.DEDUP_KV?.get(runKey);
-      if (existingRun) {
+      const deduplicatorId = env.CRON_DEDUP.idFromName('scheduled-runs');
+      deduplicator = env.CRON_DEDUP.get(deduplicatorId);
+      const claimResponse = await deduplicator.fetch('https://cron-dedup/claim', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ runKey }),
+      });
+      const { claimed } = await claimResponse.json();
+      if (!claimed) {
         console.log(`⚠️ Duplicate execution detected for key: ${runKey}`);
         return new Response('Duplicate execution prevented', { status: 200 });
       }
-      
-      // 标记为已执行（TTL: 1小时）
-      await env.DEDUP_KV?.put(runKey, timestamp, { expirationTtl: 3600 });
+      claimedRun = true;
       console.log(`✅ Marked execution for key: ${runKey}`);
     } catch (error) {
       console.log(`⚠️ Deduplication check failed: ${error.message}, continuing execution`);
     }
+
+    const releaseClaim = async () => {
+      if (!claimedRun) return;
+      try {
+        await deduplicator.fetch('https://cron-dedup/release', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ runKey, action: 'release' }),
+        });
+      } catch (error) {
+        console.error(`❌ Failed to release cron claim: ${error.message}`);
+      }
+    };
     
     // 计算新加坡时间 (UTC+8)
     const sgtTime = new Date(now.getTime() + 8 * 60 * 60 * 1000);
@@ -51,21 +123,6 @@ export default {
     console.log(`🕐 Trigger details: minute=${minute}, hour=${hour} UTC`);
     
     try {
-      // 使用Map精确分流，避免时间判断错误和隐性空转
-      const cronMap = new Map([
-        ["1,6,11,16,21,26,31,36,41,46,51,56 * * * *", ['monitor_delist', 'cancel_pending_limits', 'fetch_filled_orders']],
-        ["0,15,30,45 * * * *", ['auto_sell_orders']],
-        ["55 15 * * *", ['auto_sell_orders', 'cancel_pending_triggers']], // 15:55 UTC = 23:55 SGT
-        ["5 16 * * *", ['create_algo_triggers']],     // 16:05 UTC = 00:05 SGT
-        ["10 16 * * *", ['fetch_filled_orders']],     // 16:10 UTC = 00:10 SGT daily DB fallback
-      ]);
-      
-      const scripts = cronMap.get(event.cron);
-      if (!scripts) {
-        console.log(`⚠️ No scripts mapped for cron: ${event.cron}`);
-        return new Response('No scripts mapped', { status: 200 });
-      }
-      
       // 根据脚本类型输出日志
       if (scripts.includes('monitor_delist')) {
         console.log('📅 5-minute interval (staggered): monitor_delist + cancel_pending_limits + fetch_filled_orders');
@@ -119,10 +176,12 @@ export default {
       } else {
         const errorText = await response.text();
         console.error(`❌ Failed to trigger GitHub Actions: ${response.status} - ${errorText}`);
+        await releaseClaim();
         return new Response(`Error: ${response.status}`, { status: response.status });
       }
     } catch (error) {
       console.error('❌ Error triggering GitHub Actions:', error);
+      await releaseClaim();
       return new Response(`Error: ${error.message}`, { status: 500 });
     }
   },
@@ -130,8 +189,25 @@ export default {
   // 手动测试接口
   async fetch(request, env, ctx) {
     if (request.method === 'POST') {
-      // 手动触发
-      return this.scheduled({ cron: 'manual' }, env, ctx);
+      const expectedToken = env.MANUAL_TRIGGER_TOKEN;
+      const authorization = request.headers.get('Authorization');
+      if (!expectedToken || authorization !== `Bearer ${expectedToken}`) {
+        return new Response('Unauthorized', { status: 401 });
+      }
+
+      let payload;
+      try {
+        payload = await request.json();
+      } catch {
+        return new Response('Expected a JSON request body', { status: 400 });
+      }
+
+      const scripts = payload?.scripts;
+      if (!Array.isArray(scripts) || !scripts.length || scripts.some((script) => !ALLOWED_MANUAL_SCRIPTS.has(script))) {
+        return new Response('Provide a non-empty scripts array containing only supported scripts', { status: 400 });
+      }
+
+      return this.scheduled({ cron: 'manual', scripts, scheduledTime: Date.now() }, env, ctx);
     }
     
     const githubOwner = env.GITHUB_OWNER || DEFAULT_GITHUB_OWNER;
@@ -141,7 +217,7 @@ export default {
       <h1>🚀 Crypto Trading Automation Cron Worker</h1>
       <p>Status: Active</p>
       <p>GitHub Repo: ${githubOwner}/${githubRepo}</p>
-      <p>POST to this endpoint to manually trigger</p>
+      <p>POST JSON <code>{"scripts":["fetch_filled_orders"]}</code> with an authorized bearer token to manually trigger.</p>
       <hr>
       <h2>📅 Cron Schedule:</h2>
       <ul>
