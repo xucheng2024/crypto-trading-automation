@@ -52,7 +52,7 @@ class OKXDelistMonitor:
         self.base_url = "https://www.okx.com/api/v5/support/announcements"
         
         # Monitoring configuration
-        self.check_interval = 600  # 10 minutes = 600 seconds (match crontab)
+        self.check_interval = 300  # 5 minutes = 300 seconds (match Cloudflare cron)
         self._found_announcements = False  # Track if announcements were found
         
         # Setup logging
