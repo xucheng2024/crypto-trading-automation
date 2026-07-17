@@ -238,10 +238,58 @@ class OrderSafetyTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, 'pending trigger-orders API error'):
             trigger_manager.get_pending_algo_orders.__wrapped__(trigger_manager)
 
-    def test_only_blacklisted_pairs_are_strategy_skips(self):
+    def test_expected_strategy_skips_do_not_fail_trigger_run(self):
         self.assertTrue(OKXAlgoTrigger._is_expected_skip_reason("Blacklisted: delisted"))
-        self.assertFalse(OKXAlgoTrigger._is_expected_skip_reason("Skipped due to high yesterday volatility"))
+        self.assertTrue(OKXAlgoTrigger._is_expected_skip_reason("Skipped due to yesterday gain above 10%"))
         self.assertFalse(OKXAlgoTrigger._is_expected_skip_reason("Failed to create order"))
+
+    def test_yesterday_gain_filter_uses_strict_ten_percent_threshold(self):
+        class _MarketAPI:
+            def __init__(self, candles):
+                self.candles = candles
+                self.calls = []
+
+            def get_candlesticks(self, **kwargs):
+                self.calls.append(kwargs)
+                return {'code': '0', 'data': self.candles}
+
+        trigger_creator = OKXAlgoTrigger.__new__(OKXAlgoTrigger)
+        trigger_creator.data_cache = {}
+        trigger_creator.market_api = _MarketAPI([
+            ['today', '100', '100', '100', '100'],
+            ['yesterday', '100', '111', '99', '110.01'],
+        ])
+        self.assertTrue(trigger_creator.should_skip_buy_for_yesterday_gain('BTC-USDT'))
+        self.assertEqual(trigger_creator.market_api.calls[0]['limit'], '2')
+
+        trigger_creator.data_cache = {}
+        trigger_creator.market_api = _MarketAPI([
+            ['today', '100', '100', '100', '100'],
+            ['yesterday', '100', '110', '99', '110'],
+        ])
+        self.assertFalse(trigger_creator.should_skip_buy_for_yesterday_gain('BTC-USDT'))
+
+    def test_yesterday_gain_filter_blocks_all_buy_order_entrypoints(self):
+        trigger_creator = OKXAlgoTrigger.__new__(OKXAlgoTrigger)
+        trigger_creator.trade_api = object()
+        trigger_creator.should_skip_buy_for_yesterday_gain = lambda _inst_id: True
+
+        self.assertFalse(
+            trigger_creator._place_limit_buy_order.__wrapped__(
+                trigger_creator, 'BTC-USDT', '90'
+            )
+        )
+        self.assertFalse(
+            trigger_creator._create_trigger_order_internal.__wrapped__(
+                trigger_creator, 'BTC-USDT', '90'
+            )
+        )
+
+        trigger_creator.get_crypto_data = lambda _inst_id: self.fail('must not fetch today open')
+        result = trigger_creator._process_single_limit_pair(
+            'BTC-USDT', {'best_limit': '90'}, set()
+        )
+        self.assertEqual(result, ('BTC-USDT', 'Skipped due to yesterday gain above 10%', False))
 
 
 if __name__ == '__main__':

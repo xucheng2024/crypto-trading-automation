@@ -34,6 +34,7 @@ getcontext().prec = 28
 
 MAX_ACTIVE_TRADING_CURRENCIES = 3
 NON_USDT_ASSET_GATE_USD = 1.0
+YESTERDAY_GAIN_SKIP_THRESHOLD = Decimal('0.10')
 
 
 
@@ -152,6 +153,32 @@ class OKXAlgoTrigger:
             logger.error(f"❌ Error checking trading account balances: {e}")
             return None
     
+    def _get_daily_candles(self, inst_id, minimum_candles):
+        """Return cached or freshly fetched daily candles for an instrument."""
+        try:
+            cached_data = self.data_cache.get(inst_id, {}).get('candlestick_data', [])
+            if len(cached_data) >= minimum_candles:
+                logger.debug(f"📦 {inst_id} | Using cached daily candle data")
+                return cached_data
+
+            result = self.market_api.get_candlesticks(
+                instId=inst_id,
+                bar="1D",
+                limit=str(minimum_candles)
+            )
+            if result.get('code') != '0' or not result.get('data'):
+                error_msg = result.get('msg', 'Unknown error')
+                logger.warning(f"⚠️ Failed to get daily candles for {inst_id}: {error_msg}")
+                return None
+
+            data = result['data']
+            self.data_cache.setdefault(inst_id, {})['candlestick_data'] = data
+            return data
+        except Exception as e:
+            logger.warning(f"⚠️ Error getting daily candles for {inst_id}: {e}")
+            logger.debug(f"Traceback: {traceback.format_exc()}")
+            return None
+
     @retry(
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=4, max=10),
@@ -159,46 +186,45 @@ class OKXAlgoTrigger:
     )
     def get_crypto_data(self, inst_id):
         """Get today's daily opening price for an instrument."""
-        try:
-            # Check cache first (if candlestick data was already fetched)
-            if inst_id in self.data_cache and 'candlestick_data' in self.data_cache[inst_id]:
-                cached_data = self.data_cache[inst_id]['candlestick_data']
-                if cached_data:
-                    logger.debug(f"📦 {inst_id} | Using cached candlestick data")
-                    data = cached_data
-                else:
-                    data = None
-            else:
-                data = None
-            
-            # If no cache, fetch today's daily candle.
-            if data is None:
-                result = self.market_api.get_candlesticks(
-                    instId=inst_id,
-                    bar="1D",
-                    limit="1"
-                )
-                
-                if result.get('code') == '0' and result.get('data'):
-                    data = result['data']
-                else:
-                    error_msg = result.get('msg', 'Unknown error')
-                    logger.warning(f"⚠️ Failed to get historical data for {inst_id}: {error_msg}")
-                    return None
-            
-            if data:
-                # Data is ordered from newest to oldest
-                today_open = Decimal(data[0][1])
-                logger.info(f"📊 {inst_id} | Today's open: ${today_open}")
-                return today_open
+        data = self._get_daily_candles(inst_id, minimum_candles=1)
+        if not data:
+            return None
 
-            logger.warning(f"⚠️ {inst_id} | No daily candle data available")
+        try:
+            today_open = Decimal(data[0][1])
+            logger.info(f"📊 {inst_id} | Today's open: ${today_open}")
+            return today_open
+        except (IndexError, ArithmeticError, ValueError) as e:
+            logger.warning(f"⚠️ Invalid daily opening price for {inst_id}: {e}")
             return None
-            
-        except Exception as e:
-            logger.warning(f"⚠️ Error getting data for {inst_id}: {e}")
-            logger.debug(f"Traceback: {traceback.format_exc()}")
-            return None
+
+    def should_skip_buy_for_yesterday_gain(self, inst_id):
+        """Return True when yesterday closed more than 10% above its open."""
+        data = self._get_daily_candles(inst_id, minimum_candles=2)
+        if not data or len(data) < 2:
+            logger.warning(f"⚠️ {inst_id} | Cannot evaluate yesterday gain; continuing without gain filter")
+            return False
+
+        try:
+            yesterday_open = Decimal(data[1][1])
+            yesterday_close = Decimal(data[1][4])
+            if yesterday_open <= 0:
+                logger.warning(f"⚠️ {inst_id} | Invalid yesterday open; continuing without gain filter")
+                return False
+
+            gain_ratio = yesterday_close / yesterday_open - Decimal('1')
+            if gain_ratio > YESTERDAY_GAIN_SKIP_THRESHOLD:
+                logger.warning(
+                    f"🚫 {inst_id} | Skipping buy: yesterday gained "
+                    f"{(gain_ratio * 100):.2f}% (> 10%)"
+                )
+                return True
+
+            logger.info(f"📈 {inst_id} | Yesterday gain: {(gain_ratio * 100):.2f}% (within 10% limit)")
+            return False
+        except (IndexError, ArithmeticError, ValueError) as e:
+            logger.warning(f"⚠️ {inst_id} | Invalid yesterday candle; continuing without gain filter: {e}")
+            return False
     
     def get_current_price(self, inst_id):
         """Get current price from ticker API"""
@@ -333,6 +359,9 @@ class OKXAlgoTrigger:
                 logger.error(f"❌ {inst_id} {strategy_prefix}Trade API unavailable")
                 return False
 
+            if self.should_skip_buy_for_yesterday_gain(inst_id):
+                return False
+
             if isinstance(buy_price, str):
                 buy_price_decimal = Decimal(buy_price)
             else:
@@ -394,6 +423,9 @@ class OKXAlgoTrigger:
             strategy_prefix = f"{strategy_name} " if strategy_name else ""
             if not self.trade_api:
                 logger.error(f"❌ {inst_id} {strategy_prefix}Trade API unavailable")
+                return False
+
+            if self.should_skip_buy_for_yesterday_gain(inst_id):
                 return False
 
             # Convert trigger_price to Decimal
@@ -497,6 +529,9 @@ class OKXAlgoTrigger:
         logger.info(f"\n🔄 Processing {inst_id}...")
         
         try:
+            if self.should_skip_buy_for_yesterday_gain(inst_id):
+                return (inst_id, "Skipped due to yesterday gain above 10%", False)
+
             # Get today's opening price.
             open_price = self.get_crypto_data(inst_id)
             
@@ -530,7 +565,10 @@ class OKXAlgoTrigger:
     @staticmethod
     def _is_expected_skip_reason(reason):
         """Return whether a pair was intentionally excluded by strategy rules."""
-        return bool(reason) and reason.startswith("Blacklisted:")
+        return bool(reason) and (
+            reason.startswith("Blacklisted:")
+            or reason == "Skipped due to yesterday gain above 10%"
+        )
 
     def process_limits_from_database(self):
         """Process limits from database and create algo trigger orders"""
