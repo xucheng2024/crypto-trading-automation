@@ -91,6 +91,9 @@ def setup_logging():
 
 logger = setup_logging()
 
+MAX_ACTIVE_TRADING_CURRENCIES = 3
+NON_USDT_ASSET_GATE_USD = 1.0
+
 class OKXFilledOrdersFetcher:
     def __init__(self):
         """Initialize OKX API connection and defer database connection until needed"""
@@ -157,6 +160,52 @@ class OKXFilledOrdersFetcher:
         except Exception as e:
             logger.warning(f"⚠️ Recent fill pre-check failed, falling back to DB-backed flow: {e}")
             return None
+
+    def check_and_cancel_triggers_by_account_balance(self):
+        """Run trigger protection from OKX balances without opening the database."""
+        account_api = self.okx_client.get_account_api()
+        if not account_api:
+            logger.warning("⚠️ Account API unavailable; skip account-only trigger protection")
+            return False
+
+        try:
+            result = account_api.get_account_balance()
+            if not result or result.get('code') != '0':
+                logger.warning(f"⚠️ Unable to query OKX balances; skip account-only trigger protection: {result}")
+                return False
+
+            data = result.get('data', [])
+            details = data[0].get('details', []) if data else []
+            active_assets = []
+            for detail in details:
+                ccy = (detail.get('ccy') or '').upper()
+                if not ccy or ccy == 'USDT':
+                    continue
+                try:
+                    eq_usd = float(detail.get('eqUsd') or 0)
+                except (TypeError, ValueError):
+                    eq_usd = 0.0
+                if eq_usd > NON_USDT_ASSET_GATE_USD:
+                    active_assets.append((ccy, eq_usd))
+
+            active_count = len(active_assets)
+            logger.info(
+                f"📊 Account-only trigger protection: {active_count}/{MAX_ACTIVE_TRADING_CURRENCIES} active positions"
+            )
+            if active_count >= MAX_ACTIVE_TRADING_CURRENCIES:
+                assets_text = ", ".join(f"{ccy}:${eq_usd:.4f}" for ccy, eq_usd in active_assets)
+                logger.warning(
+                    f"⚠️ {active_count} active OKX positions (>= {MAX_ACTIVE_TRADING_CURRENCIES}); "
+                    f"cancelling all triggers | {assets_text}"
+                )
+                return self.cancel_all_trigger_orders()
+
+            logger.info("✅ Account-only trigger protection: capacity remains available")
+            return True
+        except Exception as e:
+            logger.error(f"❌ Error in account-only trigger protection: {e}")
+            logger.debug(f"Traceback: {traceback.format_exc()}")
+            return False
 
 
 
@@ -691,8 +740,8 @@ def main():
     # Parse command line arguments
     import argparse
     parser = argparse.ArgumentParser(description='Fetch OKX filled limit orders and save to database')
-    parser.add_argument('--minutes', type=int, default=15, help='Number of minutes to look back (default: 15)')
-    parser.add_argument('--precheck-hours', type=int, default=24, help='Skip DB if OKX has no buy fills in this recent window (default: 24)')
+    parser.add_argument('--minutes', type=int, default=5, help='Number of minutes to look back (default: 5)')
+    parser.add_argument('--precheck-hours', type=float, default=0.25, help='Skip DB if OKX has no buy fills in this recent window; run account-only trigger protection instead (default: 0.25)')
     parser.add_argument('--force-db', action='store_true', help='Bypass OKX pre-check and force the legacy DB-backed flow')
     args = parser.parse_args()
     
@@ -714,8 +763,10 @@ def main():
         else:
             precheck_result = fetcher.has_recent_buy_fills(hours=args.precheck_hours)
             if precheck_result is False:
-                logger.info("💤 No recent OKX buy fills detected; continuing with trigger protection check")
-            should_run_db_flow = True
+                logger.info("💤 No recent OKX buy fills detected; running account-only trigger protection")
+                fetcher.check_and_cancel_triggers_by_account_balance()
+            else:
+                should_run_db_flow = True
 
         if should_run_db_flow:
             # Fetch and save filled trades
