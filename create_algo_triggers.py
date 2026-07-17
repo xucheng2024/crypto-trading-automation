@@ -158,12 +158,12 @@ class OKXAlgoTrigger:
         retry=retry_if_exception_type((Exception,))
     )
     def get_crypto_data(self, inst_id):
-        """Get crypto data: today's open price and yesterday's volatility check"""
+        """Get today's daily opening price for an instrument."""
         try:
             # Check cache first (if candlestick data was already fetched)
             if inst_id in self.data_cache and 'candlestick_data' in self.data_cache[inst_id]:
                 cached_data = self.data_cache[inst_id]['candlestick_data']
-                if len(cached_data) >= 2:
+                if cached_data:
                     logger.debug(f"📦 {inst_id} | Using cached candlestick data")
                     data = cached_data
                 else:
@@ -171,12 +171,12 @@ class OKXAlgoTrigger:
             else:
                 data = None
             
-            # If no cache, fetch 2 days of data
+            # If no cache, fetch today's daily candle.
             if data is None:
                 result = self.market_api.get_candlesticks(
                     instId=inst_id,
                     bar="1D",
-                    limit="2"  # Get 2 days of data (today and yesterday)
+                    limit="1"
                 )
                 
                 if result.get('code') == '0' and result.get('data'):
@@ -184,53 +184,21 @@ class OKXAlgoTrigger:
                 else:
                     error_msg = result.get('msg', 'Unknown error')
                     logger.warning(f"⚠️ Failed to get historical data for {inst_id}: {error_msg}")
-                    return None, True  # Continue process; pair may still be skipped later due to missing open price
+                    return None
             
-            if data and len(data) >= 2:
+            if data:
                 # Data is ordered from newest to oldest
-                # data[0] = today, data[1] = yesterday
-                today_open = Decimal(data[0][1])  # Today's open price
-                
-                # Yesterday's data: [timestamp, open, high, low, close, volume, ...]
-                yesterday_open = Decimal(data[1][1])   # Yesterday's open
-                yesterday_high = Decimal(data[1][2])   # Yesterday's high
-                yesterday_low = Decimal(data[1][3])    # Yesterday's low
-                yesterday_close = Decimal(data[1][4])  # Yesterday's close
-                
-                # Calculate volatility metrics
-                # Rule 1: (high-low)/open > 0.25 (amplitude > 25%)
-                amplitude_ratio = (yesterday_high - yesterday_low) / yesterday_open
-                
-                # Rule 2: abs(close/open-1) > 0.12 (price change > 12%)
-                price_change_ratio = abs(yesterday_close / yesterday_open - Decimal('1'))
-                
-                logger.info(f"📈 {inst_id} | Yesterday: O=${yesterday_open} H=${yesterday_high} L=${yesterday_low} C=${yesterday_close}")
-                logger.info(f"   Amplitude: {(amplitude_ratio * 100):.2f}% | Price Change: {(price_change_ratio * 100):.2f}%")
-                
-                # Check skip conditions
-                if amplitude_ratio > Decimal('0.25'):
-                    logger.warning(f"🚫 {inst_id} | SKIPPING - Yesterday amplitude {(amplitude_ratio * 100):.2f}% > 25%")
-                    return None, False  # Skip: too volatile
-                
-                if price_change_ratio > Decimal('0.12'):
-                    logger.warning(f"🚫 {inst_id} | SKIPPING - Yesterday price change {(price_change_ratio * 100):.2f}% > 12%")
-                    return None, False  # Skip: too volatile
-                
-                logger.info(f"✅ {inst_id} | OK - Yesterday volatility within limits")
-                return today_open, True  # Return today's price, True for filter
-            else:
-                logger.warning(f"⚠️ {inst_id} | Insufficient historical data")
-                # If we have at least today's data, use it
-                if data and len(data) > 0:
-                    today_open = Decimal(data[0][1])
-                    logger.info(f"📊 {inst_id}: ${today_open} (limited historical data)")
-                    return today_open, True
-                return None, True  # Continue process; pair may still be skipped later due to missing open price
+                today_open = Decimal(data[0][1])
+                logger.info(f"📊 {inst_id} | Today's open: ${today_open}")
+                return today_open
+
+            logger.warning(f"⚠️ {inst_id} | No daily candle data available")
+            return None
             
         except Exception as e:
             logger.warning(f"⚠️ Error getting data for {inst_id}: {e}")
             logger.debug(f"Traceback: {traceback.format_exc()}")
-            return None, True  # Continue process; pair may still be skipped later due to missing open price
+            return None
     
     def get_current_price(self, inst_id):
         """Get current price from ticker API"""
@@ -529,12 +497,8 @@ class OKXAlgoTrigger:
         logger.info(f"\n🔄 Processing {inst_id}...")
         
         try:
-            # Get crypto data: price and yesterday volatility check
-            open_price, price_check_passed = self.get_crypto_data(inst_id)
-            
-            if not price_check_passed:
-                logger.warning(f"⚠️  Skipping {inst_id}: yesterday volatility too high")
-                return (inst_id, "Skipped due to high yesterday volatility", False)
+            # Get today's opening price.
+            open_price = self.get_crypto_data(inst_id)
             
             if open_price is None:
                 logger.warning(f"⚠️  Skipping {inst_id}: could not get open price")
@@ -566,10 +530,7 @@ class OKXAlgoTrigger:
     @staticmethod
     def _is_expected_skip_reason(reason):
         """Return whether a pair was intentionally excluded by strategy rules."""
-        return bool(reason) and (
-            reason.startswith("Blacklisted:")
-            or reason == "Skipped due to high yesterday volatility"
-        )
+        return bool(reason) and reason.startswith("Blacklisted:")
 
     def process_limits_from_database(self):
         """Process limits from database and create algo trigger orders"""

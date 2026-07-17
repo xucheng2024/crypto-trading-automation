@@ -238,9 +238,9 @@ class OrderSafetyTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, 'pending trigger-orders API error'):
             trigger_manager.get_pending_algo_orders.__wrapped__(trigger_manager)
 
-    def test_strategy_skips_do_not_count_as_trigger_creation_failures(self):
-        self.assertTrue(OKXAlgoTrigger._is_expected_skip_reason("Skipped due to high yesterday volatility"))
+    def test_only_blacklisted_pairs_are_strategy_skips(self):
         self.assertTrue(OKXAlgoTrigger._is_expected_skip_reason("Blacklisted: delisted"))
+        self.assertFalse(OKXAlgoTrigger._is_expected_skip_reason("Skipped due to high yesterday volatility"))
         self.assertFalse(OKXAlgoTrigger._is_expected_skip_reason("Failed to create order"))
 
 
