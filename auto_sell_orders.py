@@ -108,18 +108,15 @@ class AutoSellOrders:
 
 
     def load_auto_sell_config(self):
-        """Load auto-sell configuration from database"""
+        """Load the lightweight auto-sell threshold without opening a second DB connection."""
         try:
-            from config_manager import ConfigManager
-            config_manager = ConfigManager(self.logger)
-            config = config_manager.load_full_config()
-            
-            min_usd = float(config.get('auto_sell_config', {}).get('min_usd_value', 0.01))
-            self.logger.info(f"⚙️  Auto-sell config loaded from database: Min USD value = ${min_usd}")
+            min_usd = float(os.getenv('OKX_MIN_USD_VALUE', '0.01'))
+            if min_usd < 0:
+                raise ValueError("OKX_MIN_USD_VALUE cannot be negative")
+            self.logger.info(f"⚙️  Auto-sell threshold: ${min_usd}")
             return min_usd
-            
         except Exception as e:
-            self.logger.warning(f"⚠️  Failed to load auto-sell config from database, using default: ${0.01} - {e}")
+            self.logger.warning(f"⚠️ Invalid OKX_MIN_USD_VALUE; using default: ${0.01} - {e}")
             return 0.01
 
     def ensure_database_initialized(self):
@@ -132,11 +129,6 @@ class AutoSellOrders:
         from lib.database import get_database_connection
         self.conn = get_database_connection()
         self.cursor = self.conn.cursor()
-        self.cursor.execute('ALTER TABLE filled_orders ADD COLUMN IF NOT EXISTS sell_order_id TEXT')
-        self.cursor.execute(
-            'ALTER TABLE filled_orders ADD COLUMN IF NOT EXISTS trigger_rebuild_pending BOOLEAN NOT NULL DEFAULT FALSE'
-        )
-        self.conn.commit()
         self.logger.info("✅ Connected to PostgreSQL database")
         self.logger.info(f"⚙️  Auto-sell threshold loaded: ${self.min_usd_value}")
 
