@@ -32,7 +32,7 @@ from blacklist_manager import BlacklistManager
 # Set Decimal precision to handle very small prices
 getcontext().prec = 28
 
-MAX_ACTIVE_TRADING_CURRENCIES = 4
+MAX_ACTIVE_TRADING_CURRENCIES = 3
 NON_USDT_ASSET_GATE_USD = 1.0
 
 

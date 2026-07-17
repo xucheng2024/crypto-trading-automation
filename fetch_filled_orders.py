@@ -382,7 +382,7 @@ class OKXFilledOrdersFetcher:
             if failed_saves > 0:
                 logger.warning(f"⚠️  Failed: {failed_saves}")
             
-            # Check if 4+ orders are in trading, cancel all trigger orders if so
+            # Check if 3+ orders are in trading, cancel all trigger orders if so
             self.check_and_cancel_triggers_if_needed()
             
         except Exception as e:
@@ -659,7 +659,7 @@ class OKXFilledOrdersFetcher:
             raise
 
     def check_and_cancel_triggers_if_needed(self):
-        """Check if 4+ orders are in trading, cancel all trigger orders if so"""
+        """Check if 3+ orders are in trading, cancel all trigger orders if so"""
         try:
             # 首先自动检测并标记手动卖出的订单
             self.auto_mark_manual_sells()
@@ -668,11 +668,11 @@ class OKXFilledOrdersFetcher:
             active_count = self.count_active_trading_currencies()
             logger.info(f"📊 Currently {active_count} active trading orders")
             
-            if active_count >= 4:
-                logger.warning(f"⚠️  {active_count} active trading orders (>= 4), cancelling all trigger orders...")
+            if active_count >= 3:
+                logger.warning(f"⚠️  {active_count} active trading orders (>= 3), cancelling all trigger orders...")
                 self.cancel_all_trigger_orders()
             else:
-                logger.info(f"✅ {active_count} active trading orders (< 4), no action needed")
+                logger.info(f"✅ {active_count} active trading orders (< 3), no action needed")
         except Exception as e:
             logger.error(f"❌ Error checking trading orders: {e}")
             logger.debug(f"Traceback: {traceback.format_exc()}")

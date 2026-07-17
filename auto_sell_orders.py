@@ -485,6 +485,40 @@ class AutoSellOrders:
         self.logger.info(f"✅ Sold {inst_id} | Size: {sell_amount} | Available USD: ${available_usd:.6f} | Order: {okx_order_id}")
         return True
 
+    def rebuild_triggers_after_market_sell(self):
+        """Recreate triggers only when a successful market sell left none pending.
+
+        ``OKXAlgoTrigger`` performs the authoritative account-balance check and
+        skips creation when three or more non-USDT positions remain.
+        """
+        if not self.trade_api:
+            self.logger.warning("⚠️ Trade API unavailable; skip trigger rebuild")
+            return False
+
+        try:
+            result = self.trade_api.order_algos_list(ordType="trigger", limit="1")
+            if not result or result.get('code') != '0':
+                self.logger.warning(f"⚠️ Unable to check pending triggers; skip rebuild: {result}")
+                return False
+
+            trigger_orders = [
+                order for order in result.get('data', [])
+                if order.get('ordType') == 'trigger'
+            ]
+            if trigger_orders:
+                self.logger.info("⏭️ Pending trigger exists; skip trigger rebuild after market sell")
+                return False
+
+            self.logger.info("📈 No pending triggers after market sell; checking capacity before rebuild")
+            from create_algo_triggers import OKXAlgoTrigger
+
+            trigger_creator = OKXAlgoTrigger(order_size=os.getenv('OKX_ORDER_SIZE', '100'))
+            return trigger_creator.process_limits_from_database()
+        except Exception as e:
+            self.logger.error(f"❌ Error rebuilding triggers after market sell: {e}")
+            self.logger.debug(f"Traceback: {traceback.format_exc()}")
+            return False
+
     def mark_trades_as_sold_batch(self, trade_ids):
         """Mark multiple trades as sold in database using batch update (optimized)"""
         if not trade_ids:
@@ -529,6 +563,7 @@ class AutoSellOrders:
         
         successful_sells = 0
         failed_sells = 0
+        successful_market_sells = 0
         trades_to_mark_sold = []  # Collect trade IDs for batch update
         
         for order in orders:
@@ -547,6 +582,7 @@ class AutoSellOrders:
                 if sell_result == True:  # Successfully sold
                     trades_to_mark_sold.append(trade_id)
                     successful_sells += 1
+                    successful_market_sells += 1
                 elif sell_result == "INSUFFICIENT_VALUE":  # USD equivalent too small, mark as processed
                     trades_to_mark_sold.append(trade_id)
                     self.logger.info(f"✅ Trade {trade_id} will be marked as sold (insufficient USD value)")
@@ -577,6 +613,12 @@ class AutoSellOrders:
                 # Ensure no trade remains stuck in PROCESSING if batch update partially failed
                 for trade_id in trades_to_mark_sold:
                     self.clear_trade_processing(trade_id)
+
+        if successful_market_sells:
+            self.logger.info(
+                f"🔄 {successful_market_sells} market sell(s) accepted; evaluating trigger rebuild"
+            )
+            self.rebuild_triggers_after_market_sell()
         
         # Summary
         if successful_sells > 0 or failed_sells > 0:
