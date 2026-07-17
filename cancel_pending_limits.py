@@ -119,8 +119,7 @@ class OKXLimitOrderManager:
             )
             
             if not result:
-                logger.warning("⚠️  Empty response from API")
-                return []
+                raise RuntimeError("Empty response from OKX pending limit-orders API")
             
             if result.get('code') == '0':
                 all_orders = result.get('data', [])
@@ -144,7 +143,7 @@ class OKXLimitOrderManager:
                 error_msg = result.get('msg', 'Unknown error')
                 logger.error(f"❌ API Error getting pending orders: {error_msg}")
                 logger.debug(f"Full API response: {result}")
-                return []
+                raise RuntimeError(f"OKX pending limit-orders API error: {error_msg}")
                 
         except Exception as e:
             logger.error(f"❌ Exception getting pending orders: {e}")

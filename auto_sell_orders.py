@@ -133,6 +133,9 @@ class AutoSellOrders:
         self.conn = get_database_connection()
         self.cursor = self.conn.cursor()
         self.cursor.execute('ALTER TABLE filled_orders ADD COLUMN IF NOT EXISTS sell_order_id TEXT')
+        self.cursor.execute(
+            'ALTER TABLE filled_orders ADD COLUMN IF NOT EXISTS trigger_rebuild_pending BOOLEAN NOT NULL DEFAULT FALSE'
+        )
         self.conn.commit()
         self.logger.info("✅ Connected to PostgreSQL database")
         self.logger.info(f"⚙️  Auto-sell threshold loaded: ${self.min_usd_value}")
@@ -561,7 +564,7 @@ class AutoSellOrders:
             ]
             if trigger_orders:
                 self.logger.info("⏭️ Pending trigger exists; skip trigger rebuild after market sell")
-                return False
+                return True
 
             self.logger.info("📈 No pending triggers after market sell; checking capacity before rebuild")
             from create_algo_triggers import OKXAlgoTrigger
@@ -577,29 +580,64 @@ class AutoSellOrders:
         """Mark multiple trades as sold in database using batch update (optimized)"""
         if not trade_ids:
             return 0
-        
+
         try:
-            # Batch update using executemany
             self.cursor.executemany('''
-                UPDATE filled_orders 
+                UPDATE filled_orders
                 SET sold_status = 'SOLD'
                 WHERE tradeId = %s
                   AND sold_status IN ('PROCESSING', 'SELL_SUBMITTED')
             ''', [(trade_id,) for trade_id in trade_ids])
-            
-            # Single commit for all updates
             self.conn.commit()
-            
             updated_count = self.cursor.rowcount
             self.logger.info(f"✅ Batch marked {updated_count} trades as sold")
-            
             return updated_count
-            
         except Exception as e:
             self.logger.error(f"❌ Error in batch mark as sold: {e}")
             self.logger.debug(f"Traceback: {traceback.format_exc()}")
             self.conn.rollback()
             return 0
+
+    def mark_trigger_rebuild_pending(self, trade_ids):
+        """Durably request trigger reconstruction after confirmed market sells."""
+        if not trade_ids:
+            return True
+        try:
+            self.cursor.executemany('''
+                UPDATE filled_orders
+                SET trigger_rebuild_pending = TRUE
+                WHERE tradeId = %s
+                  AND sold_status IN ('PROCESSING', 'SELL_SUBMITTED')
+            ''', [(trade_id,) for trade_id in trade_ids])
+            self.conn.commit()
+            return self.cursor.rowcount == len(trade_ids)
+        except Exception as e:
+            self.conn.rollback()
+            self.logger.error(f"❌ Failed to persist trigger rebuild request: {e}")
+            return False
+
+    def has_pending_trigger_rebuild(self):
+        self.cursor.execute('''
+            SELECT EXISTS(
+                SELECT 1 FROM filled_orders WHERE trigger_rebuild_pending = TRUE
+            )
+        ''')
+        result = self.cursor.fetchone()
+        return bool(result and result[0])
+
+    def clear_pending_trigger_rebuild(self):
+        try:
+            self.cursor.execute('''
+                UPDATE filled_orders
+                SET trigger_rebuild_pending = FALSE
+                WHERE trigger_rebuild_pending = TRUE
+            ''')
+            self.conn.commit()
+            return True
+        except Exception as e:
+            self.conn.rollback()
+            self.logger.error(f"❌ Failed to clear trigger rebuild request: {e}")
+            return False
 
 
 
@@ -611,13 +649,11 @@ class AutoSellOrders:
             self.normalize_pending_sell_times()
         orders = self.get_orders_ready_to_sell()
         
-        if not orders:
-            return
-        
         successful_sells = 0
         failed_sells = 0
         successful_market_sells = 0
         trades_to_mark_sold = []  # Collect trade IDs for batch update
+        market_sells_to_mark = []
         
         for order in orders:
             inst_id, ord_id, trade_id, fill_sz, side, ts, sell_time, fill_px, sold_status, sell_order_id = order
@@ -656,6 +692,7 @@ class AutoSellOrders:
 
                 if sell_result == 'FILLED':
                     trades_to_mark_sold.append(trade_id)
+                    market_sells_to_mark.append(trade_id)
                     successful_sells += 1
                     successful_market_sells += 1
                 elif sell_result == 'INSUFFICIENT_VALUE':  # USD equivalent too small, mark as processed
@@ -680,6 +717,9 @@ class AutoSellOrders:
                 continue
         
         # Batch update all successful sells (optimized)
+        if market_sells_to_mark and not self.mark_trigger_rebuild_pending(market_sells_to_mark):
+            raise RuntimeError("Could not persist trigger rebuild request after confirmed market sell")
+
         if trades_to_mark_sold:
             updated_count = self.mark_trades_as_sold_batch(trades_to_mark_sold)
             if updated_count != len(trades_to_mark_sold):
@@ -688,11 +728,14 @@ class AutoSellOrders:
                 for trade_id in trades_to_mark_sold:
                     self.clear_trade_processing(trade_id)
 
-        if successful_market_sells:
+        if self.has_pending_trigger_rebuild():
             self.logger.info(
-                f"🔄 {successful_market_sells} market sell(s) accepted; evaluating trigger rebuild"
+                "🔄 Pending trigger rebuild detected; evaluating trigger rebuild"
             )
-            self.rebuild_triggers_after_market_sell()
+            if not self.rebuild_triggers_after_market_sell():
+                raise RuntimeError("Pending trigger rebuild did not complete")
+            if not self.clear_pending_trigger_rebuild():
+                raise RuntimeError("Trigger rebuild completed but pending state could not be cleared")
         
         # Summary
         if successful_sells > 0 or failed_sells > 0:

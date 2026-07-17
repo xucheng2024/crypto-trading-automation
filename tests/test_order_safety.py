@@ -3,6 +3,8 @@ import unittest
 from unittest.mock import patch
 
 from auto_sell_orders import AutoSellOrders
+from cancel_pending_limits import OKXLimitOrderManager
+from cancel_pending_triggers import OKXOrderManager
 from fetch_filled_orders import OKXFilledOrdersFetcher
 from okx_client import OKXClient, get_order_operation_error
 from monitor_delist import OKXDelistMonitor
@@ -109,9 +111,41 @@ class OrderSafetyTests(unittest.TestCase):
         seller.get_market_sell_state = lambda *_args, **_kwargs: 'FILLED'
         marked = []
         seller.mark_trades_as_sold_batch = lambda trade_ids: marked.extend(trade_ids) or len(trade_ids)
+        seller.mark_trigger_rebuild_pending = lambda _trade_ids: True
+        seller.has_pending_trigger_rebuild = lambda: True
+        seller.clear_pending_trigger_rebuild = lambda: True
         seller.rebuild_triggers_after_market_sell = lambda: True
         seller.process_sell_orders()
         self.assertEqual(marked, ['trade-1'])
+
+    def test_trigger_rebuild_failure_after_filled_sell_propagates(self):
+        seller = AutoSellOrders.__new__(AutoSellOrders)
+        seller.logger = logging.getLogger('test-auto-sell')
+        seller.has_significant_non_usdt_assets = lambda: False
+        seller.ensure_database_initialized = lambda: None
+        seller.get_orders_ready_to_sell = lambda: [
+            ('BTC-USDT', 'buy-1', 'trade-1', '1', 'buy', '1', '1', '1', 'SELL_SUBMITTED', 'sell-1')
+        ]
+        seller.get_market_sell_state = lambda *_args, **_kwargs: 'FILLED'
+        seller.mark_trades_as_sold_batch = lambda trade_ids: len(trade_ids)
+        seller.mark_trigger_rebuild_pending = lambda _trade_ids: True
+        seller.has_pending_trigger_rebuild = lambda: True
+        seller.rebuild_triggers_after_market_sell = lambda: False
+        with self.assertRaisesRegex(RuntimeError, 'Pending trigger rebuild'):
+            seller.process_sell_orders()
+
+    def test_pending_trigger_rebuild_retries_without_due_sell_orders(self):
+        seller = AutoSellOrders.__new__(AutoSellOrders)
+        seller.logger = logging.getLogger('test-auto-sell')
+        seller.has_significant_non_usdt_assets = lambda: False
+        seller.ensure_database_initialized = lambda: None
+        seller.get_orders_ready_to_sell = lambda: []
+        seller.has_pending_trigger_rebuild = lambda: True
+        seller.rebuild_triggers_after_market_sell = lambda: True
+        cleared = []
+        seller.clear_pending_trigger_rebuild = lambda: cleared.append(True) or True
+        seller.process_sell_orders()
+        self.assertEqual(cleared, [True])
 
     def test_protection_is_failed_when_cancellation_or_sell_is_incomplete(self):
         manager = ProtectionManager()
@@ -187,6 +221,21 @@ class OrderSafetyTests(unittest.TestCase):
         with patch('monitor_delist.get_global_session'), patch('monitor_delist.safe_request', return_value=_Response()), patch('monitor_delist.time.sleep'):
             with self.assertRaisesRegex(RuntimeError, 'Unable to fetch OKX delist announcements'):
                 monitor.fetch_delist_announcements()
+
+    def test_pending_order_query_errors_are_not_treated_as_empty(self):
+        limit_manager = OKXLimitOrderManager.__new__(OKXLimitOrderManager)
+        limit_manager.trade_api = type('TradeAPI', (), {
+            'get_order_list': lambda *_args, **_kwargs: {'code': '50000', 'msg': 'temporary error'},
+        })()
+        with self.assertRaisesRegex(RuntimeError, 'pending limit-orders API error'):
+            limit_manager.get_pending_limit_orders.__wrapped__(limit_manager)
+
+        trigger_manager = OKXOrderManager.__new__(OKXOrderManager)
+        trigger_manager.trade_api = type('TradeAPI', (), {
+            'order_algos_list': lambda *_args, **_kwargs: {'code': '50000', 'msg': 'temporary error'},
+        })()
+        with self.assertRaisesRegex(RuntimeError, 'pending trigger-orders API error'):
+            trigger_manager.get_pending_algo_orders.__wrapped__(trigger_manager)
 
 
 if __name__ == '__main__':

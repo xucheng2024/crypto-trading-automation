@@ -133,7 +133,7 @@ class OKXOrderManager:
                 else:
                     error_msg = result.get('msg', 'Unknown error')
                     logger.error(f"❌ Failed to get pending orders: {error_msg}")
-                    break
+                    raise RuntimeError(f"OKX pending trigger-orders API error: {error_msg}")
             
             logger.info(f"📋 Total pending algo orders found: {len(all_orders)}")
             return all_orders
