@@ -319,47 +319,42 @@ class OKXOrderManager:
                     if batch_num < total_current_batches:  # Don't sleep after the last batch
                         time.sleep(0.2)  # Reduced from 0.5s to 0.2s for batch processing
                 
-                # After this round, check if any orders remain
-                if attempt < max_attempts:
-                    logger.info(f"\n🔍 Verifying cancellation results (attempt {attempt})...")
-                    time.sleep(2)  # Wait a bit for API to update
-                    
-                    try:
-                        remaining_pending = self.get_pending_algo_orders()
-                        remaining_trigger_orders = [order for order in remaining_pending if order.get('ordType') == 'trigger']
-                        if inst_ids is not None:
-                            inst_set = set(inst_ids)
-                            remaining_trigger_orders = [o for o in remaining_trigger_orders if o.get('instId') in inst_set]
-                        
-                        if remaining_trigger_orders:
-                            logger.warning(f"⚠️  {len(remaining_trigger_orders)} trigger orders still pending after attempt {attempt}")
-                            # Update remaining_orders for next attempt
-                            remaining_orders = remaining_trigger_orders
-                            attempt += 1
-                        else:
-                            remaining_orders = []
-                            logger.info("✅ All trigger orders successfully cancelled!")
-                            break
-                    except Exception as e:
-                        logger.error(f"❌ Error verifying cancellation results: {e}")
-                        # If verification fails, assume we need to continue
-                        attempt += 1
-                else:
-                    # Last attempt completed
-                    if remaining_orders:
-                        logger.error(f"❌ Failed to cancel all trigger orders after {max_attempts} attempts")
-                        logger.error(f"   {len(remaining_orders)} trigger orders remain uncancelled")
+                # Verify after every attempt, including the final one.  The
+                # exchange acknowledgement alone is not sufficient evidence
+                # that a trigger disappeared from the pending-order list.
+                logger.info(f"\n🔍 Verifying cancellation results (attempt {attempt})...")
+                time.sleep(2)
+                remaining_pending = self.get_pending_algo_orders()
+                remaining_trigger_orders = [order for order in remaining_pending if order.get('ordType') == 'trigger']
+                if inst_ids is not None:
+                    inst_set = set(inst_ids)
+                    remaining_trigger_orders = [o for o in remaining_trigger_orders if o.get('instId') in inst_set]
+
+                if not remaining_trigger_orders:
+                    remaining_orders = []
+                    logger.info("✅ All trigger orders successfully cancelled!")
                     break
+
+                remaining_orders = remaining_trigger_orders
+                logger.warning(f"⚠️  {len(remaining_orders)} trigger orders still pending after attempt {attempt}")
+                attempt += 1
             
             logger.info("\n" + "=" * 60)
-            logger.info(f"📊 Summary: {success_count}/{total_count} orders cancelled successfully")
+            operation_succeeded = not remaining_orders
+            verified_cancellations = total_count - len(remaining_orders)
+            logger.info(
+                f"📊 Summary: {verified_cancellations}/{total_count} orders absent after final verification"
+            )
             
             if failed_orders:
-                logger.warning(f"⚠️  Failed orders: {len(failed_orders)}")
+                log = logger.info if operation_succeeded else logger.warning
+                prefix = "Transient cancellation request errors reconciled" if operation_succeeded else "Failed orders"
+                log(f"⚠️  {prefix}: {len(failed_orders)}")
                 for inst_id, algo_id, reason in failed_orders:
-                    logger.warning(f"   {inst_id} ({algo_id}): {reason}")
+                    log(f"   {inst_id} ({algo_id}): {reason}")
             
-            operation_succeeded = len(failed_orders) == 0 and not remaining_orders
+            # A transient batch failure is not terminal if the authoritative
+            # final query confirms every trigger is gone.
             if not operation_succeeded:
                 logger.error("❌ Trigger cancellation completed with failures")
             return operation_succeeded

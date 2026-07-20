@@ -49,12 +49,16 @@ class BlacklistManager:
             self.logger.error(f"❌ Error parsing DATABASE_URL: {e}")
             return {}
     
-    def get_blacklisted_cryptos(self) -> Set[str]:
-        """Get list of blacklisted cryptocurrency symbols"""
+    def get_blacklisted_cryptos(self) -> Optional[Set[str]]:
+        """Get active blacklist, or ``None`` when it cannot be verified.
+
+        An empty set is a valid, verified result.  Callers that create orders
+        must treat ``None`` as an error rather than as an empty blacklist.
+        """
         try:
             if not all(self.db_config.values()):
-                self.logger.warning("⚠️ Database credentials not fully configured, skipping blacklist check")
-                return set()
+                self.logger.error("❌ Database credentials not fully configured; blacklist cannot be verified")
+                return None
             
             with psycopg2.connect(**self.db_config) as conn:
                 with conn.cursor(cursor_factory=RealDictCursor) as cursor:
@@ -72,10 +76,10 @@ class BlacklistManager:
                     
         except psycopg2.Error as e:
             self.logger.error(f"❌ Database error loading blacklist: {e}")
-            return set()
+            return None
         except Exception as e:
             self.logger.error(f"❌ Error loading blacklist: {e}")
-            return set()
+            return None
     
     def is_blacklisted(self, crypto_symbol: str) -> bool:
         """Check if a cryptocurrency is blacklisted"""

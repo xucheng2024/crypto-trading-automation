@@ -447,7 +447,13 @@ class OKXFilledOrdersFetcher:
 
 
     def auto_mark_manual_sells(self):
-        """自动检测并标记手动卖出的订单（通过检查账户余额）"""
+        """Mark a manually closed instrument only after an authoritative dust check.
+
+        Available balance alone is not evidence of a sale: it can be zero while
+        a balance is frozen by an open order.  A position is considered closed
+        only when its *total* USD value is below the same configured minimum
+        used by auto-sell and it has no frozen balance.
+        """
         try:
             self.ensure_database_initialized()
             # 获取所有未标记为已卖的币种
@@ -464,6 +470,13 @@ class OKXFilledOrdersFetcher:
                 return
             
             logger.info(f"🔍 Checking balances for {len(unsold_instruments)} instruments with unsold orders")
+            try:
+                dust_threshold_usd = float(os.getenv('OKX_MIN_USD_VALUE', '0.01'))
+                if dust_threshold_usd < 0:
+                    raise ValueError('must not be negative')
+            except (TypeError, ValueError) as e:
+                logger.warning(f"⚠️ Invalid OKX_MIN_USD_VALUE; using $0.01 for manual-sell reconciliation: {e}")
+                dust_threshold_usd = 0.01
             
             marked_count = 0
             
@@ -487,18 +500,27 @@ class OKXFilledOrdersFetcher:
                         continue
                     
                     details = data[0].get('details', [])
-                    balance = 0.0
+                    total_usd = 0.0
+                    frozen_balance = 0.0
+                    currency_found = False
                     
                     for detail in details:
                         if detail.get('ccy', '').upper() == base_ccy:
-                            avail_str = detail.get('availBal')
-                            if avail_str:
-                                balance = float(avail_str)
+                            currency_found = True
+                            total_usd = float(detail.get('eqUsd') or 0)
+                            frozen_balance = max(
+                                float(detail.get('frozenBal') or 0),
+                                float(detail.get('ordFrozen') or 0),
+                            )
                             break
                     
-                    # 如果余额为0或非常小（< 0.0001），标记为已卖出
-                    if balance < 0.0001:
-                        logger.info(f"💰 {inst_id}: Balance is {balance}, marking all orders as SOLD")
+                    # A missing currency row is an authoritative zero balance.
+                    # Never mark a frozen position as sold.
+                    if (not currency_found or total_usd < dust_threshold_usd) and frozen_balance <= 0:
+                        logger.info(
+                            f"💰 {inst_id}: total value=${total_usd:.6f}, frozen={frozen_balance}; "
+                            "marking settled lots as SOLD"
+                        )
                         
                         # 标记该币种的所有订单为已卖出
                         self.cursor.execute('''
@@ -506,7 +528,7 @@ class OKXFilledOrdersFetcher:
                             SET sold_status = 'SOLD'
                             WHERE side = 'buy' 
                             AND instId = %s
-                            AND (sold_status IS NULL OR sold_status != 'SOLD')
+                            AND sold_status IS NULL
                         ''', (inst_id,))
                         
                         self.conn.commit()

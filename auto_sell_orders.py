@@ -13,7 +13,7 @@ import logging.handlers
 import time
 import hashlib
 from datetime import datetime
-from decimal import Decimal, getcontext
+from decimal import Decimal, ROUND_DOWN, getcontext
 import traceback
 
 # Set Decimal precision for consistency with create_algo_triggers.py
@@ -35,8 +35,6 @@ from utils_time import (
     timestamp_to_utc_datetime_naive, format_datetime_utc, get_log_filename,
     datetime_to_timestamp_ms,
 )
-
-NON_USDT_ASSET_GATE_USD = 1.0
 
 def setup_logging():
     """Setup logging with file rotation"""
@@ -79,6 +77,7 @@ class AutoSellOrders:
         self.conn = None
         self.cursor = None
         self.min_usd_value = 0.01
+        self.instrument_rules_cache = {}
         
         # Load environment variables
         self.api_key = os.getenv('OKX_API_KEY')
@@ -163,15 +162,15 @@ class AutoSellOrders:
                     continue
 
                 eq_usd = self._safe_float(detail.get('eqUsd'))
-                if eq_usd > NON_USDT_ASSET_GATE_USD:
+                if eq_usd >= self.min_usd_value:
                     significant_assets.append((ccy, eq_usd))
 
             if significant_assets:
                 assets_text = ", ".join(f"{ccy}:${eq_usd:.4f}" for ccy, eq_usd in significant_assets[:10])
-                self.logger.info(f"🔍 Found non-USDT assets above ${NON_USDT_ASSET_GATE_USD}: {assets_text}")
+                self.logger.info(f"🔍 Found non-USDT assets at or above ${self.min_usd_value}: {assets_text}")
                 return True
 
-            self.logger.info(f"🔍 No non-USDT assets above ${NON_USDT_ASSET_GATE_USD}; skipping DB-backed auto-sell check")
+            self.logger.info(f"🔍 No non-USDT assets at or above ${self.min_usd_value}; skipping new auto-sells")
             return False
         except Exception as e:
             self.logger.warning(f"⚠️ Error checking trading account balances, falling back to DB-backed auto-sell flow: {e}")
@@ -342,6 +341,51 @@ class AutoSellOrders:
             result = result.rstrip('0').rstrip('.')
         return result or '0'
 
+    def get_instrument_sell_rules(self, inst_id):
+        """Return the exchange lot/minimum size rules, cached per instrument.
+
+        Falling back to ``None`` preserves the existing configured USD
+        threshold when exchange metadata is temporarily unavailable.
+        """
+        cache = getattr(self, 'instrument_rules_cache', {})
+        if inst_id in cache:
+            return cache[inst_id]
+
+        try:
+            api = self.okx_client.get_public_api() or self.okx_client.get_market_api()
+            if not api or not hasattr(api, 'get_instruments'):
+                self.logger.warning(f"⚠️ No instrument metadata API for {inst_id}; using configured USD threshold")
+                cache[inst_id] = None
+                self.instrument_rules_cache = cache
+                return None
+
+            result = api.get_instruments(instType='SPOT', instId=inst_id)
+            if result.get('code') != '0' or not result.get('data'):
+                self.logger.warning(f"⚠️ Could not load sell rules for {inst_id}; using configured USD threshold")
+                cache[inst_id] = None
+                self.instrument_rules_cache = cache
+                return None
+
+            item = result['data'][0]
+            lot_sz = Decimal(str(item.get('lotSz', '0')))
+            min_sz = Decimal(str(item.get('minSz', '0')))
+            if lot_sz <= 0 or min_sz <= 0:
+                raise ValueError(f"invalid lotSz/minSz: {lot_sz}/{min_sz}")
+
+            rules = {'lot_sz': lot_sz, 'min_sz': min_sz}
+            cache[inst_id] = rules
+            self.instrument_rules_cache = cache
+            return rules
+        except Exception as e:
+            self.logger.warning(f"⚠️ Could not load sell rules for {inst_id}; using configured USD threshold: {e}")
+            cache[inst_id] = None
+            self.instrument_rules_cache = cache
+            return None
+
+    @staticmethod
+    def _round_down_to_step(value: Decimal, step: Decimal) -> Decimal:
+        return (value / step).to_integral_value(rounding=ROUND_DOWN) * step
+
     def get_available_balance(self, inst_id):
         """Get available balance and available USD value for a specific instrument.
 
@@ -459,30 +503,11 @@ class AutoSellOrders:
             self.logger.warning(f"⚠️ Balance data unavailable for {inst_id}, keep for retry in next cycle")
             return 'FAILED', None
         
-        # Step 2: Check if balance is worth selling
-        if available_usd < self.min_usd_value:
-            if total_eq_usd >= self.min_usd_value:
-                self.logger.warning(
-                    f"⚠️ {inst_id} available value (${available_usd:.6f}) is small but total position "
-                    f"(${total_eq_usd:.6f}) is significant"
-                    f"{' and currently frozen' if has_frozen_balance else ''}; keep for retry"
-                )
-                return 'FAILED', None
-            self.logger.warning(
-                f"💰 {inst_id} available USD value too small (${available_usd:.6f}) < ${self.min_usd_value}, "
-                "marking as sold (dust position)"
-            )
-            return 'INSUFFICIENT_VALUE', None
-        
+        # Step 2: Determine sell amount - use requested size if available, otherwise use full balance
         if actual_balance <= 0:
             self.logger.warning(f"💰 {inst_id} Balance is 0, cannot sell")
             return 'FAILED', None
-        
-        if not self.trade_api:
-            self.logger.warning(f"⚠️ Trade API not initialized, cannot place sell order for {inst_id}")
-            return 'FAILED', None
 
-        # Step 3: Determine sell amount - use requested size if available, otherwise use full balance
         requested_size = Decimal(str(size))
         if requested_size <= 0:
             self.logger.warning(f"⚠️ Invalid requested size for {inst_id}: {size}")
@@ -499,6 +524,38 @@ class AutoSellOrders:
 
         if sell_amount_decimal <= 0:
             self.logger.warning(f"⚠️ Sell amount resolved to 0 for {inst_id}, keep for retry")
+            return 'FAILED', None
+
+        # Enforce the exchange's lot/minimum-size rules and derive the
+        # effective dust threshold from both configuration and the instrument.
+        rules = self.get_instrument_sell_rules(inst_id)
+        effective_min_usd = Decimal(str(self.min_usd_value))
+        if rules:
+            sell_amount_decimal = self._round_down_to_step(sell_amount_decimal, rules['lot_sz'])
+            unit_usd_value = (
+                Decimal(str(available_usd)) / Decimal(str(actual_balance))
+                if actual_balance > 0 and available_usd > 0 else Decimal('0')
+            )
+            effective_min_usd = max(effective_min_usd, rules['min_sz'] * unit_usd_value)
+            if sell_amount_decimal < rules['min_sz']:
+                available_usd = min(available_usd, float(sell_amount_decimal * unit_usd_value))
+
+        if sell_amount_decimal <= 0 or Decimal(str(available_usd)) < effective_min_usd:
+            if Decimal(str(total_eq_usd)) >= effective_min_usd:
+                self.logger.warning(
+                    f"⚠️ {inst_id} available value (${available_usd:.6f}) is below its effective minimum "
+                    f"(${effective_min_usd}) while total position is ${total_eq_usd:.6f}"
+                    f"{' and frozen' if has_frozen_balance else ''}; keep for retry"
+                )
+                return 'FAILED', None
+            self.logger.warning(
+                f"💰 {inst_id} value (${total_eq_usd:.6f}) is below its effective sell minimum "
+                f"(${effective_min_usd}); marking as dust"
+            )
+            return 'INSUFFICIENT_VALUE', None
+
+        if not self.trade_api:
+            self.logger.warning(f"⚠️ Trade API not initialized, cannot place sell order for {inst_id}")
             return 'FAILED', None
 
         sell_amount = self._decimal_to_plain_str(sell_amount_decimal)
@@ -635,8 +692,8 @@ class AutoSellOrders:
 
     def process_sell_orders(self, verify_daily_close=False):
         """Process all orders ready to sell"""
-        has_significant_assets = self.has_significant_non_usdt_assets()
         self.ensure_database_initialized()
+        has_significant_assets = self.has_significant_non_usdt_assets()
         if has_significant_assets:
             self.normalize_pending_sell_times()
         orders = self.get_orders_ready_to_sell()

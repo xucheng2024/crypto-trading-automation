@@ -67,6 +67,12 @@ wheels/
 *.egg
 MANIFEST
 
+# This repository's application code lives in lib/.  Keep the directory
+# visible to Git; the generic Python build-artifact rule above would otherwise
+# hide newly added database modules.
+!lib/
+!lib/**/*.py
+
 # Database files
 *.db
 *.db-journal

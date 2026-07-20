@@ -611,6 +611,9 @@ class OKXAlgoTrigger:
             
             # Load blacklisted cryptocurrencies
             blacklisted_cryptos = self.blacklist_manager.get_blacklisted_cryptos()
+            if blacklisted_cryptos is None:
+                logger.error("❌ Unable to verify blacklist; aborting trigger creation (fail closed)")
+                return False
             if blacklisted_cryptos:
                 logger.info(f"🚫 Blacklisted cryptocurrencies: {sorted(blacklisted_cryptos)}")
             else:

@@ -1,5 +1,6 @@
 import logging
 import unittest
+from decimal import Decimal
 from unittest.mock import patch
 
 from auto_sell_orders import AutoSellOrders
@@ -17,8 +18,10 @@ class _TradeAPI:
         self.place_result = place_result
         self.order_result = order_result
         self.last_get_order_kwargs = None
+        self.last_place_order_kwargs = None
 
-    def place_order(self, **_kwargs):
+    def place_order(self, **kwargs):
+        self.last_place_order_kwargs = kwargs
         return self.place_result
 
     def get_order(self, **kwargs):
@@ -48,6 +51,32 @@ class _OKXClientWithAccount:
         return self.account_api
 
 
+class _BalanceAPI:
+    def __init__(self, result):
+        self.result = result
+
+    def get_account_balance(self, **_kwargs):
+        return self.result
+
+
+class _Cursor:
+    def __init__(self, rows):
+        self.rows = rows
+        self.executed = []
+        self.rowcount = 1
+
+    def execute(self, statement, params=None):
+        self.executed.append((statement, params))
+
+    def fetchall(self):
+        return self.rows
+
+
+class _Connection:
+    def commit(self):
+        pass
+
+
 class OrderSafetyTests(unittest.TestCase):
     def test_operation_error_rejects_per_order_failure_and_empty_mutation_data(self):
         self.assertIsNotNone(get_order_operation_error({'code': '0', 'data': [{'sCode': '51000', 'sMsg': 'bad'}]}))
@@ -71,6 +100,26 @@ class OrderSafetyTests(unittest.TestCase):
             seller.place_market_sell_order('BTC-USDT', '1', 'sell-test'),
             ('FILLED', '123'),
         )
+
+    def test_market_sell_rounds_down_to_exchange_lot_size(self):
+        seller = AutoSellOrders.__new__(AutoSellOrders)
+        seller.logger = logging.getLogger('test-auto-sell')
+        seller.min_usd_value = 0.01
+        seller.instrument_rules_cache = {
+            'BTC-USDT': {'lot_sz': Decimal('0.01'), 'min_sz': Decimal('0.01')},
+        }
+        seller.okx_client = object()
+        seller.trade_api = _TradeAPI(
+            {'code': '0', 'data': [{'sCode': '0', 'ordId': '123'}]},
+            {'code': '0', 'data': [{'state': 'filled'}]},
+        )
+        seller.get_available_balance = lambda _inst_id: (1, 100, 100, False, True)
+
+        self.assertEqual(
+            seller.place_market_sell_order('BTC-USDT', '0.019', 'sell-test'),
+            ('FILLED', '123'),
+        )
+        self.assertEqual(seller.trade_api.last_place_order_kwargs['sz'], '0.01')
 
     def test_unconfirmed_sell_is_retained_for_verification(self):
         seller = AutoSellOrders.__new__(AutoSellOrders)
@@ -242,6 +291,78 @@ class OrderSafetyTests(unittest.TestCase):
         self.assertTrue(OKXAlgoTrigger._is_expected_skip_reason("Blacklisted: delisted"))
         self.assertTrue(OKXAlgoTrigger._is_expected_skip_reason("Skipped due to yesterday gain above 10%"))
         self.assertFalse(OKXAlgoTrigger._is_expected_skip_reason("Failed to create order"))
+
+    def test_trigger_creation_stops_when_blacklist_cannot_be_verified(self):
+        trigger_creator = OKXAlgoTrigger.__new__(OKXAlgoTrigger)
+        trigger_creator.blacklist_manager = type('Blacklist', (), {
+            'get_blacklisted_cryptos': lambda _self: None,
+        })()
+        trigger_creator._get_significant_non_usdt_assets = lambda: []
+
+        class _ConfigManager:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def load_full_config(self):
+                return {'crypto_configs': {'BTC-USDT': {'best_limit': '90'}}}
+
+        with patch('config_manager.ConfigManager', _ConfigManager):
+            self.assertFalse(trigger_creator.process_limits_from_database())
+
+    def test_auto_sell_uses_configured_threshold_instead_of_fixed_one_dollar_gate(self):
+        seller = AutoSellOrders.__new__(AutoSellOrders)
+        seller.logger = logging.getLogger('test-auto-sell')
+        seller.min_usd_value = 0.01
+        seller.okx_client = _OKXClientWithAccount(_BalanceAPI({
+            'code': '0',
+            'data': [{'details': [{'ccy': 'BTC', 'eqUsd': '0.50'}]}],
+        }))
+        self.assertTrue(seller.has_significant_non_usdt_assets())
+
+    def test_manual_sell_reconciliation_does_not_mark_frozen_or_non_dust_balance_sold(self):
+        fetcher = OKXFilledOrdersFetcher.__new__(OKXFilledOrdersFetcher)
+        fetcher.ensure_database_initialized = lambda: None
+        fetcher.cursor = _Cursor([('BTC-USDT',)])
+        fetcher.conn = _Connection()
+        fetcher.okx_client = _OKXClientWithAccount(_BalanceAPI({
+            'code': '0',
+            'data': [{'details': [{
+                'ccy': 'BTC', 'eqUsd': '0.50', 'frozenBal': '0.1', 'ordFrozen': '0',
+            }]}],
+        }))
+
+        with patch('fetch_filled_orders.time.sleep'):
+            fetcher.auto_mark_manual_sells()
+
+        updates = [statement for statement, _params in fetcher.cursor.executed if 'SET sold_status' in statement]
+        self.assertEqual(updates, [])
+
+    def test_manual_sell_reconciliation_marks_only_unsubmitted_dust_lots(self):
+        fetcher = OKXFilledOrdersFetcher.__new__(OKXFilledOrdersFetcher)
+        fetcher.ensure_database_initialized = lambda: None
+        fetcher.cursor = _Cursor([('BTC-USDT',)])
+        fetcher.conn = _Connection()
+        fetcher.okx_client = _OKXClientWithAccount(_BalanceAPI({
+            'code': '0',
+            'data': [{'details': [{'ccy': 'BTC', 'eqUsd': '0.001', 'frozenBal': '0', 'ordFrozen': '0'}]}],
+        }))
+
+        with patch('fetch_filled_orders.time.sleep'):
+            fetcher.auto_mark_manual_sells()
+
+        updates = [statement for statement, _params in fetcher.cursor.executed if 'SET sold_status' in statement]
+        self.assertEqual(len(updates), 1)
+        self.assertIn('AND sold_status IS NULL', updates[0])
+
+    def test_trigger_cancellation_uses_final_exchange_state_not_transient_batch_errors(self):
+        manager = OKXOrderManager.__new__(OKXOrderManager)
+        order = {'instId': 'BTC-USDT', 'algoId': '1', 'ordType': 'trigger'}
+        pending_responses = [[order], []]
+        manager.get_pending_algo_orders = lambda: pending_responses.pop(0)
+        manager.cancel_algo_orders_batch = lambda _orders: False
+
+        with patch('cancel_pending_triggers.time.sleep'):
+            self.assertTrue(manager.cancel_all_pending_triggers())
 
     def test_yesterday_gain_filter_uses_strict_ten_percent_threshold(self):
         class _MarketAPI:
