@@ -2,10 +2,14 @@
 
 ## Required Environment Variables
 
-### 1. Neon PostgreSQL Database
+### 1. SQLite Database
 ```bash
-export DATABASE_URL="postgresql://<user>:<password>@<host>/<database>?sslmode=require"
+export DATABASE_URL="sqlite:////absolute/path/to/trading.sqlite3"
 ```
+
+Production uses `/home/ubuntu/.local/share/crypto-trading/trading.sqlite3` on the
+dedicated self-hosted runner. The database file must already exist; the
+application fails closed instead of creating an empty production database.
 
 ### 2. OKX API Credentials
 ```bash
@@ -24,7 +28,7 @@ export OKX_TESTNET="false"  # false=Live trading, true=Demo trading
 ### 1. Set Environment Variables
 ```bash
 # Copy the environment variables above, replace with your actual values
-export DATABASE_URL="your_neon_connection_string"
+export DATABASE_URL="sqlite:////absolute/path/to/trading.sqlite3"
 export OKX_API_KEY="your_api_key"
 export OKX_SECRET_KEY="your_secret_key"
 export OKX_PASSPHRASE="your_passphrase"
@@ -47,7 +51,6 @@ python auto_sell_orders.py
 
 In your GitHub repository's Settings > Secrets and variables > Actions, add:
 
-- `DATABASE_URL`: Your Neon connection string
 - `OKX_API_KEY`: Your OKX API key
 - `OKX_SECRET_KEY`: Your OKX secret key
 - `OKX_PASSPHRASE`: Your OKX passphrase
@@ -55,7 +58,7 @@ In your GitHub repository's Settings > Secrets and variables > Actions, add:
 ## Important Notes
 
 1. **Do not commit .env file** to Git
-2. **DATABASE_URL must** start with `postgresql://`
+2. **DATABASE_URL must** start with `sqlite:///` or `postgresql://`
 3. **All environment variables are required**
 4. **Local development** requires setting environment variables
-5. **GitHub Actions** will automatically read from Secrets
+5. **GitHub Actions** uses the persistent SQLite path configured in the workflow

@@ -1,6 +1,6 @@
 # Crypto Trading Automation System
 
-A comprehensive automated crypto trading system with OKX exchange integration, featuring modular architecture, algorithmic trading strategies, intelligent delisting protection, automated order management, and high-precision trading algorithms. **Now deployed on Cloudflare Workers + GitHub Actions with PostgreSQL database and enhanced security.**
+A comprehensive automated crypto trading system with OKX exchange integration, featuring modular architecture, algorithmic trading strategies, intelligent delisting protection, automated order management, and high-precision trading algorithms. **Now deployed on Cloudflare Workers + a VPS-hosted GitHub Actions runner with a persistent SQLite database.**
 
 ## 🚀 Quick Start
 
@@ -22,7 +22,7 @@ python monitor_delist.py
 ### Cloud Deployment ⭐
 - **Cloudflare Workers Cron** - Precise minute-level scheduling with 99.9% uptime
 - **GitHub Actions** - Automated script execution triggered by Cloudflare Workers
-- **PostgreSQL Database** - Cloud-hosted database (Neon) for scalability
+- **SQLite Database** - Persistent database on the allowlisted VPS
 - **Environment Secrets** - Secure credential management via GitHub Secrets
 - **Automated Logging** - Centralized log collection and retention
 - **🔒 Enhanced Security** - No hardcoded secrets, all sensitive data via environment variables
@@ -42,7 +42,7 @@ python monitor_delist.py
 - **`protection_manager.py`** - Automated protection operations orchestration (232 lines)
 
 ### Database & Utilities
-- **`lib/database.py`** - PostgreSQL database integration with unified connection management
+- **`lib/database.py`** - PostgreSQL/SQLite-compatible database integration
 - **`.github/workflows/trading.yml`** - GitHub Actions workflow for automated execution
 - **`backups/`** - Automatic configuration backups
 
@@ -63,6 +63,7 @@ python monitor_delist.py
 - **🔧 Universal OKX Client** - Single OKX API client shared across all scripts, eliminating code duplication
 - **📊 Better Maintainability** - 59% code reduction in main script, improved testability and debugging
 - **☁️ Cloud Migration** - Migrated from local SQLite to PostgreSQL with GitHub Actions automation
+- **🗄️ VPS Database Cutover** - Migrated the production Neon dataset to persistent SQLite on the self-hosted runner
 - **⏰ Precise Scheduling** - Replaced GitHub Actions cron with Cloudflare Workers for minute-level accuracy
 - **📦 SDK Update** - Switched to `python-okx==0.4.0` with new submodule imports (`okx.Trade`, `okx.Funding`, etc.)
 - **🗄️ DB Migration Guard** - Auto-create `sold_status` column in `filled_orders` on startup (PostgreSQL)
@@ -227,7 +228,7 @@ python monitor_delist.py
 
 ### Configuration Files
 - **`limits.json`** - Trading limits and trigger price coefficients for 29 crypto pairs
-- **`.env`** - Environment variables including DATABASE_URL for PostgreSQL
+- **`.env`** - Environment variables including a PostgreSQL or SQLite `DATABASE_URL`
 - **`backups/limits_*.json`** - Automatic configuration backups with timestamps
 
 ### Log Files
@@ -238,8 +239,8 @@ python monitor_delist.py
 ## 🔧 Environment Variables
 
 ```env
-# PostgreSQL Database (required)
-DATABASE_URL=your_database_connection_string
+# Persistent SQLite database (production path)
+DATABASE_URL=sqlite:////home/ubuntu/.local/share/crypto-trading/trading.sqlite3
 
 # OKX Production API (required for private endpoints)
 OKX_API_KEY=your_api_key
@@ -333,7 +334,7 @@ python auto_sell_orders.py
 
 ### Database Setup
 ```bash
-# Initialize PostgreSQL database
+# Initialize the configured database
 python lib/database.py
 
 # Test database connection
@@ -514,4 +515,4 @@ if affected:
 This project is for educational and personal use. Please ensure compliance with OKX API terms and local trading regulations.
 
 ---
-**System Architecture**: Modular + Cloud • **Total Lines**: 1,120+ (5 modules) • **Main Script**: 277 lines • **Code Reduction**: 59% • **API Unification**: 6 scripts share 1 OKX client • **Database**: PostgreSQL (Neon) • **Deployment**: Cloudflare Workers + GitHub Actions • **Scheduling**: Precise minute-level cron via Cloudflare Workers • **TradeId-Centric**: Individual transaction processing with enhanced deduplication • **Database Schema**: tradeId as business primary key, VARCHAR sold_status • **24-Hour Rolling**: Monitor with enhanced crypto matching and false positive prevention • **🔒 Security**: Environment variables only, no hardcoded secrets • **✅ Production**: Deployed to crypto-trading-cron-prod.eatfreshapple.workers.dev • **Last Updated**: 2025-09-03
+**System Architecture**: Modular + Cloud • **API Unification**: Shared OKX client • **Database**: SQLite on the VPS self-hosted runner • **Deployment**: Cloudflare Workers + GitHub Actions • **Scheduling**: Precise minute-level cron via Cloudflare Workers • **TradeId-Centric**: Individual transaction processing with enhanced deduplication • **24-Hour Rolling**: Monitor with enhanced crypto matching and false positive prevention • **🔒 Security**: Environment variables only, no hardcoded secrets • **✅ Production**: Deployed to crypto-trading-cron-prod.eatfreshapple.workers.dev
