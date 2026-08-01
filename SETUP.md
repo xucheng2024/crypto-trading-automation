@@ -62,3 +62,17 @@ In your GitHub repository's Settings > Secrets and variables > Actions, add:
 3. **OKX credentials are required**; `DATABASE_URL` is set directly by the VPS workflow
 4. **Local development** requires setting environment variables
 5. **GitHub Actions** uses the persistent SQLite path configured in the workflow
+
+## Manual VPS Runs
+
+GitHub Actions holds a VPS-wide advisory lock while trading scripts run. Use the
+same lock for manual SSH or cron execution so it cannot overlap an automated run:
+
+```bash
+flock -w 60 /home/ubuntu/.local/share/crypto-trading/trading.lock \
+  python fetch_filled_orders.py --force-db
+```
+
+The workflow fails after 60 seconds if another cooperating trading process still
+holds the lock. The full job also has a 15-minute timeout to prevent a hung API
+call from blocking later runs indefinitely.

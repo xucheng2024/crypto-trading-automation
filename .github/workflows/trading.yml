@@ -34,6 +34,7 @@ jobs:
   trading:
     name: Crypto Trading Bot
     runs-on: [self-hosted, linux, x64, crypto-trading]
+    timeout-minutes: 15
     
     steps:
       - name: Checkout code
@@ -138,6 +139,18 @@ jobs:
           OKX_TESTNET: false
         run: |
           set -e
+
+          # Serialize all trading side effects on the VPS, including runs that
+          # may be started outside this workflow but use the same lock file.
+          TRADING_LOCK_FILE=/home/ubuntu/.local/share/crypto-trading/trading.lock
+          mkdir -p "$(dirname "$TRADING_LOCK_FILE")"
+          exec 9>"$TRADING_LOCK_FILE"
+          chmod 600 "$TRADING_LOCK_FILE"
+          if ! flock -w 60 9; then
+            echo "[error] Another trading process holds $TRADING_LOCK_FILE"
+            exit 1
+          fi
+          echo "[lock] Acquired VPS trading lock: $TRADING_LOCK_FILE"
           
           # Get scripts list
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
