@@ -42,15 +42,6 @@ def get_sqlite_path(database_url: str) -> Path:
     return Path(raw_path).expanduser().resolve()
 
 
-def _adapt_sqlite_query(statement: str) -> str:
-    statement = statement.replace("%s", "?")
-    return re.sub(
-        r"\b([A-Za-z_][A-Za-z0-9_.]*)\s*~\s*('(?:''|[^'])*')",
-        r"\1 REGEXP \2",
-        statement,
-    )
-
-
 def _adapt_sqlite_value(value: Any) -> Any:
     if isinstance(value, bool):
         return int(value)
@@ -75,17 +66,15 @@ class SQLiteCursor:
         self._cursor = cursor
 
     def execute(self, statement: str, params: Optional[Iterable[Any]] = None):
-        query = _adapt_sqlite_query(statement)
         adapted = _adapt_sqlite_params(params)
         if adapted is None:
-            self._cursor.execute(query)
+            self._cursor.execute(statement)
         else:
-            self._cursor.execute(query, adapted)
+            self._cursor.execute(statement, adapted)
         return self
 
     def executemany(self, statement: str, rows: Iterable[Iterable[Any]]):
-        query = _adapt_sqlite_query(statement)
-        self._cursor.executemany(query, (_adapt_sqlite_params(row) for row in rows))
+        self._cursor.executemany(statement, (_adapt_sqlite_params(row) for row in rows))
         return self
 
     def __enter__(self):

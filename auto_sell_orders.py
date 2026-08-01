@@ -196,16 +196,16 @@ class AutoSellOrders:
                 (
                   sell_time IS NOT NULL
                   AND sell_time != ''
-                  AND sell_time ~ '^[0-9]+$'
-                  AND CAST(sell_time AS BIGINT) <= %s
+                  AND sell_time REGEXP '^[0-9]+$'
+                  AND CAST(sell_time AS BIGINT) <= ?
                 )
                 OR
                 (
                   (sell_time IS NULL OR sell_time = '')
                   AND ts IS NOT NULL
                   AND ts != ''
-                  AND ts ~ '^[0-9]+$'
-                  AND CAST(ts AS BIGINT) < %s
+                  AND ts REGEXP '^[0-9]+$'
+                  AND CAST(ts AS BIGINT) < ?
                 )
               )
             ORDER BY CAST(COALESCE(NULLIF(sell_time, ''), NULLIF(ts, '')) AS BIGINT) ASC
@@ -241,13 +241,13 @@ class AutoSellOrders:
         """
         self.cursor.execute('''
             UPDATE filled_orders
-            SET sell_time = CAST(CAST(ts AS BIGINT) + %s AS TEXT)
+            SET sell_time = CAST(CAST(ts AS BIGINT) + ? AS TEXT)
             WHERE side = 'buy'
               AND sold_status IS NULL
               AND ts IS NOT NULL
               AND ts != ''
-              AND ts ~ '^[0-9]+$'
-              AND sell_time IS DISTINCT FROM CAST(CAST(ts AS BIGINT) + %s AS TEXT)
+              AND ts REGEXP '^[0-9]+$'
+              AND sell_time IS DISTINCT FROM CAST(CAST(ts AS BIGINT) + ? AS TEXT)
         ''', (24 * 60 * 60 * 1000, 24 * 60 * 60 * 1000))
         updated_count = self.cursor.rowcount
         if updated_count:
@@ -270,8 +270,8 @@ class AutoSellOrders:
               AND (sold_status IS NULL OR sold_status != 'SOLD')
               AND ts IS NOT NULL
               AND ts != ''
-              AND ts ~ '^[0-9]+$'
-              AND CAST(ts AS BIGINT) < %s
+              AND ts REGEXP '^[0-9]+$'
+              AND CAST(ts AS BIGINT) < ?
             ORDER BY CAST(ts AS BIGINT) ASC
         ''', (today_start_ts,))
         orders = self.cursor.fetchall()
@@ -301,7 +301,7 @@ class AutoSellOrders:
             self.cursor.execute('''
                 UPDATE filled_orders 
                 SET sold_status = 'PROCESSING'
-                WHERE tradeId = %s AND sold_status IS NULL
+                WHERE tradeId = ? AND sold_status IS NULL
             ''', (trade_id,))
             self.conn.commit()
             if self.cursor.rowcount == 1:
@@ -320,7 +320,7 @@ class AutoSellOrders:
             self.cursor.execute('''
                 UPDATE filled_orders 
                 SET sold_status = NULL, sell_order_id = NULL
-                WHERE tradeId = %s AND sold_status IN ('PROCESSING', 'SELL_SUBMITTED')
+                WHERE tradeId = ? AND sold_status IN ('PROCESSING', 'SELL_SUBMITTED')
             ''', (trade_id,))
             self.conn.commit()
             self.logger.info(f"🔓 Cleared processing lock: {trade_id}")
@@ -457,8 +457,8 @@ class AutoSellOrders:
         try:
             self.cursor.execute('''
                 UPDATE filled_orders
-                SET sold_status = 'SELL_SUBMITTED', sell_order_id = %s
-                WHERE tradeId = %s AND sold_status = 'PROCESSING'
+                SET sold_status = 'SELL_SUBMITTED', sell_order_id = ?
+                WHERE tradeId = ? AND sold_status = 'PROCESSING'
             ''', (order_id, trade_id))
             self.conn.commit()
             return self.cursor.rowcount == 1
@@ -634,7 +634,7 @@ class AutoSellOrders:
             self.cursor.executemany('''
                 UPDATE filled_orders
                 SET sold_status = 'SOLD'
-                WHERE tradeId = %s
+                WHERE tradeId = ?
                   AND sold_status IN ('PROCESSING', 'SELL_SUBMITTED')
             ''', [(trade_id,) for trade_id in trade_ids])
             self.conn.commit()
@@ -655,7 +655,7 @@ class AutoSellOrders:
             self.cursor.executemany('''
                 UPDATE filled_orders
                 SET trigger_rebuild_pending = TRUE
-                WHERE tradeId = %s
+                WHERE tradeId = ?
                   AND sold_status IN ('PROCESSING', 'SELL_SUBMITTED')
             ''', [(trade_id,) for trade_id in trade_ids])
             self.conn.commit()

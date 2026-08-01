@@ -47,7 +47,7 @@ class Database:
         try:
             self.cursor.execute('''
                 INSERT INTO okx_announcements (ann_type, title, url, p_time)
-                VALUES (%s, %s, %s, %s)
+                VALUES (?, ?, ?, ?)
             ''', (ann_type, title, url, p_time))
             self.conn.commit()
             return True
@@ -61,7 +61,7 @@ class Database:
             self.cursor.execute('''
                 SELECT * FROM okx_announcements 
                 ORDER BY created_at DESC 
-                LIMIT %s
+                LIMIT ?
             ''', (limit,))
             return self.cursor.fetchall()
         except Exception as e:
@@ -73,7 +73,7 @@ class Database:
         try:
             self.cursor.execute('''
                 INSERT INTO monitoring_logs (event_type, message)
-                VALUES (%s, %s)
+                VALUES (?, ?)
             ''', (event_type, message))
             self.conn.commit()
             return True
@@ -104,7 +104,7 @@ class Database:
                 INSERT INTO limits_config 
                 (generated_at, strategy_name, description, strategy_type, duration,
                  limit_range_min, limit_range_max, min_trades, min_avg_earn, buy_fee, sell_fee)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', (
                 generated_at,
                 config_data.get('strategy_name'),
@@ -125,7 +125,7 @@ class Database:
                 self.cursor.execute('''
                     INSERT INTO crypto_limits 
                     (inst_id, best_limit, best_duration, max_returns, trade_count, trades_per_month, win_rate, median_earn, avg_return_per_trade)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ''', (
                     inst_id,
                     config.get('best_limit'),
@@ -226,7 +226,7 @@ class Database:
             self.cursor.execute('''
                 SELECT inst_id, best_limit, best_duration, max_returns, trade_count, 
                        trades_per_month, win_rate, median_earn, avg_return_per_trade
-                FROM crypto_limits WHERE inst_id = %s
+                FROM crypto_limits WHERE inst_id = ?
             ''', (inst_id,))
             row = self.cursor.fetchone()
             

@@ -352,7 +352,7 @@ class OKXFilledOrdersFetcher:
             self.cursor.executemany('''
                 INSERT INTO filled_orders 
                 (instId, ordId, tradeId, billId, fillPx, fillSz, side, ts, subType, execType, fee, feeCcy, feeRate, fillTime, posSide, clOrdId, tag, sell_time)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT (tradeId) DO UPDATE SET
                     fillPx = EXCLUDED.fillPx,
                     fillSz = EXCLUDED.fillSz,
@@ -525,7 +525,7 @@ class OKXFilledOrdersFetcher:
                             UPDATE filled_orders 
                             SET sold_status = 'SOLD'
                             WHERE side = 'buy' 
-                            AND instId = %s
+                            AND instId = ?
                             AND sold_status IS NULL
                         ''', (inst_id,))
                         

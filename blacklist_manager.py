@@ -67,7 +67,7 @@ class BlacklistManager:
                     cursor.execute("""
                         SELECT 1 
                         FROM blacklist 
-                        WHERE crypto_symbol = %s AND is_active = TRUE
+                        WHERE crypto_symbol = ? AND is_active = TRUE
                     """, (crypto_symbol,))
                     
                     return cursor.fetchone() is not None
@@ -87,7 +87,7 @@ class BlacklistManager:
                     cursor.execute("""
                         SELECT reason, blacklist_type 
                         FROM blacklist 
-                        WHERE crypto_symbol = %s AND is_active = TRUE
+                        WHERE crypto_symbol = ? AND is_active = TRUE
                     """, (crypto_symbol,))
                     
                     result = cursor.fetchone()
@@ -110,7 +110,7 @@ class BlacklistManager:
                 with get_database_cursor(conn) as cursor:
                     cursor.execute("""
                         INSERT INTO blacklist (crypto_symbol, reason, blacklist_type, notes)
-                        VALUES (%s, %s, %s, %s)
+                        VALUES (?, ?, ?, ?)
                         ON CONFLICT (crypto_symbol) 
                         DO UPDATE SET 
                             reason = EXCLUDED.reason,
@@ -152,7 +152,7 @@ class BlacklistManager:
                     cursor.execute("""
                         SELECT 1 
                         FROM processed_announcements 
-                        WHERE announcement_id = %s
+                        WHERE announcement_id = ?
                     """, (announcement_id,))
                     
                     return cursor.fetchone() is not None
@@ -175,7 +175,7 @@ class BlacklistManager:
                     cursor.execute("""
                         INSERT INTO processed_announcements 
                         (announcement_id, title, url, p_time, affected_cryptos, protection_executed, notes)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s)
+                        VALUES (?, ?, ?, ?, ?, ?, ?)
                         ON CONFLICT (announcement_id) DO NOTHING
                     """, (announcement_id, title, url, p_time,
                           sorted(affected_cryptos) if affected_cryptos else None,

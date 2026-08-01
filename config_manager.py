@@ -107,7 +107,7 @@ class ConfigManager:
                 config = self.db.get_crypto_config(pair_key)
                 if config:
                     # Remove from database
-                    self.db.cursor.execute('DELETE FROM crypto_limits WHERE inst_id = %s', (pair_key,))
+                    self.db.cursor.execute('DELETE FROM crypto_limits WHERE inst_id = ?', (pair_key,))
                     removed_cryptos.append(crypto)
                     self.logger.info(f"🗑️  Removed from database configuration: {pair_key}")
             
