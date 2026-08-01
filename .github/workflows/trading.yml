@@ -109,10 +109,27 @@ jobs:
           python --version
           pip list | grep -E "(requests|python-okx|psycopg2|tenacity|python-dotenv)" || echo "Some packages not found"
           echo "[verify] Environment verification complete"
+
+      - name: Verify local trading database
+        env:
+          DATABASE_URL: sqlite:////home/ubuntu/.local/share/crypto-trading/trading.sqlite3
+        run: |
+          python - <<'PY'
+          from lib.database import get_database_connection
+
+          connection = get_database_connection()
+          try:
+              integrity = connection.execute("PRAGMA integrity_check").fetchone()[0]
+              if integrity != "ok":
+                  raise RuntimeError(f"SQLite integrity check failed: {integrity}")
+              print("[verify] Local SQLite trading database integrity: OK")
+          finally:
+              connection.close()
+          PY
           
       - name: Select and run scripts
         env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DATABASE_URL: sqlite:////home/ubuntu/.local/share/crypto-trading/trading.sqlite3
           OKX_API_KEY: ${{ secrets.OKX_API_KEY }}
           OKX_SECRET_KEY: ${{ secrets.OKX_SECRET_KEY }}
           OKX_PASSPHRASE: ${{ secrets.OKX_PASSPHRASE }}
