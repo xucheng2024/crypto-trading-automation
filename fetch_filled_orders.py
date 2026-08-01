@@ -13,9 +13,6 @@ import logging.handlers
 import traceback
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, ROUND_HALF_UP, getcontext
-# import sqlite3  # Migrated to PostgreSQL
-import psycopg2
-from psycopg2.extras import RealDictCursor
 
 # Set Decimal precision
 getcontext().prec = 28
@@ -135,16 +132,17 @@ class OKXFilledOrdersFetcher:
             raise
 
     def ensure_database_initialized(self):
-        """Connect to PostgreSQL only when persistence or DB-backed checks are required."""
+        """Connect only when persistence or DB-backed checks are required."""
         if self.database_initialized:
             return
 
         from lib.database import get_database_connection
+        from lib.db_backend import get_database_backend
 
         self.conn = get_database_connection()
         self.cursor = self.conn.cursor()
         self.database_initialized = True
-        logger.info("✅ Connected to PostgreSQL database")
+        logger.info(f"✅ Connected to {get_database_backend(self.conn)} database")
 
     def has_recent_buy_fills(self, hours=24, limit=100):
         """Check recent OKX buy fills before touching the database."""

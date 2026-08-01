@@ -9,7 +9,6 @@ import os
 import sys
 import logging
 import logging.handlers
-# import sqlite3  # Migrated to PostgreSQL
 import time
 import hashlib
 from datetime import datetime
@@ -126,9 +125,10 @@ class AutoSellOrders:
         self.min_usd_value = self.load_auto_sell_config()
 
         from lib.database import get_database_connection
+        from lib.db_backend import get_database_backend
         self.conn = get_database_connection()
         self.cursor = self.conn.cursor()
-        self.logger.info("✅ Connected to PostgreSQL database")
+        self.logger.info(f"✅ Connected to {get_database_backend(self.conn)} database")
         self.logger.info(f"⚙️  Auto-sell threshold loaded: ${self.min_usd_value}")
 
     def has_significant_non_usdt_assets(self):

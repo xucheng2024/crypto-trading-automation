@@ -7,8 +7,7 @@ Responsible for querying blacklisted cryptocurrencies from database
 import os
 import logging
 from typing import Set, Optional
-import psycopg2
-from psycopg2.extras import RealDictCursor
+from lib.db_backend import get_database_connection, get_database_cursor
 
 # Load environment variables first
 try:
@@ -26,28 +25,7 @@ class BlacklistManager:
     
     def __init__(self, logger: Optional[logging.Logger] = None):
         self.logger = logger or logging.getLogger(__name__)
-        self.db_config = self._get_db_config()
-    
-    def _get_db_config(self) -> dict:
-        """Get database configuration from environment variables"""
-        db_url = os.getenv('DATABASE_URL')
-        if not db_url:
-            return {}
-        
-        # Parse DATABASE_URL to get connection parameters
-        try:
-            import urllib.parse
-            parsed = urllib.parse.urlparse(db_url)
-            return {
-                'host': parsed.hostname,
-                'port': parsed.port or 5432,
-                'database': parsed.path[1:],  # Remove leading '/'
-                'user': parsed.username,
-                'password': parsed.password
-            }
-        except Exception as e:
-            self.logger.error(f"❌ Error parsing DATABASE_URL: {e}")
-            return {}
+        self.database_url = os.getenv('DATABASE_URL')
     
     def get_blacklisted_cryptos(self) -> Optional[Set[str]]:
         """Get active blacklist, or ``None`` when it cannot be verified.
@@ -56,12 +34,12 @@ class BlacklistManager:
         must treat ``None`` as an error rather than as an empty blacklist.
         """
         try:
-            if not all(self.db_config.values()):
+            if not self.database_url:
                 self.logger.error("❌ Database credentials not fully configured; blacklist cannot be verified")
                 return None
             
-            with psycopg2.connect(**self.db_config) as conn:
-                with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+            with get_database_connection(self.database_url) as conn:
+                with get_database_cursor(conn, dict_rows=True) as cursor:
                     cursor.execute("""
                         SELECT crypto_symbol 
                         FROM blacklist 
@@ -74,9 +52,6 @@ class BlacklistManager:
                     self.logger.info(f"📋 Loaded {len(blacklisted)} blacklisted cryptocurrencies: {sorted(blacklisted)}")
                     return blacklisted
                     
-        except psycopg2.Error as e:
-            self.logger.error(f"❌ Database error loading blacklist: {e}")
-            return None
         except Exception as e:
             self.logger.error(f"❌ Error loading blacklist: {e}")
             return None
@@ -84,11 +59,11 @@ class BlacklistManager:
     def is_blacklisted(self, crypto_symbol: str) -> bool:
         """Check if a cryptocurrency is blacklisted"""
         try:
-            if not all(self.db_config.values()):
+            if not self.database_url:
                 return False
             
-            with psycopg2.connect(**self.db_config) as conn:
-                with conn.cursor() as cursor:
+            with get_database_connection(self.database_url) as conn:
+                with get_database_cursor(conn) as cursor:
                     cursor.execute("""
                         SELECT 1 
                         FROM blacklist 
@@ -104,11 +79,11 @@ class BlacklistManager:
     def get_blacklist_reason(self, crypto_symbol: str) -> Optional[str]:
         """Get the reason for blacklisting a cryptocurrency"""
         try:
-            if not all(self.db_config.values()):
+            if not self.database_url:
                 return None
             
-            with psycopg2.connect(**self.db_config) as conn:
-                with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+            with get_database_connection(self.database_url) as conn:
+                with get_database_cursor(conn, dict_rows=True) as cursor:
                     cursor.execute("""
                         SELECT reason, blacklist_type 
                         FROM blacklist 
@@ -127,12 +102,12 @@ class BlacklistManager:
     def add_to_blacklist(self, crypto_symbol: str, reason: str, blacklist_type: str = 'delisted', notes: str = None) -> bool:
         """Add a cryptocurrency to blacklist"""
         try:
-            if not all(self.db_config.values()):
+            if not self.database_url:
                 self.logger.warning("⚠️ Database credentials not fully configured, skipping blacklist addition")
                 return False
             
-            with psycopg2.connect(**self.db_config) as conn:
-                with conn.cursor() as cursor:
+            with get_database_connection(self.database_url) as conn:
+                with get_database_cursor(conn) as cursor:
                     cursor.execute("""
                         INSERT INTO blacklist (crypto_symbol, reason, blacklist_type, notes)
                         VALUES (%s, %s, %s, %s)
@@ -169,11 +144,11 @@ class BlacklistManager:
     def is_announcement_processed(self, announcement_id: str) -> bool:
         """Check if an announcement has been processed before"""
         try:
-            if not all(self.db_config.values()):
+            if not self.database_url:
                 return False
             
-            with psycopg2.connect(**self.db_config) as conn:
-                with conn.cursor() as cursor:
+            with get_database_connection(self.database_url) as conn:
+                with get_database_cursor(conn) as cursor:
                     cursor.execute("""
                         SELECT 1 
                         FROM processed_announcements 
@@ -191,12 +166,12 @@ class BlacklistManager:
                                   protection_executed: bool = False, notes: str = None) -> bool:
         """Mark an announcement as processed"""
         try:
-            if not all(self.db_config.values()):
+            if not self.database_url:
                 self.logger.warning("⚠️ Database credentials not fully configured, skipping announcement tracking")
                 return False
             
-            with psycopg2.connect(**self.db_config) as conn:
-                with conn.cursor() as cursor:
+            with get_database_connection(self.database_url) as conn:
+                with get_database_cursor(conn) as cursor:
                     cursor.execute("""
                         INSERT INTO processed_announcements 
                         (announcement_id, title, url, p_time, affected_cryptos, protection_executed, notes)

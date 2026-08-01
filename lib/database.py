@@ -1,37 +1,11 @@
 #!/usr/bin/env python3
 """
-Database Configuration - PostgreSQL only
+Database configuration for PostgreSQL and SQLite.
 """
 
-import os
-import psycopg2
 from datetime import datetime
-
-def get_database_connection():
-    """Get PostgreSQL database connection"""
-    # Ensure environment variables are loaded
-    try:
-        from dotenv import load_dotenv
-        # Default to .env, but also support .env.local (README mentions it in some setups)
-        load_dotenv()
-        if not os.getenv('DATABASE_URL'):
-            load_dotenv(dotenv_path='.env.local')
-    except ImportError:
-        pass
-    
-    db_url = os.getenv('DATABASE_URL')
-    
-    if not db_url:
-        raise ValueError("DATABASE_URL environment variable is required")
-    
-    if not db_url.startswith('postgresql://'):
-        raise ValueError("DATABASE_URL must be a PostgreSQL connection string")
-    
-    try:
-        return psycopg2.connect(db_url)
-    except Exception as e:
-        print(f"❌ PostgreSQL connection failed: {e}")
-        raise
+from lib.db_backend import get_database_backend, get_database_connection
+from lib.sqlite_schema import create_sqlite_schema
 
 class Database:
     def __init__(self):
@@ -40,11 +14,11 @@ class Database:
         self.cursor = None
         
     def connect(self):
-        """Connect to PostgreSQL database"""
+        """Connect to the configured database."""
         try:
             self.conn = get_database_connection()
             self.cursor = self.conn.cursor()
-            print("✅ Connected to PostgreSQL database")
+            print(f"✅ Connected to {get_database_backend(self.conn)} database")
             return True
             
         except Exception as e:
@@ -60,6 +34,11 @@ class Database:
     def create_tables(self):
         """Create necessary database tables"""
         try:
+            if get_database_backend(self.conn) == "SQLite":
+                create_sqlite_schema(self.conn)
+                print("✅ Database tables created successfully")
+                return True
+
             # PostgreSQL syntax
             self.cursor.execute('''
                 CREATE TABLE IF NOT EXISTS okx_announcements (
@@ -294,7 +273,11 @@ class Database:
             
             # Build config structure
             config_data = {
-                'generated_at': config_row[1].isoformat() if config_row[1] else None,
+                'generated_at': (
+                    config_row[1].isoformat()
+                    if config_row[1] and hasattr(config_row[1], 'isoformat')
+                    else config_row[1]
+                ),
                 'strategy_name': config_row[2],
                 'description': config_row[3],
                 'strategy_type': config_row[4],
