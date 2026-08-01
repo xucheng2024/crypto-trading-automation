@@ -177,8 +177,8 @@ class BlacklistManager:
                         (announcement_id, title, url, p_time, affected_cryptos, protection_executed, notes)
                         VALUES (%s, %s, %s, %s, %s, %s, %s)
                         ON CONFLICT (announcement_id) DO NOTHING
-                    """, (announcement_id, title, url, p_time, 
-                          list(affected_cryptos) if affected_cryptos else None,
+                    """, (announcement_id, title, url, p_time,
+                          sorted(affected_cryptos) if affected_cryptos else None,
                           protection_executed, notes))
                     
                     conn.commit()

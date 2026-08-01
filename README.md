@@ -42,7 +42,7 @@ python monitor_delist.py
 - **`protection_manager.py`** - Automated protection operations orchestration (232 lines)
 
 ### Database & Utilities
-- **`lib/database.py`** - PostgreSQL/SQLite-compatible database integration
+- **`lib/database.py`** - SQLite database integration
 - **`.github/workflows/trading.yml`** - GitHub Actions workflow for automated execution
 - **`backups/`** - Automatic configuration backups
 
@@ -62,11 +62,10 @@ python monitor_delist.py
 - **⚙️ Configuration Management** - Automated backup and cleanup of trading configurations
 - **🔧 Universal OKX Client** - Single OKX API client shared across all scripts, eliminating code duplication
 - **📊 Better Maintainability** - 59% code reduction in main script, improved testability and debugging
-- **☁️ Cloud Migration** - Migrated from local SQLite to PostgreSQL with GitHub Actions automation
-- **🗄️ VPS Database Cutover** - Migrated the production Neon dataset to persistent SQLite on the self-hosted runner
+- **🗄️ VPS Database Cutover** - Uses persistent SQLite on the self-hosted runner
 - **⏰ Precise Scheduling** - Replaced GitHub Actions cron with Cloudflare Workers for minute-level accuracy
 - **📦 SDK Update** - Switched to `python-okx==0.4.0` with new submodule imports (`okx.Trade`, `okx.Funding`, etc.)
-- **🗄️ DB Migration Guard** - Auto-create `sold_status` column in `filled_orders` on startup (PostgreSQL)
+- **🗄️ DB Safety** - Fail-closed startup and integrity checks for the persistent SQLite database
 - **🧪 CI Compatibility** - `cancel_pending_triggers.py` runs without `.env` in Actions (uses Secrets)
 - **🕛 Workflow Control** - Nightly cancel/create steps also runnable via manual workflow dispatch
 - **🕐 Timezone Fix** - Fixed UTC/local time issues in `fetch_filled_orders.py` and `auto_sell_orders.py`
@@ -163,7 +162,7 @@ python monitor_delist.py
   - **Sell Time Calculation**: Automatically calculates sell_time as ts + 24 hours (UTC-based)
   - **Timezone Consistency**: All time calculations use UTC to match OKX API timestamps
   - **Real-time Monitoring**: Continuous order status monitoring with incremental updates
-  - **Database Storage**: PostgreSQL database with optimized schema for trade tracking
+- **Database Storage**: SQLite database with optimized schema for trade tracking
   - **Buy-only Storage**: Client-side filtering for side='buy' trades
   - **Smart Update Strategy**: Uses ON CONFLICT (tradeId) DO UPDATE to handle updates correctly
   - **Data Integrity**: Preserves sell_time and sold_status during updates
@@ -191,7 +190,7 @@ python monitor_delist.py
 #### `config_manager.py`
 - **Purpose**: Database configuration management and backup operations
 - **Features**:
-  - **Database Integration**: Reads and manages configuration from PostgreSQL database
+- **Database Integration**: Reads and manages configuration from SQLite
   - **Smart Loading**: Extracts base cryptocurrencies from trading pairs (BTC from BTC-USDT)
   - **Automatic Backup**: Creates timestamped JSON backups before modifications
   - **Safe Cleanup**: Removes delisted cryptocurrencies from database configuration
@@ -228,7 +227,7 @@ python monitor_delist.py
 
 ### Configuration Files
 - **`limits.json`** - Trading limits and trigger price coefficients for 29 crypto pairs
-- **`.env`** - Environment variables including a PostgreSQL or SQLite `DATABASE_URL`
+- **`.env`** - Environment variables including the SQLite `DATABASE_URL`
 - **`backups/limits_*.json`** - Automatic configuration backups with timestamps
 
 ### Log Files
@@ -307,7 +306,6 @@ Each transaction is processed individually with its own `sell_time` and `sold_st
 ```bash
 # 1. Fork this repository to your GitHub account
 # 2. Set up GitHub Secrets:
-#    - DATABASE_URL: Your PostgreSQL connection string
 #    - OKX_API_KEY: Your OKX API key
 #    - OKX_SECRET_KEY: Your OKX secret key
 #    - OKX_PASSPHRASE: Your OKX passphrase
@@ -319,8 +317,9 @@ Each transaction is processed individually with its own `sell_time` and `sold_st
 #    - Set GITHUB_TOKEN in Cloudflare Dashboard
 
 # 4. Enable GitHub Actions in your repository
-# 5. The system will automatically run on precise schedule via Cloudflare Workers
-# 6. You can manually trigger nightly steps (cancel/create) via "Run workflow"
+# 5. Ensure the self-hosted VPS runner has the persistent SQLite database path used by the workflow
+# 6. The system will automatically run on precise schedule via Cloudflare Workers
+# 7. You can manually trigger nightly steps (cancel/create) via "Run workflow"
 ```
 
 ### Local Development
@@ -374,7 +373,7 @@ crypto_remote/
 │   └── workflows/
 │       └── trading.yml      # Automated trading workflow (triggered by Cloudflare Workers)
 ├── lib/                     # Utility libraries
-│   └── database.py         # PostgreSQL database integration
+│   └── database.py         # SQLite database integration
 ├── backups/                # Automatic configuration backups
 │   └── limits_*.json      # Timestamped configuration backups
 ├── logs/                   # Detailed operation logs
@@ -434,7 +433,7 @@ crypto_remote/
 - **Price Precision**: High-precision Decimal arithmetic working perfectly
 - **Configuration Management**: Automatic backup and cleanup functionality
 - **Error Resolution**: All previous API issues resolved with enhanced error handling
-- **Cloud Migration**: Successfully migrated to PostgreSQL and GitHub Actions
+- **VPS Persistence**: SQLite database stored outside the Actions checkout directory
 - **Precise Scheduling**: Cloudflare Workers provide minute-level accuracy (99.9% uptime)
 - **TradeId-Centric Processing**: Complete refactor to individual transaction processing (2025-09-03)
 - **Enhanced Deduplication**: tradeId-based unique constraints prevent duplicate processing
@@ -454,7 +453,7 @@ crypto_remote/
 - **Extensibility**: Easy to add new protection features or API integrations
 - **Reliability**: Robust error handling and logging throughout all modules
 - **Performance**: Optimized API calls and efficient resource management
-- **Scalability**: Cloud-based deployment with PostgreSQL database
+- **Low Overhead**: Local SQLite storage for the single serialized trading runner
 - **Scheduling Precision**: Cloudflare Workers eliminate GitHub Actions cron inconsistencies
 
 ### Supported Crypto Pairs

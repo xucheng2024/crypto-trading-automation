@@ -58,7 +58,7 @@ In your GitHub repository's Settings > Secrets and variables > Actions, add:
 ## Important Notes
 
 1. **Do not commit .env file** to Git
-2. **DATABASE_URL must** start with `sqlite:///` or `postgresql://`
-3. **All environment variables are required**
+2. **DATABASE_URL must** start with `sqlite:///`
+3. **OKX credentials are required**; `DATABASE_URL` is set directly by the VPS workflow
 4. **Local development** requires setting environment variables
 5. **GitHub Actions** uses the persistent SQLite path configured in the workflow

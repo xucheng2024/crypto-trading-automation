@@ -107,7 +107,7 @@ jobs:
         run: |
           echo "[verify] Verifying Python environment..."
           python --version
-          pip list | grep -E "(requests|python-okx|psycopg2|tenacity|python-dotenv)" || echo "Some packages not found"
+          pip list | grep -E "(requests|python-okx|tenacity|python-dotenv)" || echo "Some packages not found"
           echo "[verify] Environment verification complete"
 
       - name: Verify local trading database

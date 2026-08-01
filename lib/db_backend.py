@@ -1,4 +1,4 @@
-"""Database backend compatibility helpers for PostgreSQL and SQLite."""
+"""SQLite database helpers for the trading runtime."""
 
 from __future__ import annotations
 
@@ -10,10 +10,6 @@ from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Iterable, Optional
-
-import psycopg2
-from psycopg2.extras import RealDictCursor
-
 
 SQLITE_URL_PREFIX = "sqlite:///"
 
@@ -32,8 +28,8 @@ def get_database_url(database_url: Optional[str] = None) -> str:
             pass
     if not url:
         raise ValueError("DATABASE_URL environment variable is required")
-    if not (url.startswith("postgresql://") or url.startswith(SQLITE_URL_PREFIX)):
-        raise ValueError("DATABASE_URL must use postgresql:// or sqlite:///")
+    if not url.startswith(SQLITE_URL_PREFIX):
+        raise ValueError("DATABASE_URL must use sqlite:///")
     return url
 
 
@@ -151,24 +147,14 @@ def get_database_connection(
     require_existing: Optional[bool] = None,
 ):
     url = get_database_url(database_url)
-    if url.startswith("postgresql://"):
-        return psycopg2.connect(url)
-
     if require_existing is None:
         require_existing = os.getenv("DATABASE_ALLOW_CREATE", "false").lower() != "true"
     return _open_sqlite(get_sqlite_path(url), require_existing=require_existing)
 
 
 def get_database_cursor(connection, *, dict_rows: bool = False):
-    if getattr(connection, "backend", None) == "sqlite":
-        return connection.cursor()
-    if dict_rows:
-        return connection.cursor(cursor_factory=RealDictCursor)
     return connection.cursor()
 
 
 def get_database_backend(connection=None, database_url: Optional[str] = None) -> str:
-    if getattr(connection, "backend", None) == "sqlite":
-        return "SQLite"
-    url = database_url or os.getenv("DATABASE_URL", "")
-    return "SQLite" if url.startswith(SQLITE_URL_PREFIX) else "PostgreSQL"
+    return "SQLite"

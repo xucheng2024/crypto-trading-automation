@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Database configuration for PostgreSQL and SQLite.
+SQLite database configuration.
 """
 
 from datetime import datetime
@@ -34,99 +34,7 @@ class Database:
     def create_tables(self):
         """Create necessary database tables"""
         try:
-            if get_database_backend(self.conn) == "SQLite":
-                create_sqlite_schema(self.conn)
-                print("✅ Database tables created successfully")
-                return True
-
-            # PostgreSQL syntax
-            self.cursor.execute('''
-                CREATE TABLE IF NOT EXISTS okx_announcements (
-                    id SERIAL PRIMARY KEY,
-                    ann_type VARCHAR(255) NOT NULL,
-                    title TEXT NOT NULL,
-                    url TEXT NOT NULL,
-                    p_time VARCHAR(255) NOT NULL,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            ''')
-            
-            self.cursor.execute('''
-                CREATE TABLE IF NOT EXISTS trading_history (
-                    id SERIAL PRIMARY KEY,
-                    inst_id VARCHAR(255) NOT NULL,
-                    side VARCHAR(50) NOT NULL,
-                    amount TEXT NOT NULL,
-                    price TEXT,
-                    status VARCHAR(50) DEFAULT 'pending',
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            ''')
-            
-            self.cursor.execute('''
-                CREATE TABLE IF NOT EXISTS monitoring_logs (
-                    id SERIAL PRIMARY KEY,
-                    event_type VARCHAR(255) NOT NULL,
-                    message TEXT NOT NULL,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            ''')
-            
-            # Create limits configuration table
-            self.cursor.execute('''
-                CREATE TABLE IF NOT EXISTS limits_config (
-                    id SERIAL PRIMARY KEY,
-                    generated_at TIMESTAMP NOT NULL,
-                    strategy_name VARCHAR(255) NOT NULL,
-                    description TEXT,
-                    strategy_type VARCHAR(100),
-                    duration INTEGER,
-                    limit_range_min INTEGER,
-                    limit_range_max INTEGER,
-                    min_trades INTEGER,
-                    min_avg_earn DECIMAL(10,4),
-                    buy_fee DECIMAL(10,6),
-                    sell_fee DECIMAL(10,6),
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            ''')
-            
-            # Create crypto limits table
-            self.cursor.execute('''
-                CREATE TABLE IF NOT EXISTS crypto_limits (
-                    id SERIAL PRIMARY KEY,
-                    inst_id VARCHAR(50) NOT NULL UNIQUE,
-                    best_limit VARCHAR(10) NOT NULL,
-                    best_duration VARCHAR(10),
-                    max_returns VARCHAR(20),
-                    trade_count VARCHAR(10),
-                    trades_per_month VARCHAR(20),
-                    win_rate VARCHAR(20),
-                    median_earn VARCHAR(20),
-                    avg_return_per_trade VARCHAR(20),
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            ''')
-            
-            # Add missing columns if table already exists (migration)
-            try:
-                self.cursor.execute('''
-                    ALTER TABLE crypto_limits 
-                    ADD COLUMN IF NOT EXISTS win_rate VARCHAR(20),
-                    ADD COLUMN IF NOT EXISTS median_earn VARCHAR(20)
-                ''')
-            except Exception:
-                pass  # Columns may already exist
-            
-            # Drop 7day/10day strategy table (strategy removed)
-            try:
-                self.cursor.execute('DROP TABLE IF EXISTS crypto_7day_drops')
-            except Exception:
-                pass
-            
-            self.conn.commit()
+            create_sqlite_schema(self.conn)
             print("✅ Database tables created successfully")
             return True
             
@@ -176,16 +84,6 @@ class Database:
     def save_limits_config(self, config_data):
         """Save limits configuration to database"""
         try:
-            # Ensure columns exist (migration)
-            try:
-                self.cursor.execute('ALTER TABLE crypto_limits ADD COLUMN IF NOT EXISTS win_rate VARCHAR(20)')
-                self.cursor.execute('ALTER TABLE crypto_limits ADD COLUMN IF NOT EXISTS median_earn VARCHAR(20)')
-                self.conn.commit()
-            except Exception as e:
-                # Columns may already exist or other issue, continue anyway
-                self.conn.rollback()
-                pass
-            
             # Clear existing config first
             self.cursor.execute('DELETE FROM limits_config')
             self.cursor.execute('DELETE FROM crypto_limits')
@@ -199,7 +97,7 @@ class Database:
                 try:
                     generated_at = datetime.fromisoformat(generated_at)
                 except ValueError:
-                    # Let PostgreSQL attempt casting if format is unexpected
+                    # Preserve an unexpected string for SQLite to store as text.
                     pass
             
             self.cursor.execute('''
