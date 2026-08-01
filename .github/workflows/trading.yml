@@ -33,7 +33,7 @@ concurrency:
 jobs:
   trading:
     name: Crypto Trading Bot
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64, crypto-trading]
     
     steps:
       - name: Checkout code

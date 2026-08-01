@@ -258,8 +258,6 @@ class OrderSafetyTests(unittest.TestCase):
         monitor = OKXDelistMonitor.__new__(OKXDelistMonitor)
         monitor.base_url = 'https://example.invalid'
         monitor.logger = logging.getLogger('test-monitor-delist')
-        monitor.generate_signature = lambda *_args: 'signature'
-        monitor.get_headers = lambda *_args: {}
 
         class _Response:
             status_code = 200
@@ -271,6 +269,31 @@ class OrderSafetyTests(unittest.TestCase):
         with patch('monitor_delist.get_global_session'), patch('monitor_delist.safe_request', return_value=_Response()), patch('monitor_delist.time.sleep'):
             with self.assertRaisesRegex(RuntimeError, 'Unable to fetch OKX delist announcements'):
                 monitor.fetch_delist_announcements()
+
+    def test_delist_public_api_request_is_not_authenticated(self):
+        monitor = OKXDelistMonitor.__new__(OKXDelistMonitor)
+        monitor.base_url = 'https://example.invalid'
+        monitor.logger = logging.getLogger('test-monitor-delist-public')
+
+        class _Response:
+            status_code = 200
+
+            @staticmethod
+            def json():
+                return {'code': '0', 'data': [{'details': []}]}
+
+        with patch('monitor_delist.get_global_session') as get_session, patch(
+            'monitor_delist.safe_request', return_value=_Response()
+        ) as request:
+            monitor.fetch_delist_announcements()
+
+        request.assert_called_once_with(
+            'GET',
+            monitor.base_url,
+            session=get_session.return_value,
+            params={'annType': 'announcements-delistings', 'page': 1},
+            timeout=10,
+        )
 
     def test_pending_order_query_errors_are_not_treated_as_empty(self):
         limit_manager = OKXLimitOrderManager.__new__(OKXLimitOrderManager)

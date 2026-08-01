@@ -11,9 +11,6 @@ import os
 import sys
 import logging
 import logging.handlers
-import hmac
-import hashlib
-import base64
 from datetime import datetime, timedelta
 from typing import Set, List, Dict, Any
 
@@ -124,26 +121,6 @@ class OKXDelistMonitor:
         self.logger.addHandler(file_handler)
         self.logger.addHandler(console_handler)
     
-    def generate_signature(self, timestamp: str, method: str, request_path: str, body: str = '') -> str:
-        """Generate OKX API signature"""
-        pre_hash_string = timestamp + method + request_path + body
-        signature = hmac.new(
-            self.secret_key.encode('utf-8'),
-            pre_hash_string.encode('utf-8'),
-            hashlib.sha256
-        ).digest()
-        return base64.b64encode(signature).decode('utf-8')
-    
-    def get_headers(self, timestamp: str, signature: str) -> Dict[str, str]:
-        """Generate request headers"""
-        return {
-            'OK-ACCESS-KEY': self.api_key,
-            'OK-ACCESS-SIGN': signature,
-            'OK-ACCESS-TIMESTAMP': timestamp,
-            'OK-ACCESS-PASSPHRASE': self.passphrase,
-            'Content-Type': 'application/json'
-        }
-    
     def fetch_delist_announcements(self, page: int = 1) -> List[Dict[str, Any]]:
         """Fetch delist announcements"""
         max_retries = 3
@@ -151,21 +128,15 @@ class OKXDelistMonitor:
         
         for attempt in range(max_retries):
             try:
-                # Build request path
-                request_path = f'/api/v5/support/announcements?annType=announcements-delistings&page={page}'
-                
-                # Generate timestamp and signature
-                timestamp = datetime.utcnow().isoformat("T", "milliseconds") + 'Z'
-                signature = self.generate_signature(timestamp, 'GET', request_path)
-                headers = self.get_headers(timestamp, signature)
-                
-                # Send request with robust HTTP session
+                # This is a public endpoint. Sending API credentials makes OKX
+                # apply the key's IP allowlist even though authentication is not
+                # required for announcements.
                 session = get_global_session()
                 response = safe_request('GET', self.base_url, session=session, 
                                       params={
                                           'annType': 'announcements-delistings',
                                           'page': page
-                                      }, headers=headers, timeout=10)
+                                      }, timeout=10)
                 
                 if response.status_code == 200:
                     data = response.json()
