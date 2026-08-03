@@ -5,6 +5,7 @@ import {
   activeAssetsFromDetails,
   cancelPendingLimits,
   cancelPendingTriggers,
+  eligibleTriggerPairs,
   fetchDelistAnnouncements,
   sellDelistedBalance,
   symbolAppears,
@@ -90,16 +91,23 @@ test("cash currencies never count towards the active-position gate", () => {
   assert.deepEqual(assets.map((item) => item.ccy), ["BTC"]);
 });
 
-test("announcement fetch retries non-JSON and API failures", async () => {
-  const responses = [
-    new Response("rate limited", { status: 429 }),
-    new Response(JSON.stringify({ code: "50000", msg: "temporary" }), { status: 200 }),
-    new Response(JSON.stringify({ code: "0", data: [{ details: [{ title: "ok" }] }] }), { status: 200 }),
-  ];
-  const delays = [];
-  const announcements = await fetchDelistAnnouncements(async () => responses.shift(), async (ms) => delays.push(ms));
+test("announcement fetch uses the shared paced OKX client", async () => {
+  let path;
+  const announcements = await fetchDelistAnnouncements({
+    get: async (requestedPath) => {
+      path = requestedPath;
+      return { code: "0", data: [{ details: [{ title: "ok" }] }] };
+    },
+    requireSuccess: async (result) => result.data,
+  });
   assert.deepEqual(announcements, [{ title: "ok" }]);
-  assert.deepEqual(delays, [60_000, 120_000]);
+  assert.equal(path, "/api/v5/support/announcements");
+});
+
+test("trigger rebuild never includes held currencies", () => {
+  const pairs = [{ inst_id: "BTC-USDT" }, { inst_id: "ETH-USDT" }, { inst_id: "SOL-USDT" }];
+  const eligible = eligibleTriggerPairs(pairs, [{ ccy: "BTC" }], new Set(["ETH"]), new Set(["SOL-USDT"]));
+  assert.deepEqual(eligible, []);
 });
 
 test("delist sell reconciles a prior client order before reading frozen balance", async () => {

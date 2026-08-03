@@ -50,6 +50,41 @@ async function runScheduled(event, env) {
   return enqueueRun(env, runKey, tasks, { ...flagsForCron(event.cron, scheduledTime), ...(event.options || {}) });
 }
 
+async function validateOkx(env, scope = "all") {
+  const okx = new OKXClient(env);
+  const checks = {};
+  if (scope === "all" || scope === "account") {
+    const balances = await okx.balances();
+    checks.account = balances.length;
+  }
+  if (scope === "all" || scope === "pending_limits") checks.pendingLimits = (await okx.pendingLimits()).length;
+  if (scope === "all" || scope === "pending_triggers") checks.pendingTriggers = (await okx.pendingTriggers()).length;
+  if (scope === "all" || scope === "fills") checks.recentFills = (await okx.fillsSince(Date.now() - 15 * 60_000)).length;
+  if (scope === "all" || scope === "instruments") {
+    const result = await okx.get("/api/v5/public/instruments", { instType: "SPOT", instId: "BTC-USDT" }, false);
+    await okx.requireSuccess(result, { requireData: true, operation: "public instrument validation" });
+    checks.instruments = true;
+  }
+  if (scope === "all" || scope === "candles") {
+    const result = await okx.get("/api/v5/market/candles", { instId: "BTC-USDT", bar: "1D", limit: 2 }, false);
+    await okx.requireSuccess(result, { requireData: true, operation: "candle validation" });
+    checks.candles = true;
+  }
+  if (scope === "all" || scope === "ticker") {
+    const result = await okx.get("/api/v5/market/ticker", { instId: "BTC-USDT" }, false);
+    await okx.requireSuccess(result, { requireData: true, operation: "ticker validation" });
+    checks.ticker = true;
+  }
+  if (scope === "all" || scope === "announcements") {
+    checks.announcements = (await fetchDelistAnnouncements(okx)).length;
+  }
+  if (scope === "all" || scope === "d1") {
+    const config = await env.DB.prepare("SELECT COUNT(*) AS count FROM crypto_limits").first();
+    checks.d1Configs = config?.count || 0;
+  }
+  return checks;
+}
+
 export class CronDeduplicator {
   constructor(ctx, env, runner = executeTasks) {
     this.ctx = ctx;
@@ -99,35 +134,20 @@ export default {
     }
     if (request.method === "POST" && url.pathname === "/validate-okx") {
       if (!env.MANUAL_TRIGGER_TOKEN || request.headers.get("authorization") !== `Bearer ${env.MANUAL_TRIGGER_TOKEN}`) return json({ error: "Unauthorized" }, 401);
+      // A diagnostic used to make seven extra calls concurrently with a cron.
+      // Keep it strictly off the live path; use health/task_runs while enabled.
+      if (tradingEnabled(env)) return json({ error: "Validation is disabled while live trading is enabled" }, 409);
+      const scope = url.searchParams.get("scope") || "all";
+      const allowedScopes = new Set(["all", "account", "pending_limits", "pending_triggers", "fills", "instruments", "candles", "ticker", "announcements", "d1"]);
+      if (!allowedScopes.has(scope)) return json({ error: "Invalid validation scope" }, 400);
       try {
-        const okx = new OKXClient(env);
-        const balances = await okx.balances();
-        const pendingLimits = await okx.pendingLimits();
-        const pendingTriggers = await okx.pendingTriggers();
-        const recentFills = await okx.fillsSince(Date.now() - 15 * 60_000);
-        const instruments = await okx.get("/api/v5/public/instruments", { instType: "SPOT", instId: "BTC-USDT" }, false);
-        await okx.requireSuccess(instruments, { requireData: true, operation: "public instrument validation" });
-        const candles = await okx.get("/api/v5/market/candles", { instId: "BTC-USDT", bar: "1D", limit: 2 }, false);
-        await okx.requireSuccess(candles, { requireData: true, operation: "candle validation" });
-        const ticker = await okx.get("/api/v5/market/ticker", { instId: "BTC-USDT" }, false);
-        await okx.requireSuccess(ticker, { requireData: true, operation: "ticker validation" });
-        await fetchDelistAnnouncements();
-        const config = await env.DB.prepare("SELECT COUNT(*) AS count FROM crypto_limits").first();
+        const checks = await validateOkx(env, scope);
         return json({
           ok: true,
           authenticated: true,
           tradingEnabled: tradingEnabled(env),
-          checks: {
-            account: balances.length,
-            pendingLimits: pendingLimits.length,
-            pendingTriggers: pendingTriggers.length,
-            recentFills: recentFills.length,
-            instruments: true,
-            candles: true,
-            ticker: true,
-            announcements: true,
-            d1Configs: config?.count || 0,
-          },
+          scope,
+          checks,
         });
       } catch (error) {
         return json({ ok: false, authenticated: false, error: error.message, tradingEnabled: tradingEnabled(env) }, 503);
@@ -147,4 +167,4 @@ export default {
   },
 };
 
-export { executeTasks, runScheduled };
+export { executeTasks, runScheduled, validateOkx };

@@ -25,7 +25,7 @@ function operationError(result, requireData = false) {
 }
 
 export class OKXClient {
-  constructor(env, fetcher = fetch) {
+  constructor(env, fetcher = fetch, sleepFn = (ms) => new Promise((resolve) => setTimeout(resolve, ms))) {
     this.apiKey = env.OKX_API_KEY;
     this.secretKey = env.OKX_SECRET_KEY;
     this.passphrase = env.OKX_PASSPHRASE;
@@ -35,6 +35,11 @@ export class OKXClient {
     // unbound call while still allowing a fetch implementation in tests.
     this.fetcher = (...args) => fetcher(...args);
     this.baseUrl = "https://www.okx.com";
+    this.sleep = sleepFn;
+    // A task uses one client and scheduled tasks are serialized by the DO.
+    // Keep the per-task request rate deliberately below OKX's public limits.
+    this.requestGapMs = Math.max(0, Number(env.OKX_REQUEST_GAP_MS || 0));
+    this.nextRequestAt = 0;
   }
 
   assertConfigured() {
@@ -47,7 +52,25 @@ export class OKXClient {
     return toBase64(await crypto.subtle.sign("HMAC", key, encoder.encode(payload)));
   }
 
-  async request(method, path, { params, body, auth = true, retries = 2 } = {}) {
+  async waitForRequestSlot() {
+    const now = Date.now();
+    const waitMs = Math.max(0, this.nextRequestAt - now);
+    this.nextRequestAt = Math.max(this.nextRequestAt, now) + this.requestGapMs;
+    if (waitMs) await this.sleep(waitMs);
+  }
+
+  retryDelay(response, attempt) {
+    const value = response?.headers?.get("retry-after");
+    if (value) {
+      const seconds = Number(value);
+      if (Number.isFinite(seconds)) return Math.min(30_000, Math.max(0, seconds * 1000));
+      const dateMs = Date.parse(value);
+      if (Number.isFinite(dateMs)) return Math.min(30_000, Math.max(0, dateMs - Date.now()));
+    }
+    return Math.min(15_000, 2_000 * (2 ** attempt));
+  }
+
+  async request(method, path, { params, body, auth = true, retries = 3 } = {}) {
     if (auth) this.assertConfigured();
     const qs = queryString(params);
     const requestPath = `${path}${qs}`;
@@ -55,6 +78,7 @@ export class OKXClient {
     let lastError;
     for (let attempt = 0; attempt <= retries; attempt += 1) {
       try {
+        await this.waitForRequestSlot();
         const headers = { Accept: "application/json", "Content-Type": "application/json", "User-Agent": "crypto-trading-cloudflare/1.0" };
         if (auth) {
           const timestamp = new Date().toISOString();
@@ -74,21 +98,35 @@ export class OKXClient {
         });
         const text = await response.text();
         let result;
-        try { result = JSON.parse(text); } catch { throw new Error(`OKX returned non-JSON HTTP ${response.status}`); }
+        try { result = JSON.parse(text); } catch {
+          const error = new Error(`OKX returned non-JSON HTTP ${response.status}`);
+          error.retryable = response.status === 429 || response.status >= 500;
+          error.retryDelayMs = this.retryDelay(response, attempt);
+          throw error;
+        }
         if (!response.ok || response.status === 429 || response.status >= 500) {
-          throw new Error(`OKX HTTP ${response.status}: ${result.msg || text.slice(0, 200)}`);
+          const error = new Error(`OKX HTTP ${response.status}: ${result.msg || text.slice(0, 200)}`);
+          error.retryable = response.status === 429 || response.status >= 500;
+          error.retryDelayMs = this.retryDelay(response, attempt);
+          throw error;
+        }
+        if (result.code === "50011") {
+          const error = new Error(`OKX rate limited: ${result.msg || result.code}`);
+          error.retryable = true;
+          error.retryDelayMs = this.retryDelay(response, attempt);
+          throw error;
         }
         return result;
       } catch (error) {
         lastError = error;
-        if (attempt === retries) break;
-        await new Promise((resolve) => setTimeout(resolve, 300 * (2 ** attempt)));
+        if (attempt === retries || !error.retryable) break;
+        await this.sleep(error.retryDelayMs ?? Math.min(15_000, 2_000 * (2 ** attempt)));
       }
     }
     throw lastError;
   }
 
-  get(path, params, auth = true) { return this.request("GET", path, { params, auth }); }
+  get(path, params, auth = true) { return this.request("GET", path, { params, auth, retries: 3 }); }
   post(path, body, { retries = 0 } = {}) { return this.request("POST", path, { body, auth: true, retries }); }
 
   async requireSuccess(result, { requireData = false, operation = "OKX operation" } = {}) {

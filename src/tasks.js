@@ -67,12 +67,12 @@ async function cancelPendingLimits(okx, { side = "buy", instIds, sleepFn = sleep
   });
 }
 
-async function cancelPendingTriggers(okx, { instIds, sleepFn = sleep } = {}) {
+async function cancelPendingTriggers(okx, { side, instIds, sleepFn = sleep } = {}) {
   const filter = instIds ? new Set(instIds) : null;
   return cancelAndVerify({
     loadPending: () => okx.pendingTriggers(),
     cancelBatch: (orders) => okx.cancelTriggers(orders),
-    matches: (order) => order.ordType === "trigger" && (!filter || filter.has(order.instId)),
+    matches: (order) => order.ordType === "trigger" && (!side || order.side === side) && (!filter || filter.has(order.instId)),
     batchSize: 10,
     label: "trigger order",
     sleepFn,
@@ -81,7 +81,7 @@ async function cancelPendingTriggers(okx, { instIds, sleepFn = sleep } = {}) {
 
 async function enforcePositionCapacity(okx, details) {
   const assets = details ? activeAssetsFromDetails(details) : await activeAssets(okx);
-  if (assets.length >= MAX_ACTIVE_POSITIONS) await cancelPendingTriggers(okx);
+  if (assets.length >= MAX_ACTIVE_POSITIONS) await cancelPendingTriggers(okx, { side: "buy" });
   return assets.length;
 }
 
@@ -200,7 +200,7 @@ async function autoSellOrders(env, okx, { verifyDailyClose = false, deferTrigger
   const rebuild = await env.DB.prepare("SELECT 1 AS pending FROM filled_orders WHERE trigger_rebuild_pending=1 LIMIT 1").first();
   if ((rebuild || marketSellConfirmed) && !deferTriggerRebuild) {
     const pending = await okx.pendingTriggers();
-    if (!pending.some((order) => order.ordType === "trigger")) await createAlgoTriggers(env, okx);
+    if (!pending.some((order) => order.ordType === "trigger" && order.side === "buy")) await createAlgoTriggers(env, okx);
     await env.DB.prepare("UPDATE filled_orders SET trigger_rebuild_pending=0,updated_at=CURRENT_TIMESTAMP WHERE trigger_rebuild_pending=1").run();
   }
   let unsettledBeforeToday = 0;
@@ -215,11 +215,11 @@ async function autoSellOrders(env, okx, { verifyDailyClose = false, deferTrigger
 }
 
 async function dailyMarketData(okx, instId) {
-  const [candlesResult, tickerResult, rules] = await Promise.all([
-    okx.get("/api/v5/market/candles", { instId, bar: "1D", limit: 2 }, false),
-    okx.get("/api/v5/market/ticker", { instId }, false),
-    instrumentRules(okx, instId),
-  ]);
+  // Do not burst three public calls at once.  Cloudflare egress is shared,
+  // so a paced sequence is materially more reliable than Promise.all here.
+  const candlesResult = await okx.get("/api/v5/market/candles", { instId, bar: "1D", limit: 2 }, false);
+  const tickerResult = await okx.get("/api/v5/market/ticker", { instId }, false);
+  const rules = await instrumentRules(okx, instId);
   const candles = await okx.requireSuccess(candlesResult, { requireData: true, operation: `daily candles ${instId}` });
   const ticker = await okx.requireSuccess(tickerResult, { requireData: true, operation: `ticker ${instId}` });
   return { candles, current: ticker[0].last, rules };
@@ -260,7 +260,7 @@ async function createAlgoTriggers(env, okx, { clearRebuildPending = false } = {}
     ...pendingTriggers.filter((order) => order.ordType === "trigger" && order.side === "buy").map((order) => order.instId),
     ...pendingLimits.filter((order) => order.side === "buy").map((order) => order.instId),
   ]);
-  const eligible = pairs.filter((pair) => !blacklist.has(pair.inst_id.split("-")[0].toUpperCase()) && !alreadyCovered.has(pair.inst_id));
+  const eligible = eligibleTriggerPairs(pairs, assets, blacklist, alreadyCovered);
   const runDate = new Date().toISOString().slice(0, 10).replaceAll("-", "");
   let created = 0;
   let skipped = pairs.length - eligible.length;
@@ -277,6 +277,14 @@ async function createAlgoTriggers(env, okx, { clearRebuildPending = false } = {}
   if (failures.length) throw new Error(`Trigger creation failed for ${failures.length} pair(s): ${failures.slice(0, 5).join("; ")}`);
   if (clearRebuildPending) await env.DB.prepare("UPDATE filled_orders SET trigger_rebuild_pending=0,updated_at=CURRENT_TIMESTAMP WHERE trigger_rebuild_pending=1").run();
   return { configured: pairs.length, created, skipped };
+}
+
+function eligibleTriggerPairs(pairs, assets, blacklist, alreadyCovered) {
+  const heldSymbols = new Set(assets.map((asset) => String(asset.ccy || "").toUpperCase()));
+  return pairs.filter((pair) => {
+    const symbol = pair.inst_id.split("-")[0].toUpperCase();
+    return !heldSymbols.has(symbol) && !blacklist.has(symbol) && !alreadyCovered.has(pair.inst_id);
+  });
 }
 
 function symbolAppears(title, symbol) {
@@ -372,27 +380,14 @@ async function sellDelistedBalance(env, okx, symbol, announcementId, { sleepFn =
   throw new Error(`Delist sell for ${symbol} is ${state}`);
 }
 
-async function fetchDelistAnnouncements(fetcher = fetch, sleepFn = sleep) {
-  const url = "https://www.okx.com/api/v5/support/announcements?annType=announcements-delistings&page=1";
-  let lastError;
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    try {
-      const response = await fetcher(url, { signal: AbortSignal.timeout(15_000) });
-      const text = await response.text();
-      let payload;
-      try { payload = JSON.parse(text); } catch { throw new Error(`Announcement query returned non-JSON HTTP ${response.status}`); }
-      if (!response.ok || payload.code !== "0") throw new Error(`Announcement query failed: ${payload.msg || response.status}`);
-      return payload.data?.[0]?.details || [];
-    } catch (error) {
-      lastError = error;
-      if (attempt < 2) await sleepFn(60_000 * (attempt + 1));
-    }
-  }
-  throw lastError;
+async function fetchDelistAnnouncements(okx) {
+  const result = await okx.get("/api/v5/support/announcements", { annType: "announcements-delistings", page: 1 }, false);
+  const data = await okx.requireSuccess(result, { operation: "delisting announcement query" });
+  return data[0]?.details || [];
 }
 
 async function monitorDelist(env, okx) {
-  const announcements = await fetchDelistAnnouncements();
+  const announcements = await fetchDelistAnnouncements(okx);
   const cutoff = Date.now() - 24 * 60 * 60 * 1000;
   const candidates = announcements.filter((item) => Number(item.pTime) >= cutoff && /spot/i.test(item.title || ""));
   const pairs = await configuredPairs(env.DB);
@@ -432,4 +427,4 @@ export const TASKS = {
   create_algo_triggers: (env, okx, options) => createAlgoTriggers(env, okx, options),
 };
 
-export { activeAssetsFromDetails, cancelAndVerify, cancelPendingLimits, cancelPendingTriggers, createAlgoTriggers, fetchDelistAnnouncements, sellDelistedBalance, stableId, symbolAppears };
+export { activeAssetsFromDetails, cancelAndVerify, cancelPendingLimits, cancelPendingTriggers, createAlgoTriggers, eligibleTriggerPairs, fetchDelistAnnouncements, sellDelistedBalance, stableId, symbolAppears };

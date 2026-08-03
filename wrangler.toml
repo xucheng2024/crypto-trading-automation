@@ -6,6 +6,8 @@ compatibility_date = "2026-08-03"
 TRADING_ENABLED = "false"
 OKX_TESTNET = "false"
 OKX_MIN_USD_VALUE = "0.01"
+# Conservative per-task pacing for OKX reads; scheduled jobs are serialized.
+OKX_REQUEST_GAP_MS = "350"
 
 [[durable_objects.bindings]]
 name = "CRON_DEDUP"

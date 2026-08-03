@@ -63,3 +63,20 @@ test("fills paginate with billId while retaining the begin fence", async () => {
   assert.ok(calls.every((url) => new URL(url).searchParams.get("begin") === "123456"));
   assert.match(calls[1], /after=201/);
 });
+
+test("read requests pace calls and retry a 429 using Retry-After", async () => {
+  let calls = 0;
+  const delays = [];
+  const client = new OKXClient(
+    { OKX_API_KEY: "key", OKX_SECRET_KEY: "secret", OKX_PASSPHRASE: "pass", OKX_REQUEST_GAP_MS: "0" },
+    async () => {
+      calls += 1;
+      if (calls === 1) return new Response("rate limited", { status: 429, headers: { "retry-after": "3" } });
+      return new Response(JSON.stringify({ code: "0", data: [] }), { status: 200 });
+    },
+    async (ms) => delays.push(ms),
+  );
+  await client.pendingLimits();
+  assert.equal(calls, 2);
+  assert.deepEqual(delays, [3_000]);
+});
