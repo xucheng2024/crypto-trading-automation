@@ -21,6 +21,7 @@ const db = new D1HttpDatabase({
   databaseId: process.env.CLOUDFLARE_D1_DATABASE_ID,
   apiToken: process.env.CLOUDFLARE_D1_API_TOKEN,
 });
+env.DB = db;
 const okx = new OKXClient(env);
 okx.assertConfigured();
 if (!env.OKX_ORDER_SIZE) throw new Error("Missing OKX_ORDER_SIZE");
