@@ -64,7 +64,7 @@ python monitor_delist.py
 - **⚙️ Configuration Management** - Automated backup and cleanup of trading configurations
 - **🔧 Universal OKX Client** - Single OKX API client shared across all scripts, eliminating code duplication
 - **📊 Better Maintainability** - 59% code reduction in main script, improved testability and debugging
-- **🗄️ VPS Database Cutover** - Uses persistent SQLite on the self-hosted runner
+- **🗄️ D1 Cutover** - Trading state and strategy configuration persist in Cloudflare D1
 - **⏰ Precise Scheduling** - Replaced GitHub Actions cron with Cloudflare Workers for minute-level accuracy
 - **📦 SDK Update** - Switched to `python-okx==0.4.0` with new submodule imports (`okx.Trade`, `okx.Funding`, etc.)
 - **🗄️ DB Safety** - Fail-closed startup and integrity checks for the persistent SQLite database
@@ -233,7 +233,7 @@ python monitor_delist.py
 - **`backups/limits_*.json`** - Automatic configuration backups with timestamps
 
 ### Log Files
-- **GitHub Actions Logs** - Centralized logging via GitHub Actions artifacts
+- **Worker Logs** - Runtime logs are available through Cloudflare Workers observability
 - **`logs/`** - Local log files (if running locally)
 - **`*.log`** - Various operation logs
 
@@ -255,7 +255,7 @@ OKX_TESTNET=false
 ## 🤖 Trading Strategy
 
 ### Core Functions
-1. **Automated Monitoring** - 24/7 system monitoring and management via GitHub Actions
+1. **Automated Monitoring** - 24/7 system monitoring and management via Cloudflare Cron Triggers
 2. **Smart Order Management** - Intelligent order creation and cancellation
 3. **High-Precision Trading** - Decimal arithmetic for accurate price calculations
 4. **Time-based Execution** - Automated selling based on calculated sell times
@@ -306,22 +306,15 @@ Each transaction is processed individually with its own `sell_time` and `sold_st
 
 ### Cloud Deployment (Recommended) ⭐
 ```bash
-# 1. Fork this repository to your GitHub account
-# 2. Set up GitHub Secrets:
-#    - OKX_API_KEY: Your OKX API key
-#    - OKX_SECRET_KEY: Your OKX secret key
-#    - OKX_PASSPHRASE: Your OKX passphrase
-
-# 3. Deploy Cloudflare Worker:
-#    - Install Wrangler CLI: npm install -g wrangler
-#    - Login: wrangler login
-#    - Deploy: wrangler deploy
-#    - Set GITHUB_TOKEN in Cloudflare Dashboard
-
-# 4. Enable GitHub Actions in your repository
-# 5. Ensure the self-hosted VPS runner has the persistent SQLite database path used by the workflow
-# 6. The system will automatically run on precise schedule via Cloudflare Workers
-# 7. You can manually trigger nightly steps (cancel/create) via "Run workflow"
+npm install
+wrangler login
+wrangler d1 migrations apply crypto-trading-prod --remote
+wrangler secret put OKX_API_KEY
+wrangler secret put OKX_SECRET_KEY
+wrangler secret put OKX_PASSPHRASE
+wrangler secret put MANUAL_TRIGGER_TOKEN
+npm test
+npm run deploy
 ```
 
 ### Local Development
@@ -371,7 +364,9 @@ python lib/database.py
 
 ```
 crypto_remote/
-├── .github/                 # GitHub Actions workflows
+├── src/                     # Cloudflare Worker runtime
+├── migrations/              # Versioned D1 schema
+├── tests-worker/            # Worker safety tests
 │   └── workflows/
 │       └── trading.yml      # Automated trading workflow (triggered by Cloudflare Workers)
 ├── lib/                     # Utility libraries
@@ -410,8 +405,8 @@ crypto_remote/
 ## 🚀 Production Deployment Status ✅
 
 ### Cloudflare Worker Deployment
-- **✅ Worker Name**: `crypto-trading-cron-prod`
-- **✅ Access URL**: `https://crypto-trading-cron-prod.eatfreshapple.workers.dev/`
+- **✅ Worker Name**: `crypto-trading-cloudflare-prod`
+- **✅ Access URL**: `https://crypto-trading-cloudflare-prod.eatfreshapple.workers.dev/`
 - **✅ KV Namespace**: `DEDUP_KV` (ID configured via environment variable)
 - **✅ Environment Variables**: All secrets properly configured
 - **✅ Cron Scheduling**: 4 different time intervals active
@@ -435,7 +430,7 @@ crypto_remote/
 - **Price Precision**: High-precision Decimal arithmetic working perfectly
 - **Configuration Management**: Automatic backup and cleanup functionality
 - **Error Resolution**: All previous API issues resolved with enhanced error handling
-- **VPS Persistence**: SQLite database stored outside the Actions checkout directory
+- **Cloud Persistence**: D1 stores fills, recovery state, configuration, and protection state
 - **Precise Scheduling**: Cloudflare Workers provide minute-level accuracy (99.9% uptime)
 - **TradeId-Centric Processing**: Complete refactor to individual transaction processing (2025-09-03)
 - **Enhanced Deduplication**: tradeId-based unique constraints prevent duplicate processing
@@ -455,8 +450,8 @@ crypto_remote/
 - **Extensibility**: Easy to add new protection features or API integrations
 - **Reliability**: Robust error handling and logging throughout all modules
 - **Performance**: Optimized API calls and efficient resource management
-- **Low Overhead**: Local SQLite storage for the single serialized trading runner
-- **Scheduling Precision**: Cloudflare Workers eliminate GitHub Actions cron inconsistencies
+- **Low Overhead**: D1 storage with a Durable Object coordinator serializes trading runs
+- **Scheduling Precision**: Cloudflare Cron runs tasks without a GitHub Actions relay
 
 ### Supported Crypto Pairs
 All 29 pairs in `limits.json` are fully supported:
@@ -516,4 +511,4 @@ if affected:
 This project is for educational and personal use. Please ensure compliance with OKX API terms and local trading regulations.
 
 ---
-**System Architecture**: Modular + Cloud • **API Unification**: Shared OKX client • **Database**: SQLite on the VPS self-hosted runner • **Deployment**: Cloudflare Workers + GitHub Actions • **Scheduling**: Precise minute-level cron via Cloudflare Workers • **TradeId-Centric**: Individual transaction processing with enhanced deduplication • **24-Hour Rolling**: Monitor with enhanced crypto matching and false positive prevention • **🔒 Security**: Environment variables only, no hardcoded secrets • **✅ Production**: Deployed to crypto-trading-cron-prod.eatfreshapple.workers.dev
+**System Architecture**: Cloudflare-only • **Runtime**: Workers + Durable Objects • **Database**: D1 • **Scheduling**: Cron Triggers • **TradeId-Centric**: Individual fill processing with idempotent recovery • **🔒 Security**: Cloudflare Secrets, no hardcoded credentials • **✅ Production**: Deployed to crypto-trading-cloudflare-prod.eatfreshapple.workers.dev

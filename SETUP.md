@@ -1,96 +1,76 @@
-# Environment Variables Configuration Guide
+# Cloudflare deployment guide
 
-## Cloudflare-only deployment
+## Production resources
 
-The Worker is deployed separately from the legacy cron Worker during cutover. Apply D1 migrations and configure secrets:
+- Worker: `crypto-trading-cloudflare-prod`
+- D1: `crypto-trading-prod`
+- Durable Object binding: `CRON_DEDUP`
+- Health endpoint: `https://crypto-trading-cloudflare-prod.eatfreshapple.workers.dev/health`
+
+## Install and verify
 
 ```bash
 npm install
+npm test
+npm run check
 wrangler d1 migrations apply crypto-trading-prod --remote
+```
+
+## Required secrets
+
+```bash
 wrangler secret put OKX_API_KEY
 wrangler secret put OKX_SECRET_KEY
 wrangler secret put OKX_PASSPHRASE
+wrangler secret put OKX_ORDER_SIZE
 wrangler secret put MANUAL_TRIGGER_TOKEN
-npm run deploy
 ```
 
-Keep `TRADING_ENABLED = "false"` in `wrangler.toml` until the latest VPS SQLite state has been imported and the new OKX key can authenticate from Cloudflare. At cutover, stop the legacy Worker/VPS schedule before changing this flag to `true`, then deploy once more. Never run both schedulers with trading enabled.
+Use an OKX key with Read and Trade permissions only. Do not grant Withdraw permission. A key restricted to the old VPS IP will not authenticate from standard Cloudflare Workers; update its IP policy or use an appropriate fixed-egress setup.
 
-The OKX key should have Read and Trade permissions only; do not grant Withdraw permission. An IP-bound VPS key will not work from standard Workers unless the Cloudflare account has a suitable dedicated egress solution.
+## Safety switch
 
-## Legacy VPS environment variables
+`wrangler.toml` defaults to:
 
-### 1. SQLite Database
-```bash
-export DATABASE_URL="sqlite:////absolute/path/to/trading.sqlite3"
+```toml
+TRADING_ENABLED = "false"
 ```
 
-Production uses `/home/ubuntu/.local/share/crypto-trading/trading.sqlite3` on the
-dedicated self-hosted runner. The database file must already exist; the
-application fails closed instead of creating an empty production database.
+While false, scheduled and manual runs return before making private OKX calls or D1 mutations. Enable trading only after:
 
-### 2. OKX API Credentials
-```bash
-export OKX_API_KEY="your_okx_api_key"
-export OKX_SECRET_KEY="your_okx_secret_key"
-export OKX_PASSPHRASE="your_okx_passphrase"
-```
+1. D1 contains the latest production SQLite snapshot.
+2. All three OKX credential values are current in Cloudflare Secrets.
+3. The old VPS scheduler and runner are stopped.
+4. `GET /health` reports `status: ok`.
 
-### 3. OKX Trading Environment
-```bash
-export OKX_TESTNET="false"  # false=Live trading, true=Demo trading
-```
+Then change `TRADING_ENABLED` to `"true"`, run the complete test suite, and deploy once more.
 
-## Local Testing
-
-### 1. Set Environment Variables
-```bash
-# Copy the environment variables above, replace with your actual values
-export DATABASE_URL="sqlite:////absolute/path/to/trading.sqlite3"
-export OKX_API_KEY="your_api_key"
-export OKX_SECRET_KEY="your_secret_key"
-export OKX_PASSPHRASE="your_passphrase"
-export OKX_TESTNET="false"
-```
-
-### 2. Test Database Connection
-```bash
-python -c "from lib.database import Database; db = Database(); db.connect(); db.create_tables(); db.disconnect()"
-```
-
-### 3. Test Complete System
-```bash
-python monitor_delist.py
-python fetch_filled_orders.py
-python auto_sell_orders.py
-```
-
-## GitHub Actions Configuration
-
-In your GitHub repository's Settings > Secrets and variables > Actions, add:
-
-- `OKX_API_KEY`: Your OKX API key
-- `OKX_SECRET_KEY`: Your OKX secret key
-- `OKX_PASSPHRASE`: Your OKX passphrase
-
-## Important Notes
-
-1. **Do not commit .env file** to Git
-2. **DATABASE_URL must** start with `sqlite:///`
-3. **OKX credentials are required**; `DATABASE_URL` is set directly by the VPS workflow
-4. **Local development** requires setting environment variables
-5. **GitHub Actions** uses the persistent SQLite path configured in the workflow
-
-## Manual VPS Runs
-
-GitHub Actions holds a VPS-wide advisory lock while trading scripts run. Use the
-same lock for manual SSH or cron execution so it cannot overlap an automated run:
+## D1 configuration import
 
 ```bash
-flock -w 60 /home/ubuntu/.local/share/crypto-trading/trading.lock \
-  python fetch_filled_orders.py --force-db
+node scripts/config-to-sql.mjs limits_d1.json /tmp/crypto-trading-config.sql
+wrangler d1 execute crypto-trading-prod --remote --file=/tmp/crypto-trading-config.sql
 ```
 
-The workflow fails after 60 seconds if another cooperating trading process still
-holds the lock. The full job also has a 15-minute timeout to prevent a hung API
-call from blocking later runs indefinitely.
+For a final VPS SQLite cutover, stop the old scheduler, take a consistent SQLite backup while holding `/home/ubuntu/.local/share/crypto-trading/trading.lock`, and run:
+
+```bash
+python3 scripts/sqlite-to-d1.py trading.sqlite3 migration-export.sql
+wrangler d1 execute crypto-trading-prod --remote --file=migration-export.sql
+```
+
+The export contains private trading history. Keep it outside Git and delete it after row counts have been verified.
+
+## Manual runs
+
+Send an authenticated request to `/run`:
+
+```bash
+curl -X POST \
+  -H "Authorization: Bearer $MANUAL_TRIGGER_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"tasks":["fetch_filled_orders"]}' \
+  https://crypto-trading-cloudflare-prod.eatfreshapple.workers.dev/run
+```
+
+Supported tasks are `monitor_delist`, `cancel_pending_limits`, `fetch_filled_orders`, `auto_sell_orders`, `cancel_pending_triggers`, and `create_algo_triggers`.
