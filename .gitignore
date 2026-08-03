@@ -97,6 +97,8 @@ jspm_packages/
 
 # Optional npm cache directory
 .npm
+.wrangler/
+migration-export*.sql
 
 # Optional eslint cache
 .eslintcache

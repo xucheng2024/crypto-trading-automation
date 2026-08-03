@@ -1,6 +1,8 @@
 # Crypto Trading Automation System
 
-A comprehensive automated crypto trading system with OKX exchange integration, featuring modular architecture, algorithmic trading strategies, intelligent delisting protection, automated order management, and high-precision trading algorithms. **Now deployed on Cloudflare Workers + a VPS-hosted GitHub Actions runner with a persistent SQLite database.**
+A comprehensive automated crypto trading system with OKX exchange integration, featuring algorithmic trading strategies, delisting protection, automated order management, and exchange-aware decimal rounding.
+
+The production migration target is now Cloudflare-only: Cron Triggers run the Worker directly, a Durable Object serializes trading runs, and D1 stores trading state. The legacy GitHub Actions/VPS path remains enabled only during the credential and database cutover window.
 
 ## 🚀 Quick Start
 
@@ -20,12 +22,12 @@ python monitor_delist.py
 ## 🏗️ Modern Cloud Architecture
 
 ### Cloud Deployment ⭐
-- **Cloudflare Workers Cron** - Precise minute-level scheduling with 99.9% uptime
-- **GitHub Actions** - Automated script execution triggered by Cloudflare Workers
-- **SQLite Database** - Persistent database on the allowlisted VPS
-- **Environment Secrets** - Secure credential management via GitHub Secrets
-- **Automated Logging** - Centralized log collection and retention
-- **🔒 Enhanced Security** - No hardcoded secrets, all sensitive data via environment variables
+- **Cloudflare Workers Cron** - Runs the trading tasks directly without a GitHub dispatch hop
+- **Durable Object coordinator** - Prevents overlapping scheduled or manual trading runs
+- **Cloudflare D1** - Persists fills, sell recovery state, configuration, blacklist, and run status
+- **Cloudflare Secrets** - Stores OKX credentials and the manual-run bearer token
+- **Safe cutover switch** - `TRADING_ENABLED=false` is the production default until credentials and state are ready
+- **Idempotent orders** - Stable client order IDs recover uncertain submissions without blind retries
 
 ### Core Trading System ⭐
 - **`monitor_delist.py`** - Intelligent delisting protection with automated response (277 lines)

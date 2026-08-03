@@ -1,0 +1,48 @@
+name: Export trading database once
+
+on:
+  workflow_dispatch:
+
+jobs:
+  export:
+    runs-on: [self-hosted, linux, x64, crypto-trading]
+    timeout-minutes: 5
+    steps:
+      - name: Create consistent encrypted snapshot
+        env:
+          MIGRATION_EXPORT_KEY: ${{ secrets.MIGRATION_EXPORT_KEY }}
+        run: |
+          set -euo pipefail
+          test -n "$MIGRATION_EXPORT_KEY"
+          DB_PATH=/home/ubuntu/.local/share/crypto-trading/trading.sqlite3
+          LOCK_PATH=/home/ubuntu/.local/share/crypto-trading/trading.lock
+          SNAPSHOT_PATH="$RUNNER_TEMP/trading-migration.sqlite3"
+          ENCRYPTED_PATH="$RUNNER_TEMP/trading-migration.sqlite3.enc"
+          test -f "$DB_PATH"
+          exec 9>"$LOCK_PATH"
+          flock -w 60 9
+          python3 - "$DB_PATH" "$SNAPSHOT_PATH" <<'PY'
+          import sqlite3
+          import sys
+
+          source = sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True)
+          target = sqlite3.connect(sys.argv[2])
+          try:
+              source.backup(target)
+              result = target.execute("PRAGMA integrity_check").fetchone()[0]
+              if result != "ok":
+                  raise RuntimeError(f"Snapshot integrity check failed: {result}")
+          finally:
+              target.close()
+              source.close()
+          PY
+          openssl enc -aes-256-cbc -pbkdf2 -salt -in "$SNAPSHOT_PATH" -out "$ENCRYPTED_PATH" -pass env:MIGRATION_EXPORT_KEY
+          rm -f "$SNAPSHOT_PATH"
+
+      - name: Upload encrypted snapshot
+        uses: actions/upload-artifact@v6
+        with:
+          name: encrypted-trading-database
+          path: ${{ runner.temp }}/trading-migration.sqlite3.enc
+          if-no-files-found: error
+          retention-days: 1

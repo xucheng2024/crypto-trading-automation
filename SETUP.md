@@ -1,6 +1,24 @@
 # Environment Variables Configuration Guide
 
-## Required Environment Variables
+## Cloudflare-only deployment
+
+The Worker is deployed separately from the legacy cron Worker during cutover. Apply D1 migrations and configure secrets:
+
+```bash
+npm install
+wrangler d1 migrations apply crypto-trading-prod --remote
+wrangler secret put OKX_API_KEY
+wrangler secret put OKX_SECRET_KEY
+wrangler secret put OKX_PASSPHRASE
+wrangler secret put MANUAL_TRIGGER_TOKEN
+npm run deploy
+```
+
+Keep `TRADING_ENABLED = "false"` in `wrangler.toml` until the latest VPS SQLite state has been imported and the new OKX key can authenticate from Cloudflare. At cutover, stop the legacy Worker/VPS schedule before changing this flag to `true`, then deploy once more. Never run both schedulers with trading enabled.
+
+The OKX key should have Read and Trade permissions only; do not grant Withdraw permission. An IP-bound VPS key will not work from standard Workers unless the Cloudflare account has a suitable dedicated egress solution.
+
+## Legacy VPS environment variables
 
 ### 1. SQLite Database
 ```bash

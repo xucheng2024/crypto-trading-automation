@@ -1,0 +1,13 @@
+{
+  "name": "crypto-trading-cloudflare",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test tests-worker/*.test.js",
+    "check": "wrangler deploy --dry-run",
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "wrangler": "4.118.0"
+  }
+}
