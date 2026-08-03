@@ -1,4 +1,4 @@
-import { MAX_ACTIVE_POSITIONS, POSITION_GATE_USD } from "./config.js";
+import { CASH_CURRENCIES, MAX_ACTIVE_POSITIONS, POSITION_GATE_USD } from "./config.js";
 import { acquireTrade, blacklistedSymbols, configuredPairs, dueTrades, releaseTrade, saveBuyFills } from "./db.js";
 import { compareDecimal, decimalToNumber, divideDecimal, multiplyDecimal, roundToStep } from "./decimal.js";
 
@@ -18,8 +18,15 @@ function frozenAmount(detail) {
 }
 
 async function activeAssets(okx, threshold = POSITION_GATE_USD) {
-  const details = balanceDetails(await okx.balances());
-  return details.filter((item) => String(item.ccy || "").toUpperCase() !== "USDT" && decimalToNumber(item.eqUsd) > threshold);
+  return activeAssetsFromDetails(balanceDetails(await okx.balances()), threshold);
+}
+
+function activeAssetsFromDetails(details, threshold = POSITION_GATE_USD) {
+  return details.filter((item) => !CASH_CURRENCIES.has(String(item.ccy || "").toUpperCase()) && decimalToNumber(item.eqUsd) > threshold);
+}
+
+function balanceByCurrency(details) {
+  return new Map(details.map((item) => [String(item.ccy || "").toUpperCase(), item]));
 }
 
 async function instrumentRules(okx, instId) {
@@ -32,55 +39,59 @@ async function instrumentRules(okx, instId) {
   return { tickSz: item.tickSz, lotSz: item.lotSz, minSz: item.minSz || item.lotSz };
 }
 
-async function cancelPendingLimits(okx, { side = "buy", instIds, sleepFn = sleep } = {}) {
-  const filter = instIds ? new Set(instIds) : null;
-  const matches = (order) => (!side || order.side === side) && (!filter || filter.has(order.instId));
-  const orders = (await okx.pendingLimits()).filter(matches);
+async function cancelAndVerify({ loadPending, cancelBatch, matches, batchSize, label, sleepFn = sleep }) {
+  const orders = (await loadPending()).filter(matches);
   const failures = [];
   let remaining = orders;
   for (let attempt = 0; attempt < 3 && remaining.length; attempt += 1) {
-    for (let i = 0; i < remaining.length; i += 20) {
-      try { await okx.cancelLimits(remaining.slice(i, i + 20)); } catch (error) { failures.push(error.message); }
+    for (let i = 0; i < remaining.length; i += batchSize) {
+      try { await cancelBatch(remaining.slice(i, i + batchSize)); } catch (error) { failures.push(error.message); }
       await sleepFn(100);
     }
     await sleepFn(300 * (attempt + 1));
-    remaining = (await okx.pendingLimits()).filter(matches);
+    remaining = (await loadPending()).filter(matches);
   }
-  if (remaining.length) throw new Error(`Failed to cancel ${remaining.length}/${orders.length} limit order(s): ${failures.join("; ")}`);
+  if (remaining.length) throw new Error(`Failed to cancel ${remaining.length}/${orders.length} ${label}(s): ${failures.join("; ")}`);
   return { found: orders.length, remaining: 0 };
+}
+
+async function cancelPendingLimits(okx, { side = "buy", instIds, sleepFn = sleep } = {}) {
+  const filter = instIds ? new Set(instIds) : null;
+  return cancelAndVerify({
+    loadPending: () => okx.pendingLimits(),
+    cancelBatch: (orders) => okx.cancelLimits(orders),
+    matches: (order) => (!side || order.side === side) && (!filter || filter.has(order.instId)),
+    batchSize: 20,
+    label: "limit order",
+    sleepFn,
+  });
 }
 
 async function cancelPendingTriggers(okx, { instIds, sleepFn = sleep } = {}) {
   const filter = instIds ? new Set(instIds) : null;
-  const matches = (order) => order.ordType === "trigger" && (!filter || filter.has(order.instId));
-  const initial = (await okx.pendingTriggers()).filter(matches);
-  let remaining = initial;
-  for (let attempt = 0; attempt < 3 && remaining.length; attempt += 1) {
-    for (let i = 0; i < remaining.length; i += 10) {
-      try { await okx.cancelTriggers(remaining.slice(i, i + 10)); } catch (error) { console.warn("Trigger cancellation request failed; verifying final state", error.message); }
-      await sleepFn(100);
-    }
-    await sleepFn(300 * (attempt + 1));
-    remaining = (await okx.pendingTriggers()).filter(matches);
-  }
-  if (remaining.length) throw new Error(`Failed to cancel ${remaining.length}/${initial.length} trigger order(s)`);
-  return { found: initial.length, remaining: 0 };
+  return cancelAndVerify({
+    loadPending: () => okx.pendingTriggers(),
+    cancelBatch: (orders) => okx.cancelTriggers(orders),
+    matches: (order) => order.ordType === "trigger" && (!filter || filter.has(order.instId)),
+    batchSize: 10,
+    label: "trigger order",
+    sleepFn,
+  });
 }
 
-async function enforcePositionCapacity(okx) {
-  const assets = await activeAssets(okx);
+async function enforcePositionCapacity(okx, details) {
+  const assets = details ? activeAssetsFromDetails(details) : await activeAssets(okx);
   if (assets.length >= MAX_ACTIVE_POSITIONS) await cancelPendingTriggers(okx);
   return assets.length;
 }
 
-async function reconcileManualSells(env, okx) {
+async function reconcileManualSells(env, balances) {
   const threshold = Math.max(0, decimalToNumber(env.OKX_MIN_USD_VALUE || "0.01", 0.01));
   const { results } = await env.DB.prepare("SELECT DISTINCT instid FROM filled_orders WHERE side='buy' AND (sold_status IS NULL OR sold_status != 'SOLD')").all();
   let marked = 0;
   for (const row of results || []) {
     const currency = String(row.instid).split("-")[0].toUpperCase();
-    const details = balanceDetails(await okx.balances(currency));
-    const detail = details.find((item) => String(item.ccy).toUpperCase() === currency);
+    const detail = balances.get(currency);
     if ((!detail || decimalToNumber(detail.eqUsd) < threshold) && frozenAmount(detail) <= 0) {
       const result = await env.DB.prepare("UPDATE filled_orders SET sold_status='SOLD',updated_at=CURRENT_TIMESTAMP WHERE side='buy' AND instid=? AND sold_status IS NULL").bind(row.instid).run();
       marked += result.meta.changes || 0;
@@ -94,8 +105,9 @@ async function fetchFilledOrders(env, okx, { forceDbFetch = false } = {}) {
   const begin = last?.last_ts ? Number(last.last_ts) + 1 : Date.now() - (forceDbFetch ? 24 * 60 : 15) * 60_000;
   const fills = (await okx.fillsSince(begin)).filter((fill) => fill.side === "buy");
   const saved = await saveBuyFills(env.DB, fills);
-  const manuallySettled = await reconcileManualSells(env, okx);
-  const activeCount = await enforcePositionCapacity(okx);
+  const details = balanceDetails(await okx.balances());
+  const manuallySettled = await reconcileManualSells(env, balanceByCurrency(details));
+  const activeCount = await enforcePositionCapacity(okx, details);
   return { fetched: fills.length, saved, manuallySettled, activeCount };
 }
 
@@ -150,7 +162,7 @@ async function submitSell(env, okx, trade) {
   return { state: await orderState(okx, trade.instid, { ordId: placed.ordId }), ordId: placed.ordId, clOrdId };
 }
 
-async function autoSellOrders(env, okx, { verifyDailyClose = false } = {}) {
+async function autoSellOrders(env, okx, { verifyDailyClose = false, deferTriggerRebuild = false } = {}) {
   const assets = await activeAssets(okx, Math.max(0, decimalToNumber(env.OKX_MIN_USD_VALUE || "0.01", 0.01)));
   if (assets.length) {
     await env.DB.prepare("UPDATE filled_orders SET sell_time=CAST(CAST(ts AS INTEGER)+86400000 AS TEXT),updated_at=CURRENT_TIMESTAMP WHERE side='buy' AND sold_status IS NULL AND ts != '' AND ts NOT GLOB '*[^0-9]*' AND sell_time IS DISTINCT FROM CAST(CAST(ts AS INTEGER)+86400000 AS TEXT)").run();
@@ -186,7 +198,7 @@ async function autoSellOrders(env, okx, { verifyDailyClose = false } = {}) {
     }
   }
   const rebuild = await env.DB.prepare("SELECT 1 AS pending FROM filled_orders WHERE trigger_rebuild_pending=1 LIMIT 1").first();
-  if (rebuild || marketSellConfirmed) {
+  if ((rebuild || marketSellConfirmed) && !deferTriggerRebuild) {
     const pending = await okx.pendingTriggers();
     if (!pending.some((order) => order.ordType === "trigger")) await createAlgoTriggers(env, okx);
     await env.DB.prepare("UPDATE filled_orders SET trigger_rebuild_pending=0,updated_at=CURRENT_TIMESTAMP WHERE trigger_rebuild_pending=1").run();
@@ -236,9 +248,12 @@ async function createPairTrigger(env, okx, pair, runDate) {
   return { orderId: placed.algoId, type: "trigger" };
 }
 
-async function createAlgoTriggers(env, okx) {
+async function createAlgoTriggers(env, okx, { clearRebuildPending = false } = {}) {
   const assets = await activeAssets(okx);
-  if (assets.length >= MAX_ACTIVE_POSITIONS) return { skipped: "position_capacity", activeCount: assets.length };
+  if (assets.length >= MAX_ACTIVE_POSITIONS) {
+    if (clearRebuildPending) await env.DB.prepare("UPDATE filled_orders SET trigger_rebuild_pending=0,updated_at=CURRENT_TIMESTAMP WHERE trigger_rebuild_pending=1").run();
+    return { skipped: "position_capacity", activeCount: assets.length };
+  }
   const [pairs, blacklist] = await Promise.all([configuredPairs(env.DB), blacklistedSymbols(env.DB)]);
   const [pendingTriggers, pendingLimits] = await Promise.all([okx.pendingTriggers(), okx.pendingLimits()]);
   const alreadyCovered = new Set([
@@ -260,6 +275,7 @@ async function createAlgoTriggers(env, okx) {
     await sleep(80);
   }
   if (failures.length) throw new Error(`Trigger creation failed for ${failures.length} pair(s): ${failures.slice(0, 5).join("; ")}`);
+  if (clearRebuildPending) await env.DB.prepare("UPDATE filled_orders SET trigger_rebuild_pending=0,updated_at=CURRENT_TIMESTAMP WHERE trigger_rebuild_pending=1").run();
   return { configured: pairs.length, created, skipped };
 }
 
@@ -272,41 +288,88 @@ function symbolAppears(title, symbol) {
   });
 }
 
-async function sellDelistedBalance(okx, symbol, announcementId) {
-  const instId = `${symbol}-USDT`;
-  const clOrdId = await stableId("del", `${announcementId}:${symbol}`);
-  let existing = await orderState(okx, instId, { clOrdId });
-  if (existing === "FILLED") return true;
-  if (existing === "PENDING") {
-    for (let attempt = 0; attempt < 3 && existing === "PENDING"; attempt += 1) {
-      await sleep(1000);
-      existing = await orderState(okx, instId, { clOrdId });
-    }
-    if (existing === "FILLED") return true;
-    throw new Error(`Existing delist sell for ${symbol} is ${existing}`);
+async function latestDelistSellAttempt(db, announcementId, symbol) {
+  return db.prepare(`SELECT attempt,cl_ord_id AS clOrdId,ord_id AS ordId,state
+    FROM delist_sell_attempts WHERE announcement_id=? AND symbol=? ORDER BY attempt DESC LIMIT 1`)
+    .bind(announcementId, symbol).first();
+}
+
+async function createDelistSellAttempt(db, announcementId, symbol, previousAttempt = -1) {
+  const attempt = previousAttempt + 1;
+  const clOrdId = await stableId("del", `${announcementId}:${symbol}:${attempt}`);
+  await db.prepare(`INSERT INTO delist_sell_attempts(announcement_id,symbol,attempt,cl_ord_id,state)
+    VALUES(?,?,?,?, 'PREPARED')`).bind(announcementId, symbol, attempt, clOrdId).run();
+  return { attempt, clOrdId, state: "PREPARED" };
+}
+
+async function updateDelistSellAttempt(db, announcementId, symbol, attempt, state, ordId = null) {
+  await db.prepare(`UPDATE delist_sell_attempts SET state=?,ord_id=COALESCE(?,ord_id),updated_at=CURRENT_TIMESTAMP
+    WHERE announcement_id=? AND symbol=? AND attempt=?`).bind(state, ordId, announcementId, symbol, attempt).run();
+}
+
+async function confirmDelistSell(okx, instId, clOrdId, sleepFn) {
+  let state = await orderState(okx, instId, { clOrdId });
+  for (let attempt = 0; attempt < 3 && state === "PENDING"; attempt += 1) {
+    await sleepFn(1000);
+    state = await orderState(okx, instId, { clOrdId });
   }
-  if (existing !== "NOT_FOUND") throw new Error(`Unable to reconcile delist sell for ${symbol}: ${existing}`);
+  return state;
+}
+
+async function sellDelistedBalance(env, okx, symbol, announcementId, { sleepFn = sleep } = {}) {
+  const instId = `${symbol}-USDT`;
+  let sellAttempt = await latestDelistSellAttempt(env.DB, announcementId, symbol);
+  if (sellAttempt) {
+    const existing = await confirmDelistSell(okx, instId, sellAttempt.clOrdId, sleepFn);
+    if (existing === "FILLED") {
+      await updateDelistSellAttempt(env.DB, announcementId, symbol, sellAttempt.attempt, "FILLED");
+      return true;
+    }
+    if (existing === "PENDING") {
+      await updateDelistSellAttempt(env.DB, announcementId, symbol, sellAttempt.attempt, "PENDING");
+      throw new Error(`Existing delist sell for ${symbol} remains pending`);
+    }
+    if (existing === "UNKNOWN") throw new Error(`Unable to reconcile delist sell for ${symbol}`);
+    if (existing === "FAILED") {
+      await updateDelistSellAttempt(env.DB, announcementId, symbol, sellAttempt.attempt, "FAILED");
+      sellAttempt = { ...sellAttempt, state: "FAILED" };
+    }
+    if (existing !== "FAILED" && existing !== "NOT_FOUND") throw new Error(`Unable to reconcile delist sell for ${symbol}: ${existing}`);
+  }
 
   const details = balanceDetails(await okx.balances(symbol));
   const detail = details.find((item) => String(item.ccy).toUpperCase() === symbol);
-  if (!detail || decimalToNumber(detail.eqUsd) <= 0) return false;
+  if (!detail || decimalToNumber(detail.eqUsd) <= 0) {
+    if (sellAttempt?.state === "FAILED") await updateDelistSellAttempt(env.DB, announcementId, symbol, sellAttempt.attempt, "SETTLED");
+    return false;
+  }
   if (frozenAmount(detail) > 0) throw new Error(`${symbol} balance remains frozen after cancellations`);
   const available = compareDecimal(detail.availBal || "0", "0") > 0 ? detail.availBal : detail.availEq || "0";
   const rules = await instrumentRules(okx, instId);
   const size = roundToStep(available, rules.lotSz, "down");
   if (compareDecimal(size, rules.minSz) < 0) return false;
+
+  if (!sellAttempt || sellAttempt.state === "FAILED") {
+    sellAttempt = await createDelistSellAttempt(env.DB, announcementId, symbol, sellAttempt?.attempt);
+  }
   try {
-    await okx.placeOrder({ instId, tdMode: "cash", side: "sell", ordType: "market", sz: size, tgtCcy: "base_ccy", clOrdId });
+    const placed = await okx.placeOrder({ instId, tdMode: "cash", side: "sell", ordType: "market", sz: size, tgtCcy: "base_ccy", clOrdId: sellAttempt.clOrdId });
+    await updateDelistSellAttempt(env.DB, announcementId, symbol, sellAttempt.attempt, "SUBMITTED", placed.ordId);
   } catch (error) {
     console.warn(`Delist sell outcome unknown for ${symbol}`, error.message);
+    await updateDelistSellAttempt(env.DB, announcementId, symbol, sellAttempt.attempt, "UNKNOWN");
   }
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    const state = await orderState(okx, instId, { clOrdId });
-    if (state === "FILLED") return true;
-    if (["FAILED", "NOT_FOUND"].includes(state)) throw new Error(`Delist sell for ${symbol} is ${state}`);
-    await sleep(1000);
+  const state = await confirmDelistSell(okx, instId, sellAttempt.clOrdId, sleepFn);
+  if (state === "FILLED") {
+    await updateDelistSellAttempt(env.DB, announcementId, symbol, sellAttempt.attempt, "FILLED");
+    return true;
   }
-  throw new Error(`Delist sell for ${symbol} remains unconfirmed`);
+  if (state === "PENDING") {
+    await updateDelistSellAttempt(env.DB, announcementId, symbol, sellAttempt.attempt, "PENDING");
+    throw new Error(`Delist sell for ${symbol} remains unconfirmed`);
+  }
+  await updateDelistSellAttempt(env.DB, announcementId, symbol, sellAttempt.attempt, state === "FAILED" ? "FAILED" : "UNKNOWN");
+  throw new Error(`Delist sell for ${symbol} is ${state}`);
 }
 
 async function fetchDelistAnnouncements(fetcher = fetch, sleepFn = sleep) {
@@ -350,7 +413,7 @@ async function monitorDelist(env, okx) {
       const instIds = affected.map((symbol) => `${symbol}-USDT`);
       await cancelPendingTriggers(okx, { instIds });
       await cancelPendingLimits(okx, { side: null, instIds });
-      for (const symbol of affected) if (await sellDelistedBalance(okx, symbol, announcementId)) protectedCount += 1;
+      for (const symbol of affected) if (await sellDelistedBalance(env, okx, symbol, announcementId)) protectedCount += 1;
       for (const instId of instIds) await env.DB.prepare("DELETE FROM crypto_limits WHERE inst_id=?").bind(instId).run();
     }
     await env.DB.prepare(`INSERT INTO processed_announcements(announcement_id,title,url,p_time,affected_cryptos,protection_executed,notes)
@@ -366,7 +429,7 @@ export const TASKS = {
   fetch_filled_orders: fetchFilledOrders,
   auto_sell_orders: autoSellOrders,
   cancel_pending_triggers: (_env, okx) => cancelPendingTriggers(okx),
-  create_algo_triggers: createAlgoTriggers,
+  create_algo_triggers: (env, okx, options) => createAlgoTriggers(env, okx, options),
 };
 
-export { cancelPendingLimits, cancelPendingTriggers, createAlgoTriggers, fetchDelistAnnouncements, sellDelistedBalance, stableId, symbolAppears };
+export { activeAssetsFromDetails, cancelAndVerify, cancelPendingLimits, cancelPendingTriggers, createAlgoTriggers, fetchDelistAnnouncements, sellDelistedBalance, stableId, symbolAppears };

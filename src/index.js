@@ -47,7 +47,7 @@ async function runScheduled(event, env) {
   const scheduledTime = Number(event.scheduledTime || Date.now());
   const minute = Math.floor(scheduledTime / 60_000);
   const runKey = `${event.cron}:${tasks.join(",")}:${minute}`;
-  return enqueueRun(env, runKey, tasks, { ...flagsForCron(event.cron), ...(event.options || {}) });
+  return enqueueRun(env, runKey, tasks, { ...flagsForCron(event.cron, scheduledTime), ...(event.options || {}) });
 }
 
 export class CronDeduplicator {

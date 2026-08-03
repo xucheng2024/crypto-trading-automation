@@ -17,11 +17,17 @@ export const ALLOWED_TASKS = new Set([
 
 export const MAX_ACTIVE_POSITIONS = 3;
 export const POSITION_GATE_USD = 1;
+export const CASH_CURRENCIES = new Set(["USDT", "USDC"]);
 
-export function flagsForCron(cron) {
+export function flagsForCron(cron, scheduledTime = Date.now()) {
+  const sgt = new Date(scheduledTime + 8 * 60 * 60 * 1000);
+  const sgtMinutes = sgt.getUTCHours() * 60 + sgt.getUTCMinutes();
+  const deferTriggerRebuild = sgtMinutes >= (23 * 60 + 55) || sgtMinutes < 5;
   return {
     forceDbFetch: cron === "10 16 * * *",
     verifyDailyClose: cron === "55 15 * * *",
+    clearRebuildPending: cron === "5 16 * * *",
+    deferTriggerRebuild,
   };
 }
 

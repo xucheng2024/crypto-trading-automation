@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { CronDeduplicator, executeTasks } from "../src/index.js";
+import { flagsForCron } from "../src/config.js";
 
 test("safe default pauses before credentials, APIs, or database writes", async () => {
   const result = await executeTasks({}, ["fetch_filled_orders"], {}, "test");
@@ -47,4 +48,11 @@ test("scheduled runs queue globally while true duplicate keys are rejected", asy
   assert.equal((await first).status, 200);
   assert.equal((await second).status, 200);
   assert.deepEqual(events, ["start:first", "end:first", "start:second", "end:second"]);
+});
+
+test("trigger rebuild is deferred across the 23:55 to 00:05 SGT quiet window", () => {
+  assert.equal(flagsForCron("55 15 * * *", Date.UTC(2026, 7, 3, 15, 55)).deferTriggerRebuild, true);
+  assert.equal(flagsForCron("0,15,30,45 * * * *", Date.UTC(2026, 7, 3, 16, 0)).deferTriggerRebuild, true);
+  assert.equal(flagsForCron("5 16 * * *", Date.UTC(2026, 7, 3, 16, 5)).deferTriggerRebuild, false);
+  assert.equal(flagsForCron("5 16 * * *", Date.UTC(2026, 7, 3, 16, 5)).clearRebuildPending, true);
 });

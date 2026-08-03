@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  activeAssetsFromDetails,
   cancelPendingLimits,
   cancelPendingTriggers,
   fetchDelistAnnouncements,
@@ -10,6 +11,40 @@ import {
 } from "../src/tasks.js";
 
 const noSleep = async () => {};
+
+function makeDelistEnv(rows = []) {
+  const attempts = rows.map((row) => ({ ...row }));
+  const db = {
+    prepare(sql) {
+      return {
+        bind(...values) {
+          if (sql.includes("SELECT attempt,cl_ord_id")) {
+            return {
+              first: async () => attempts.filter((row) => row.announcementId === values[0] && row.symbol === values[1])
+                .sort((a, b) => b.attempt - a.attempt).map((row) => ({ ...row }))[0] || null,
+            };
+          }
+          if (sql.includes("INSERT INTO delist_sell_attempts")) {
+            return {
+              run: async () => { attempts.push({ announcementId: values[0], symbol: values[1], attempt: values[2], clOrdId: values[3], state: "PREPARED" }); return { meta: { changes: 1 } }; },
+            };
+          }
+          if (sql.includes("UPDATE delist_sell_attempts")) {
+            return {
+              run: async () => {
+                const row = attempts.find((item) => item.announcementId === values[2] && item.symbol === values[3] && item.attempt === values[4]);
+                if (row) { row.state = values[0]; row.ordId ||= values[1]; }
+                return { meta: { changes: row ? 1 : 0 } };
+              },
+            };
+          }
+          throw new Error(`Unexpected SQL: ${sql}`);
+        },
+      };
+    },
+  };
+  return { env: { DB: db }, attempts };
+}
 
 test("limit cancellation resubmits orders that remain pending", async () => {
   const order = { instId: "BTC-USDT", ordId: "1", side: "buy" };
@@ -46,6 +81,15 @@ test("delist symbol matching covers legacy quote aliases without partial matches
   assert.equal(symbolAppears("OKX to delist MYTOKENBTC spot trading", "TOKEN"), false);
 });
 
+test("cash currencies never count towards the active-position gate", () => {
+  const assets = activeAssetsFromDetails([
+    { ccy: "USDT", eqUsd: "500" },
+    { ccy: "USDC", eqUsd: "500" },
+    { ccy: "BTC", eqUsd: "10" },
+  ]);
+  assert.deepEqual(assets.map((item) => item.ccy), ["BTC"]);
+});
+
 test("announcement fetch retries non-JSON and API failures", async () => {
   const responses = [
     new Response("rate limited", { status: 429 }),
@@ -59,6 +103,7 @@ test("announcement fetch retries non-JSON and API failures", async () => {
 });
 
 test("delist sell reconciles a prior client order before reading frozen balance", async () => {
+  const { env } = makeDelistEnv([{ announcementId: "announcement", symbol: "BTC", attempt: 0, clOrdId: "prior", state: "SUBMITTED" }]);
   let balancesCalled = false;
   let placed = false;
   const okx = {
@@ -71,19 +116,20 @@ test("delist sell reconciles a prior client order before reading frozen balance"
     placeOrder: async () => { placed = true; },
   };
 
-  assert.equal(await sellDelistedBalance(okx, "BTC", "announcement"), true);
+  assert.equal(await sellDelistedBalance(env, okx, "BTC", "announcement", { sleepFn: noSleep }), true);
   assert.equal(balancesCalled, false);
   assert.equal(placed, false);
 });
 
 test("delist sell reconciles an unknown placement outcome by client order id", async () => {
+  const { env, attempts } = makeDelistEnv();
   let orderQueries = 0;
   let placements = 0;
   const okx = {
     get: async (path) => {
       if (path === "/api/v5/trade/order") {
         orderQueries += 1;
-        return orderQueries === 1 ? { code: "51603", data: [] } : { code: "0", data: [{ state: "filled" }] };
+        return { code: "0", data: [{ state: "filled" }] };
       }
       assert.equal(path, "/api/v5/public/instruments");
       return { code: "0", data: [{ tickSz: "0.01", lotSz: "0.001", minSz: "0.001" }] };
@@ -93,7 +139,31 @@ test("delist sell reconciles an unknown placement outcome by client order id", a
     placeOrder: async () => { placements += 1; throw new Error("connection reset"); },
   };
 
-  assert.equal(await sellDelistedBalance(okx, "BTC", "announcement"), true);
+  assert.equal(await sellDelistedBalance(env, okx, "BTC", "announcement", { sleepFn: noSleep }), true);
   assert.equal(placements, 1);
-  assert.equal(orderQueries, 2);
+  assert.equal(orderQueries, 1);
+  assert.equal(attempts[0].state, "FILLED");
+});
+
+test("delist sell creates a new durable attempt after a canceled prior order", async () => {
+  const { env, attempts } = makeDelistEnv([{ announcementId: "announcement", symbol: "BTC", attempt: 0, clOrdId: "prior", state: "SUBMITTED" }]);
+  let orderQueries = 0;
+  let placements = 0;
+  const okx = {
+    get: async (path) => {
+      if (path === "/api/v5/trade/order") {
+        orderQueries += 1;
+        if (orderQueries === 1) return { code: "0", data: [{ state: "canceled" }] };
+        return { code: "0", data: [{ state: "filled" }] };
+      }
+      return { code: "0", data: [{ tickSz: "0.01", lotSz: "0.001", minSz: "0.001" }] };
+    },
+    requireSuccess: async (result) => result.data,
+    balances: async () => [{ details: [{ ccy: "BTC", eqUsd: "100", availBal: "0.1", frozenBal: "0", ordFrozen: "0" }] }],
+    placeOrder: async () => { placements += 1; return { ordId: "new" }; },
+  };
+
+  assert.equal(await sellDelistedBalance(env, okx, "BTC", "announcement", { sleepFn: noSleep }), true);
+  assert.equal(placements, 1);
+  assert.deepEqual(attempts.map((row) => row.state), ["FAILED", "FILLED"]);
 });
