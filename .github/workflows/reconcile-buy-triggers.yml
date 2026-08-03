@@ -28,10 +28,6 @@ permissions:
 
 jobs:
   reconcile:
-    # Keep scheduled runs inert until the dedicated, database-scoped token is
-    # installed. This prevents a partially configured migration from placing
-    # or cancelling any orders.
-    if: ${{ secrets.CLOUDFLARE_D1_API_TOKEN != '' && secrets.CLOUDFLARE_ACCOUNT_ID != '' && secrets.CLOUDFLARE_D1_DATABASE_ID != '' && secrets.OKX_API_KEY != '' && secrets.OKX_SECRET_KEY != '' && secrets.OKX_PASSPHRASE != '' && secrets.OKX_ORDER_SIZE != '' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
@@ -52,6 +48,15 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
+      - name: Verify required secrets
+        run: |
+          set -eu
+          for name in OKX_API_KEY OKX_SECRET_KEY OKX_PASSPHRASE OKX_ORDER_SIZE CLOUDFLARE_ACCOUNT_ID CLOUDFLARE_D1_DATABASE_ID CLOUDFLARE_D1_API_TOKEN; do
+            if [ -z "$(printenv "$name")" ]; then
+              echo "Missing required secret: $name" >&2
+              exit 1
+            fi
+          done
       - id: mode
         env:
           EVENT_NAME: ${{ github.event_name }}
