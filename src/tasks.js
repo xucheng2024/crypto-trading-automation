@@ -29,6 +29,35 @@ function balanceByCurrency(details) {
   return new Map(details.map((item) => [String(item.ccy || "").toUpperCase(), item]));
 }
 
+function sgtDay(now = Date.now()) {
+  return new Date(now + 8 * 60 * 60 * 1000).toISOString().slice(0, 10);
+}
+
+function candleValues(candles, instId) {
+  const todayOpen = candles[0]?.[1];
+  const yesterdayOpen = candles[1]?.[1];
+  const yesterdayClose = candles[1]?.[4];
+  if (!todayOpen || !yesterdayOpen || !yesterdayClose) throw new Error(`Incomplete daily candles for ${instId}`);
+  return { todayOpen, yesterdayOpen, yesterdayClose };
+}
+
+async function loadDailyCandleCache(db, day) {
+  const { results } = await db.prepare("SELECT inst_id,today_open,yesterday_open,yesterday_close FROM daily_candle_cache WHERE day_sgt=?").bind(day).all();
+  return new Map((results || []).map((row) => [row.inst_id, {
+    todayOpen: row.today_open,
+    yesterdayOpen: row.yesterday_open,
+    yesterdayClose: row.yesterday_close,
+  }]));
+}
+
+async function saveDailyCandleCache(db, day, instId, values) {
+  await db.prepare(`INSERT INTO daily_candle_cache(day_sgt,inst_id,today_open,yesterday_open,yesterday_close,updated_at)
+    VALUES(?,?,?,?,?,CURRENT_TIMESTAMP)
+    ON CONFLICT(day_sgt,inst_id) DO UPDATE SET today_open=excluded.today_open,yesterday_open=excluded.yesterday_open,
+      yesterday_close=excluded.yesterday_close,updated_at=CURRENT_TIMESTAMP`)
+    .bind(day, instId, values.todayOpen, values.yesterdayOpen, values.yesterdayClose).run();
+}
+
 async function instrumentRules(okx, instId) {
   const result = await okx.get("/api/v5/public/instruments", { instType: "SPOT", instId }, false);
   const rows = await okx.requireSuccess(result, { requireData: true, operation: `instrument rules ${instId}` });
@@ -243,11 +272,16 @@ async function autoSellOrders(env, okx, { verifyDailyClose = false, deferTrigger
   return { due: trades.length, sold, failed, unsettledBeforeToday };
 }
 
-async function dailyMarketData(okx, instId, snapshot) {
+async function dailyMarketData(env, okx, instId, snapshot, candleCache, candleDay) {
   // The candle remains per-instrument; ticker and rules come from the one-shot
   // SPOT snapshots loaded once for the complete trigger rebuild.
-  const candlesResult = await okx.get("/api/v5/market/candles", { instId, bar: "1D", limit: 2 }, false);
-  const candles = await okx.requireSuccess(candlesResult, { requireData: true, operation: `daily candles ${instId}` });
+  let candles = candleCache.get(instId);
+  if (!candles) {
+    const candlesResult = await okx.get("/api/v5/market/candles", { instId, bar: "1D", limit: 2 }, false);
+    candles = candleValues(await okx.requireSuccess(candlesResult, { requireData: true, operation: `daily candles ${instId}` }), instId);
+    await saveDailyCandleCache(env.DB, candleDay, instId, candles);
+    candleCache.set(instId, candles);
+  }
   let current = snapshot.lastByInstId.get(instId);
   let rules = snapshot.rulesByInstId.get(instId);
   if (!current) {
@@ -256,18 +290,14 @@ async function dailyMarketData(okx, instId, snapshot) {
     current = ticker[0].last;
   }
   if (!rules) rules = await instrumentRules(okx, instId);
-  return { candles, current, rules };
+  return { ...candles, current, rules };
 }
 
-async function createPairTrigger(env, okx, pair, runDate, snapshot) {
-  const { candles, current, rules } = await dailyMarketData(okx, pair.inst_id, snapshot);
-  const todayOpen = candles[0]?.[1];
-  if (!todayOpen) throw new Error(`No daily open for ${pair.inst_id}`);
-  if (candles[1]?.[1] && candles[1]?.[4]) {
-    const yesterdayOpenTimes11 = multiplyDecimal(candles[1][1], "11");
-    const yesterdayCloseTimes10 = multiplyDecimal(candles[1][4], "10");
-    if (compareDecimal(yesterdayCloseTimes10, yesterdayOpenTimes11) > 0) return { skipped: "yesterday_gain" };
-  }
+async function createPairTrigger(env, okx, pair, runDate, snapshot, candleCache, candleDay) {
+  const { todayOpen, yesterdayOpen, yesterdayClose, current, rules } = await dailyMarketData(env, okx, pair.inst_id, snapshot, candleCache, candleDay);
+  const yesterdayOpenTimes11 = multiplyDecimal(yesterdayOpen, "11");
+  const yesterdayCloseTimes10 = multiplyDecimal(yesterdayClose, "10");
+  if (compareDecimal(yesterdayCloseTimes10, yesterdayOpenTimes11) > 0) return { skipped: "yesterday_gain" };
   const target = divideDecimal(multiplyDecimal(todayOpen, pair.best_limit), "100");
   const price = roundToStep(target, rules.tickSz, "half-up");
   const size = roundToStep(divideDecimal(env.OKX_ORDER_SIZE || "100", price), rules.lotSz, "down");
@@ -296,13 +326,15 @@ async function createAlgoTriggers(env, okx, { clearRebuildPending = false } = {}
   ]);
   const eligible = eligibleTriggerPairs(pairs, assets, blacklist, alreadyCovered);
   const runDate = new Date().toISOString().slice(0, 10).replaceAll("-", "");
+  const candleDay = sgtDay();
+  const candleCache = await loadDailyCandleCache(env.DB, candleDay);
   const snapshot = eligible.length ? await loadSpotMarketSnapshot(okx) : null;
   let created = 0;
   let skipped = pairs.length - eligible.length;
   const failures = [];
   for (const pair of eligible) {
     try {
-      const result = await createPairTrigger(env, okx, pair, runDate, snapshot);
+      const result = await createPairTrigger(env, okx, pair, runDate, snapshot, candleCache, candleDay);
       if (result.skipped) skipped += 1; else created += 1;
     } catch (error) {
       failures.push(`${pair.inst_id}: ${error.message}`);
@@ -462,4 +494,4 @@ export const TASKS = {
   create_algo_triggers: (env, okx, options) => createAlgoTriggers(env, okx, options),
 };
 
-export { activeAssetsFromDetails, cancelAndVerify, cancelPendingLimits, cancelPendingTriggers, createAlgoTriggers, eligibleTriggerPairs, fetchDelistAnnouncements, loadSpotMarketSnapshot, sellDelistedBalance, stableId, symbolAppears };
+export { activeAssetsFromDetails, candleValues, cancelAndVerify, cancelPendingLimits, cancelPendingTriggers, createAlgoTriggers, eligibleTriggerPairs, fetchDelistAnnouncements, loadSpotMarketSnapshot, sellDelistedBalance, stableId, symbolAppears };

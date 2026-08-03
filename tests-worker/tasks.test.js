@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   activeAssetsFromDetails,
+  candleValues,
   cancelPendingLimits,
   cancelPendingTriggers,
   eligibleTriggerPairs,
@@ -134,6 +135,13 @@ test("spot market snapshot degrades to empty maps when a bulk endpoint is rate l
   });
   assert.equal(snapshot.rulesByInstId.size, 0);
   assert.equal(snapshot.lastByInstId.size, 0);
+});
+
+test("daily candle cache values retain today's open and yesterday's exact guard values", () => {
+  assert.deepEqual(candleValues([
+    ["today", "100", "0", "0", "0"],
+    ["yesterday", "80", "0", "0", "85"],
+  ], "BTC-USDT"), { todayOpen: "100", yesterdayOpen: "80", yesterdayClose: "85" });
 });
 
 test("delist sell reconciles a prior client order before reading frozen balance", async () => {
