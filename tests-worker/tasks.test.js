@@ -6,6 +6,7 @@ import {
   candleValues,
   cancelPendingLimits,
   cancelPendingTriggers,
+  explainTriggerEligibility,
   eligibleTriggerPairs,
   fetchDelistAnnouncements,
   loadSpotMarketSnapshot,
@@ -110,6 +111,21 @@ test("trigger rebuild never includes held currencies", () => {
   const pairs = [{ inst_id: "BTC-USDT" }, { inst_id: "ETH-USDT" }, { inst_id: "SOL-USDT" }];
   const eligible = eligibleTriggerPairs(pairs, [{ ccy: "BTC" }], new Set(["ETH"]), new Set(["SOL-USDT"]));
   assert.deepEqual(eligible, []);
+});
+
+test("trigger eligibility records an actionable skip reason", () => {
+  const result = explainTriggerEligibility(
+    [{ inst_id: "BTC-USDT" }, { inst_id: "ETH-USDT" }, { inst_id: "SOL-USDT" }, { inst_id: "XRP-USDT" }],
+    [{ ccy: "BTC" }],
+    new Set(["ETH"]),
+    new Set(["SOL-USDT"]),
+  );
+  assert.deepEqual(result.eligible, [{ inst_id: "XRP-USDT" }]);
+  assert.deepEqual(result.skipped, [
+    { instId: "BTC-USDT", reason: "held" },
+    { instId: "ETH-USDT", reason: "blacklisted" },
+    { instId: "SOL-USDT", reason: "already_covered" },
+  ]);
 });
 
 test("spot market snapshot collapses rules and tickers into two requests", async () => {

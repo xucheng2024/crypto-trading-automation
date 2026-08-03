@@ -316,7 +316,8 @@ async function createAlgoTriggers(env, okx, { clearRebuildPending = false, concu
     ...pendingTriggers.filter((order) => order.ordType === "trigger" && order.side === "buy").map((order) => order.instId),
     ...pendingLimits.filter((order) => order.side === "buy").map((order) => order.instId),
   ]);
-  const eligible = eligibleTriggerPairs(pairs, assets, blacklist, alreadyCovered);
+  const eligibility = explainTriggerEligibility(pairs, assets, blacklist, alreadyCovered);
+  const eligible = eligibility.eligible;
   const runDate = new Date().toISOString().slice(0, 10).replaceAll("-", "");
   const candleDay = sgtDay();
   const candleCache = await loadDailyCandleCache(env.DB, candleDay);
@@ -337,24 +338,36 @@ async function createAlgoTriggers(env, okx, { clearRebuildPending = false, concu
   });
   await Promise.all(workers);
   let created = 0;
-  let skipped = pairs.length - eligible.length;
+  const skippedPairs = [...eligibility.skipped];
   const failures = [];
-  for (const outcome of outcomes) {
+  for (const [index, outcome] of outcomes.entries()) {
     if (outcome?.error) failures.push(outcome.error);
-    else if (outcome?.skipped) skipped += 1;
+    else if (outcome?.skipped) skippedPairs.push({ instId: eligible[index].inst_id, reason: outcome.skipped });
     else created += 1;
   }
   if (failures.length) throw new Error(`Trigger creation failed for ${failures.length} pair(s): ${failures.slice(0, 5).join("; ")}`);
   if (clearRebuildPending) await env.DB.prepare("UPDATE filled_orders SET trigger_rebuild_pending=0,updated_at=CURRENT_TIMESTAMP WHERE trigger_rebuild_pending=1").run();
-  return { configured: pairs.length, created, skipped };
+  return { configured: pairs.length, created, skipped: skippedPairs.length, skippedPairs };
 }
 
 function eligibleTriggerPairs(pairs, assets, blacklist, alreadyCovered) {
+  return explainTriggerEligibility(pairs, assets, blacklist, alreadyCovered).eligible;
+}
+
+function explainTriggerEligibility(pairs, assets, blacklist, alreadyCovered) {
   const heldSymbols = new Set(assets.map((asset) => String(asset.ccy || "").toUpperCase()));
-  return pairs.filter((pair) => {
+  const eligible = [];
+  const skipped = [];
+  for (const pair of pairs) {
     const symbol = pair.inst_id.split("-")[0].toUpperCase();
-    return !heldSymbols.has(symbol) && !blacklist.has(symbol) && !alreadyCovered.has(pair.inst_id);
-  });
+    let reason = null;
+    if (heldSymbols.has(symbol)) reason = "held";
+    else if (blacklist.has(symbol)) reason = "blacklisted";
+    else if (alreadyCovered.has(pair.inst_id)) reason = "already_covered";
+    if (reason) skipped.push({ instId: pair.inst_id, reason });
+    else eligible.push(pair);
+  }
+  return { eligible, skipped };
 }
 
 function symbolAppears(title, symbol) {
@@ -497,4 +510,4 @@ export const TASKS = {
   create_algo_triggers: (env, okx, options) => createAlgoTriggers(env, okx, options),
 };
 
-export { activeAssetsFromDetails, candleValues, cancelAndVerify, cancelPendingLimits, cancelPendingTriggers, createAlgoTriggers, eligibleTriggerPairs, fetchDelistAnnouncements, loadSpotMarketSnapshot, sellDelistedBalance, stableId, symbolAppears };
+export { activeAssetsFromDetails, candleValues, cancelAndVerify, cancelPendingLimits, cancelPendingTriggers, createAlgoTriggers, eligibleTriggerPairs, explainTriggerEligibility, fetchDelistAnnouncements, loadSpotMarketSnapshot, sellDelistedBalance, stableId, symbolAppears };
