@@ -29,7 +29,9 @@ async function executeTasks(env, tasks, options, runId) {
 }
 
 async function enqueueRun(env, runKey, tasks, options, { skipIfBusy = false } = {}) {
-  const id = env.CRON_DEDUP.idFromName("scheduled-runs");
+  // Move to a fresh coordinator after the bulk-snapshot fallback update so no
+  // warm Durable Object instance can retain pre-update execution behavior.
+  const id = env.CRON_DEDUP.idFromName("scheduled-runs-v2");
   const stub = env.CRON_DEDUP.get(id);
   const response = await stub.fetch("https://coordinator/execute", {
     method: "POST",
