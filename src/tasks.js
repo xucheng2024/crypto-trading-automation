@@ -304,7 +304,7 @@ async function createPairTrigger(env, okx, pair, runDate, snapshot, candleCache,
   return { orderId: placed.algoId, type: "trigger" };
 }
 
-async function createAlgoTriggers(env, okx, { clearRebuildPending = false } = {}) {
+async function createAlgoTriggers(env, okx, { clearRebuildPending = false, concurrency = 1, pauseMs = 80 } = {}) {
   const assets = await activeAssets(okx);
   if (assets.length >= MAX_ACTIVE_POSITIONS) {
     if (clearRebuildPending) await env.DB.prepare("UPDATE filled_orders SET trigger_rebuild_pending=0,updated_at=CURRENT_TIMESTAMP WHERE trigger_rebuild_pending=1").run();
@@ -321,17 +321,28 @@ async function createAlgoTriggers(env, okx, { clearRebuildPending = false } = {}
   const candleDay = sgtDay();
   const candleCache = await loadDailyCandleCache(env.DB, candleDay);
   const snapshot = eligible.length ? await loadSpotMarketSnapshot(okx) : null;
+  const outcomes = new Array(eligible.length);
+  let nextPair = 0;
+  const workers = Array.from({ length: Math.min(Math.max(1, Math.floor(concurrency)), eligible.length) }, async () => {
+    while (nextPair < eligible.length) {
+      const index = nextPair++;
+      const pair = eligible[index];
+      try {
+        outcomes[index] = await createPairTrigger(env, okx, pair, runDate, snapshot, candleCache, candleDay);
+      } catch (error) {
+        outcomes[index] = { error: `${pair.inst_id}: ${error.message}` };
+      }
+      if (pauseMs > 0) await sleep(pauseMs);
+    }
+  });
+  await Promise.all(workers);
   let created = 0;
   let skipped = pairs.length - eligible.length;
   const failures = [];
-  for (const pair of eligible) {
-    try {
-      const result = await createPairTrigger(env, okx, pair, runDate, snapshot, candleCache, candleDay);
-      if (result.skipped) skipped += 1; else created += 1;
-    } catch (error) {
-      failures.push(`${pair.inst_id}: ${error.message}`);
-    }
-    await sleep(80);
+  for (const outcome of outcomes) {
+    if (outcome?.error) failures.push(outcome.error);
+    else if (outcome?.skipped) skipped += 1;
+    else created += 1;
   }
   if (failures.length) throw new Error(`Trigger creation failed for ${failures.length} pair(s): ${failures.slice(0, 5).join("; ")}`);
   if (clearRebuildPending) await env.DB.prepare("UPDATE filled_orders SET trigger_rebuild_pending=0,updated_at=CURRENT_TIMESTAMP WHERE trigger_rebuild_pending=1").run();

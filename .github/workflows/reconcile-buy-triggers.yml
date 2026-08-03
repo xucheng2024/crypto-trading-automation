@@ -1,0 +1,68 @@
+name: Reconcile buy triggers
+
+on:
+  schedule:
+    # 23:55 SGT: cancel the current day's buy triggers.
+    - cron: "55 15 * * *"
+    # 00:05 SGT: rebuild buy triggers from D1 and live OKX state.
+    - cron: "5 16 * * *"
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "cancel only, or cancel then rebuild"
+        required: true
+        default: rebuild
+        type: choice
+        options:
+          - rebuild
+          - cancel
+
+concurrency:
+  group: okx-buy-trigger-reconciliation
+  # Do not interrupt an in-flight reconciliation: it could be between a
+  # verified cancel and order creation. Later manual runs wait safely instead.
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  reconcile:
+    # Keep scheduled runs inert until the dedicated, database-scoped token is
+    # installed. This prevents a partially configured migration from placing
+    # or cancelling any orders.
+    if: ${{ secrets.CLOUDFLARE_D1_API_TOKEN != '' && secrets.CLOUDFLARE_ACCOUNT_ID != '' && secrets.CLOUDFLARE_D1_DATABASE_ID != '' && secrets.OKX_API_KEY != '' && secrets.OKX_SECRET_KEY != '' && secrets.OKX_PASSPHRASE != '' && secrets.OKX_ORDER_SIZE != '' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      OKX_API_KEY: ${{ secrets.OKX_API_KEY }}
+      OKX_SECRET_KEY: ${{ secrets.OKX_SECRET_KEY }}
+      OKX_PASSPHRASE: ${{ secrets.OKX_PASSPHRASE }}
+      OKX_ORDER_SIZE: ${{ secrets.OKX_ORDER_SIZE }}
+      OKX_TESTNET: ${{ secrets.OKX_TESTNET }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      CLOUDFLARE_D1_DATABASE_ID: ${{ secrets.CLOUDFLARE_D1_DATABASE_ID }}
+      CLOUDFLARE_D1_API_TOKEN: ${{ secrets.CLOUDFLARE_D1_API_TOKEN }}
+      TRIGGER_REBUILD_CONCURRENCY: "4"
+      TRIGGER_REBUILD_PAUSE_MS: "0"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - id: mode
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          SCHEDULE: ${{ github.event.schedule }}
+          MANUAL_MODE: ${{ inputs.mode }}
+        run: |
+          if [ "$EVENT_NAME" = "schedule" ] && [ "$SCHEDULE" = "55 15 * * *" ]; then
+            echo "value=cancel" >> "$GITHUB_OUTPUT"
+          elif [ "$EVENT_NAME" = "schedule" ]; then
+            echo "value=rebuild" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=$MANUAL_MODE" >> "$GITHUB_OUTPUT"
+          fi
+      - run: node scripts/github-trigger-reconcile.mjs "${{ steps.mode.outputs.value }}"

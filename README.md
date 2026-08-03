@@ -2,7 +2,7 @@
 
 A comprehensive automated crypto trading system with OKX exchange integration, featuring algorithmic trading strategies, delisting protection, automated order management, and exchange-aware decimal rounding.
 
-The production runtime is Cloudflare-only: Cron Triggers run the Worker directly, a Durable Object serializes trading runs, and D1 stores trading state. The legacy GitHub Actions/VPS scheduler has been removed.
+Cloudflare Workers run all high-frequency trading protection. GitHub Actions performs the low-frequency daily buy-trigger cancellation and reconciliation, while D1 remains the shared strategy-state database.
 
 ## 🚀 Quick Start
 
@@ -22,7 +22,8 @@ python monitor_delist.py
 ## 🏗️ Modern Cloud Architecture
 
 ### Cloud Deployment ⭐
-- **Cloudflare Workers Cron** - Runs the trading tasks directly without a GitHub dispatch hop
+- **Cloudflare Workers Cron** - Runs monitoring, fill synchronization, cancellation of ordinary limits, and selling
+- **GitHub Actions** - Cancels daily buy triggers and recreates them from the shared D1 strategy state
 - **Durable Object coordinator** - Prevents overlapping scheduled or manual trading runs
 - **Cloudflare D1** - Persists fills, sell recovery state, configuration, blacklist, and run status
 - **Cloudflare Secrets** - Stores OKX credentials and the manual-run bearer token
@@ -96,17 +97,20 @@ python monitor_delist.py
 # Every 15 minutes - Auto sell orders
 - cron: '0,15,30,45 * * * *'
 
-# Daily at 15:55 UTC (23:55 SGT) - Cancel pending trigger orders
-- cron: '55 15 * * *'
-
-# Daily at 16:05 UTC (00:05 SGT) - Create new algo triggers
-- cron: '5 16 * * *'
+# Daily buy-trigger cancellation/recreation is in
+# .github/workflows/reconcile-buy-triggers.yml.
 ```
 
 ### Execution Strategy
 - **5-Minute Tasks (Staggered)**: `monitor_delist.py` + `cancel_pending_limits.py` + `fetch_filled_orders.py`
 - **15-Minute Tasks**: `auto_sell_orders.py`
-- **Daily Tasks**: `cancel_pending_triggers.py` (15:55 UTC = 23:55 SGT) + `create_algo_triggers.py` (16:05 UTC = 00:05 SGT)
+- **Daily GitHub Action**: cancel buy triggers at 23:55 SGT; rebuild them from D1 at 00:05 SGT. Manual dispatch uses the same cancel-then-rebuild flow.
+
+### GitHub Action secrets
+
+Set these repository secrets before enabling the workflow: `OKX_API_KEY`, `OKX_SECRET_KEY`, `OKX_PASSPHRASE`, `OKX_ORDER_SIZE`, `OKX_TESTNET`, `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_D1_DATABASE_ID`, and `CLOUDFLARE_D1_API_TOKEN`. The Cloudflare token should be restricted to D1 read/write access for only this account/database. The action never receives Worker secrets or the manual-run token.
+
+The Worker manual endpoint intentionally does not accept daily trigger cancellation or creation; use **Actions → Reconcile buy triggers → Run workflow** for a manual rebuild.
 
 ### Automation Scripts
 
