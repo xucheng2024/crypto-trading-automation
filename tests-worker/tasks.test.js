@@ -7,6 +7,7 @@ import {
   cancelPendingTriggers,
   eligibleTriggerPairs,
   fetchDelistAnnouncements,
+  loadSpotMarketSnapshot,
   sellDelistedBalance,
   symbolAppears,
 } from "../src/tasks.js";
@@ -108,6 +109,22 @@ test("trigger rebuild never includes held currencies", () => {
   const pairs = [{ inst_id: "BTC-USDT" }, { inst_id: "ETH-USDT" }, { inst_id: "SOL-USDT" }];
   const eligible = eligibleTriggerPairs(pairs, [{ ccy: "BTC" }], new Set(["ETH"]), new Set(["SOL-USDT"]));
   assert.deepEqual(eligible, []);
+});
+
+test("spot market snapshot collapses rules and tickers into two requests", async () => {
+  const paths = [];
+  const snapshot = await loadSpotMarketSnapshot({
+    get: async (path) => {
+      paths.push(path);
+      return path.includes("instruments")
+        ? { code: "0", data: [{ instId: "BTC-USDT", tickSz: "0.1", lotSz: "0.0001", minSz: "0.0001" }] }
+        : { code: "0", data: [{ instId: "BTC-USDT", last: "100000" }] };
+    },
+    requireSuccess: async (result) => result.data,
+  });
+  assert.deepEqual(paths, ["/api/v5/public/instruments", "/api/v5/market/tickers"]);
+  assert.equal(snapshot.lastByInstId.get("BTC-USDT"), "100000");
+  assert.deepEqual(snapshot.rulesByInstId.get("BTC-USDT"), { tickSz: "0.1", lotSz: "0.0001", minSz: "0.0001" });
 });
 
 test("delist sell reconciles a prior client order before reading frozen balance", async () => {

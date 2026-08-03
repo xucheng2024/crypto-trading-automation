@@ -39,6 +39,23 @@ async function instrumentRules(okx, instId) {
   return { tickSz: item.tickSz, lotSz: item.lotSz, minSz: item.minSz || item.lotSz };
 }
 
+function normalizeInstrumentRules(item) {
+  if (compareDecimal(item.tickSz || "0", "0") <= 0 || compareDecimal(item.lotSz || "0", "0") <= 0) return null;
+  return { tickSz: item.tickSz, lotSz: item.lotSz, minSz: item.minSz || item.lotSz };
+}
+
+async function loadSpotMarketSnapshot(okx) {
+  // Both endpoints return all SPOT instruments in one response.  This removes
+  // two public requests per configured pair without relaxing the candle rate.
+  const instrumentsResult = await okx.get("/api/v5/public/instruments", { instType: "SPOT" }, false);
+  const instrumentRows = await okx.requireSuccess(instrumentsResult, { requireData: true, operation: "spot instrument snapshot" });
+  const tickersResult = await okx.get("/api/v5/market/tickers", { instType: "SPOT" }, false);
+  const tickerRows = await okx.requireSuccess(tickersResult, { requireData: true, operation: "spot ticker snapshot" });
+  const rulesByInstId = new Map(instrumentRows.map((item) => [item.instId, normalizeInstrumentRules(item)]).filter(([, rules]) => rules));
+  const lastByInstId = new Map(tickerRows.map((item) => [item.instId, item.last]));
+  return { rulesByInstId, lastByInstId };
+}
+
 async function cancelAndVerify({ loadPending, cancelBatch, matches, batchSize, label, sleepFn = sleep }) {
   const orders = (await loadPending()).filter(matches);
   const failures = [];
@@ -214,19 +231,20 @@ async function autoSellOrders(env, okx, { verifyDailyClose = false, deferTrigger
   return { due: trades.length, sold, failed, unsettledBeforeToday };
 }
 
-async function dailyMarketData(okx, instId) {
-  // Do not burst three public calls at once.  Cloudflare egress is shared,
-  // so a paced sequence is materially more reliable than Promise.all here.
+async function dailyMarketData(okx, instId, snapshot) {
+  // The candle remains per-instrument; ticker and rules come from the one-shot
+  // SPOT snapshots loaded once for the complete trigger rebuild.
   const candlesResult = await okx.get("/api/v5/market/candles", { instId, bar: "1D", limit: 2 }, false);
-  const tickerResult = await okx.get("/api/v5/market/ticker", { instId }, false);
-  const rules = await instrumentRules(okx, instId);
   const candles = await okx.requireSuccess(candlesResult, { requireData: true, operation: `daily candles ${instId}` });
-  const ticker = await okx.requireSuccess(tickerResult, { requireData: true, operation: `ticker ${instId}` });
-  return { candles, current: ticker[0].last, rules };
+  const current = snapshot.lastByInstId.get(instId);
+  const rules = snapshot.rulesByInstId.get(instId);
+  if (!current) throw new Error(`No spot ticker in snapshot for ${instId}`);
+  if (!rules) throw new Error(`No valid spot instrument rules in snapshot for ${instId}`);
+  return { candles, current, rules };
 }
 
-async function createPairTrigger(env, okx, pair, runDate) {
-  const { candles, current, rules } = await dailyMarketData(okx, pair.inst_id);
+async function createPairTrigger(env, okx, pair, runDate, snapshot) {
+  const { candles, current, rules } = await dailyMarketData(okx, pair.inst_id, snapshot);
   const todayOpen = candles[0]?.[1];
   if (!todayOpen) throw new Error(`No daily open for ${pair.inst_id}`);
   if (candles[1]?.[1] && candles[1]?.[4]) {
@@ -262,12 +280,13 @@ async function createAlgoTriggers(env, okx, { clearRebuildPending = false } = {}
   ]);
   const eligible = eligibleTriggerPairs(pairs, assets, blacklist, alreadyCovered);
   const runDate = new Date().toISOString().slice(0, 10).replaceAll("-", "");
+  const snapshot = eligible.length ? await loadSpotMarketSnapshot(okx) : null;
   let created = 0;
   let skipped = pairs.length - eligible.length;
   const failures = [];
   for (const pair of eligible) {
     try {
-      const result = await createPairTrigger(env, okx, pair, runDate);
+      const result = await createPairTrigger(env, okx, pair, runDate, snapshot);
       if (result.skipped) skipped += 1; else created += 1;
     } catch (error) {
       failures.push(`${pair.inst_id}: ${error.message}`);
@@ -427,4 +446,4 @@ export const TASKS = {
   create_algo_triggers: (env, okx, options) => createAlgoTriggers(env, okx, options),
 };
 
-export { activeAssetsFromDetails, cancelAndVerify, cancelPendingLimits, cancelPendingTriggers, createAlgoTriggers, eligibleTriggerPairs, fetchDelistAnnouncements, sellDelistedBalance, stableId, symbolAppears };
+export { activeAssetsFromDetails, cancelAndVerify, cancelPendingLimits, cancelPendingTriggers, createAlgoTriggers, eligibleTriggerPairs, fetchDelistAnnouncements, loadSpotMarketSnapshot, sellDelistedBalance, stableId, symbolAppears };
