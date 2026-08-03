@@ -92,7 +92,35 @@ export default {
       try {
         const okx = new OKXClient(env);
         const balances = await okx.balances();
-        return json({ ok: true, authenticated: true, accountRows: balances.length, tradingEnabled: tradingEnabled(env) });
+        const pendingLimits = await okx.pendingLimits();
+        const pendingTriggers = await okx.pendingTriggers();
+        const recentFills = await okx.fillsSince(Date.now() - 15 * 60_000);
+        const instruments = await okx.get("/api/v5/public/instruments", { instType: "SPOT", instId: "BTC-USDT" }, false);
+        await okx.requireSuccess(instruments, { requireData: true, operation: "public instrument validation" });
+        const candles = await okx.get("/api/v5/market/candles", { instId: "BTC-USDT", bar: "1D", limit: 2 }, false);
+        await okx.requireSuccess(candles, { requireData: true, operation: "candle validation" });
+        const ticker = await okx.get("/api/v5/market/ticker", { instId: "BTC-USDT" }, false);
+        await okx.requireSuccess(ticker, { requireData: true, operation: "ticker validation" });
+        const announcementResponse = await fetch("https://www.okx.com/api/v5/support/announcements?annType=announcements-delistings&page=1", { signal: AbortSignal.timeout(15_000) });
+        const announcements = await announcementResponse.json();
+        if (!announcementResponse.ok || announcements.code !== "0") throw new Error(`Announcement validation failed: ${announcements.msg || announcementResponse.status}`);
+        const config = await env.DB.prepare("SELECT COUNT(*) AS count FROM crypto_limits").first();
+        return json({
+          ok: true,
+          authenticated: true,
+          tradingEnabled: tradingEnabled(env),
+          checks: {
+            account: balances.length,
+            pendingLimits: pendingLimits.length,
+            pendingTriggers: pendingTriggers.length,
+            recentFills: recentFills.length,
+            instruments: true,
+            candles: true,
+            ticker: true,
+            announcements: true,
+            d1Configs: config?.count || 0,
+          },
+        });
       } catch (error) {
         return json({ ok: false, authenticated: false, error: error.message, tradingEnabled: tradingEnabled(env) }, 503);
       }
