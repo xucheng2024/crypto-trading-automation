@@ -47,12 +47,24 @@ function normalizeInstrumentRules(item) {
 async function loadSpotMarketSnapshot(okx) {
   // Both endpoints return all SPOT instruments in one response.  This removes
   // two public requests per configured pair without relaxing the candle rate.
-  const instrumentsResult = await okx.get("/api/v5/public/instruments", { instType: "SPOT" }, false);
-  const instrumentRows = await okx.requireSuccess(instrumentsResult, { requireData: true, operation: "spot instrument snapshot" });
-  const tickersResult = await okx.get("/api/v5/market/tickers", { instType: "SPOT" }, false);
-  const tickerRows = await okx.requireSuccess(tickersResult, { requireData: true, operation: "spot ticker snapshot" });
-  const rulesByInstId = new Map(instrumentRows.map((item) => [item.instId, normalizeInstrumentRules(item)]).filter(([, rules]) => rules));
-  const lastByInstId = new Map(tickerRows.map((item) => [item.instId, item.last]));
+  // A shared Cloudflare egress can reject either bulk endpoint, so snapshots
+  // are an optimization only: individual endpoint fallbacks keep the task live.
+  let rulesByInstId = new Map();
+  let lastByInstId = new Map();
+  try {
+    const instrumentsResult = await okx.get("/api/v5/public/instruments", { instType: "SPOT" }, false);
+    const instrumentRows = await okx.requireSuccess(instrumentsResult, { requireData: true, operation: "spot instrument snapshot" });
+    rulesByInstId = new Map(instrumentRows.map((item) => [item.instId, normalizeInstrumentRules(item)]).filter(([, rules]) => rules));
+  } catch (error) {
+    console.warn(`Spot instrument snapshot unavailable; using per-instrument fallback: ${error.message}`);
+  }
+  try {
+    const tickersResult = await okx.get("/api/v5/market/tickers", { instType: "SPOT" }, false);
+    const tickerRows = await okx.requireSuccess(tickersResult, { requireData: true, operation: "spot ticker snapshot" });
+    lastByInstId = new Map(tickerRows.map((item) => [item.instId, item.last]));
+  } catch (error) {
+    console.warn(`Spot ticker snapshot unavailable; using per-instrument fallback: ${error.message}`);
+  }
   return { rulesByInstId, lastByInstId };
 }
 
@@ -236,10 +248,14 @@ async function dailyMarketData(okx, instId, snapshot) {
   // SPOT snapshots loaded once for the complete trigger rebuild.
   const candlesResult = await okx.get("/api/v5/market/candles", { instId, bar: "1D", limit: 2 }, false);
   const candles = await okx.requireSuccess(candlesResult, { requireData: true, operation: `daily candles ${instId}` });
-  const current = snapshot.lastByInstId.get(instId);
-  const rules = snapshot.rulesByInstId.get(instId);
-  if (!current) throw new Error(`No spot ticker in snapshot for ${instId}`);
-  if (!rules) throw new Error(`No valid spot instrument rules in snapshot for ${instId}`);
+  let current = snapshot.lastByInstId.get(instId);
+  let rules = snapshot.rulesByInstId.get(instId);
+  if (!current) {
+    const tickerResult = await okx.get("/api/v5/market/ticker", { instId }, false);
+    const ticker = await okx.requireSuccess(tickerResult, { requireData: true, operation: `ticker ${instId}` });
+    current = ticker[0].last;
+  }
+  if (!rules) rules = await instrumentRules(okx, instId);
   return { candles, current, rules };
 }
 

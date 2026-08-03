@@ -127,6 +127,15 @@ test("spot market snapshot collapses rules and tickers into two requests", async
   assert.deepEqual(snapshot.rulesByInstId.get("BTC-USDT"), { tickSz: "0.1", lotSz: "0.0001", minSz: "0.0001" });
 });
 
+test("spot market snapshot degrades to empty maps when a bulk endpoint is rate limited", async () => {
+  const snapshot = await loadSpotMarketSnapshot({
+    get: async () => { throw new Error("OKX HTTP 429"); },
+    requireSuccess: async (result) => result.data,
+  });
+  assert.equal(snapshot.rulesByInstId.size, 0);
+  assert.equal(snapshot.lastByInstId.size, 0);
+});
+
 test("delist sell reconciles a prior client order before reading frozen balance", async () => {
   const { env } = makeDelistEnv([{ announcementId: "announcement", symbol: "BTC", attempt: 0, clOrdId: "prior", state: "SUBMITTED" }]);
   let balancesCalled = false;
