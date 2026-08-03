@@ -9,7 +9,7 @@ test("safe default pauses before credentials, APIs, or database writes", async (
   assert.equal(result.paused, true);
 });
 
-test("scheduled runs queue globally while true duplicate keys are rejected", async () => {
+test("scheduled runs skip while a run is active, while true duplicate keys are rejected", async () => {
   let storedRuns = {};
   const ctx = {
     storage: {
@@ -29,25 +29,25 @@ test("scheduled runs queue globally while true duplicate keys are rejected", asy
     return { ok: true };
   };
   const coordinator = new CronDeduplicator(ctx, {}, runner);
-  const request = (runKey) => new Request("https://coordinator/execute", {
+  const request = (runKey, skipIfBusy = false) => new Request("https://coordinator/execute", {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ runKey, tasks: ["fetch_filled_orders"] }),
+    body: JSON.stringify({ runKey, tasks: ["fetch_filled_orders"], skipIfBusy }),
   });
 
-  const first = coordinator.fetch(request("first"));
+  const first = coordinator.fetch(request("first", true));
   await Promise.resolve();
-  const second = coordinator.fetch(request("second"));
-  await new Promise((resolve) => setTimeout(resolve, 0));
-  assert.deepEqual(events, ["start:first"]);
+  const second = await coordinator.fetch(request("second", true));
+  assert.deepEqual(await second.json(), { skippedBusy: true, runKey: "second" });
 
-  const duplicate = await coordinator.fetch(request("second"));
-  assert.deepEqual(await duplicate.json(), { duplicate: true, runKey: "second" });
+  const duplicate = await coordinator.fetch(request("first", true));
+  assert.deepEqual(await duplicate.json(), { skippedBusy: true, runKey: "first" });
 
   releaseFirst();
   assert.equal((await first).status, 200);
-  assert.equal((await second).status, 200);
-  assert.deepEqual(events, ["start:first", "end:first", "start:second", "end:second"]);
+  const completedDuplicate = await coordinator.fetch(request("first", true));
+  assert.deepEqual(await completedDuplicate.json(), { duplicate: true, runKey: "first" });
+  assert.deepEqual(events, ["start:first", "end:first"]);
 });
 
 test("trigger rebuild is deferred across the 23:55 to 00:05 SGT quiet window", () => {

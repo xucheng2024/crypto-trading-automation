@@ -28,13 +28,13 @@ async function executeTasks(env, tasks, options, runId) {
   return results;
 }
 
-async function enqueueRun(env, runKey, tasks, options) {
+async function enqueueRun(env, runKey, tasks, options, { skipIfBusy = false } = {}) {
   const id = env.CRON_DEDUP.idFromName("scheduled-runs");
   const stub = env.CRON_DEDUP.get(id);
   const response = await stub.fetch("https://coordinator/execute", {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ runKey, tasks, options }),
+    body: JSON.stringify({ runKey, tasks, options, skipIfBusy }),
   });
   const data = await response.json();
   if (!response.ok) throw new Error(data.error || `Trading queue failed with HTTP ${response.status}`);
@@ -47,7 +47,9 @@ async function runScheduled(event, env) {
   const scheduledTime = Number(event.scheduledTime || Date.now());
   const minute = Math.floor(scheduledTime / 60_000);
   const runKey = `${event.cron}:${tasks.join(",")}:${minute}`;
-  return enqueueRun(env, runKey, tasks, { ...flagsForCron(event.cron, scheduledTime), ...(event.options || {}) });
+  // A late run is not useful: the following normal Cron catches the latest
+  // state, while a backlog can delay protection and sell reconciliation.
+  return enqueueRun(env, runKey, tasks, { ...flagsForCron(event.cron, scheduledTime), ...(event.options || {}) }, { skipIfBusy: true });
 }
 
 async function validateOkx(env, scope = "all") {
@@ -91,27 +93,41 @@ export class CronDeduplicator {
     this.env = env;
     this.runner = runner;
     this.tail = Promise.resolve();
+    this.queueDepth = 0;
   }
 
   async fetch(request) {
-    const { runKey, tasks, options = {} } = await request.json();
+    const { runKey, tasks, options = {}, skipIfBusy = false } = await request.json();
     if (!runKey || !Array.isArray(tasks) || !tasks.length) return json({ error: "runKey and tasks are required" }, 400);
-    const claimed = await this.ctx.storage.transaction(async (txn) => {
-      const now = Date.now();
-      const runs = (await txn.get("runs")) || {};
-      for (const [key, expiresAt] of Object.entries(runs)) if (expiresAt <= now) delete runs[key];
-      if (runs[runKey]) return false;
-      runs[runKey] = now + 24 * 60 * 60 * 1000;
-      await txn.put("runs", runs);
-      return true;
-    });
-    if (!claimed) return json({ duplicate: true, runKey });
+    if (skipIfBusy && this.queueDepth) return json({ skippedBusy: true, runKey });
+    // Reserve synchronously before the first await so concurrent Cron fetches
+    // cannot both see an idle coordinator and form a backlog.
+    this.queueDepth += 1;
+    let claimed;
+    try {
+      claimed = await this.ctx.storage.transaction(async (txn) => {
+        const now = Date.now();
+        const runs = (await txn.get("runs")) || {};
+        for (const [key, expiresAt] of Object.entries(runs)) if (expiresAt <= now) delete runs[key];
+        if (runs[runKey]) return false;
+        runs[runKey] = now + 24 * 60 * 60 * 1000;
+        await txn.put("runs", runs);
+        return true;
+      });
+    } catch (error) {
+      this.queueDepth -= 1;
+      throw error;
+    }
+    if (!claimed) {
+      this.queueDepth -= 1;
+      return json({ duplicate: true, runKey });
+    }
 
     const execute = this.tail.then(async () => ({
       runKey,
       tasks,
       results: await this.runner(this.env, tasks, options, runKey),
-    }));
+    })).finally(() => { this.queueDepth -= 1; });
     this.tail = execute.catch(() => undefined);
     try {
       return json(await execute);
@@ -160,7 +176,8 @@ export default {
     const tasks = payload?.tasks || payload?.scripts;
     if (!Array.isArray(tasks) || !tasks.length || tasks.some((task) => !ALLOWED_TASKS.has(task))) return json({ error: "Invalid tasks" }, 400);
     try {
-      return json(await runScheduled({ cron: "manual", scripts: tasks, options: payload.options || {}, scheduledTime: Date.now() }, env));
+      const result = await runScheduled({ cron: "manual", scripts: tasks, options: payload.options || {}, scheduledTime: Date.now() }, env);
+      return json(result, result.skippedBusy ? 409 : 200);
     } catch (error) {
       return json({ error: error.message }, 500);
     }
