@@ -2,7 +2,7 @@
 
 A comprehensive automated crypto trading system with OKX exchange integration, featuring algorithmic trading strategies, delisting protection, automated order management, and exchange-aware decimal rounding.
 
-The production migration target is now Cloudflare-only: Cron Triggers run the Worker directly, a Durable Object serializes trading runs, and D1 stores trading state. The legacy GitHub Actions/VPS path remains enabled only during the credential and database cutover window.
+The production runtime is Cloudflare-only: Cron Triggers run the Worker directly, a Durable Object serializes trading runs, and D1 stores trading state. The legacy GitHub Actions/VPS scheduler has been removed.
 
 ## 🚀 Quick Start
 
@@ -45,7 +45,7 @@ python monitor_delist.py
 
 ### Database & Utilities
 - **`lib/database.py`** - SQLite database integration
-- **`.github/workflows/trading.yml`** - GitHub Actions workflow for automated execution
+- **`src/`** - Cloudflare-native scheduler, OKX client, D1 access, and trading tasks
 - **`backups/`** - Automatic configuration backups
 
 ## 🤖 Automated Trading System ⭐
