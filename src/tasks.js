@@ -220,7 +220,7 @@ async function submitSell(env, okx, trade) {
   return { state: await orderState(okx, trade.instid, { ordId: placed.ordId }), ordId: placed.ordId, clOrdId };
 }
 
-async function autoSellOrders(env, okx, { verifyDailyClose = false, deferTriggerRebuild = false } = {}) {
+async function autoSellOrders(env, okx, { verifyDailyClose = false } = {}) {
   const assets = await activeAssets(okx, Math.max(0, decimalToNumber(env.OKX_MIN_USD_VALUE || "0.01", 0.01)));
   if (assets.length) {
     await env.DB.prepare("UPDATE filled_orders SET sell_time=CAST(CAST(ts AS INTEGER)+86400000 AS TEXT),updated_at=CURRENT_TIMESTAMP WHERE side='buy' AND sold_status IS NULL AND ts != '' AND ts NOT GLOB '*[^0-9]*' AND sell_time IS DISTINCT FROM CAST(CAST(ts AS INTEGER)+86400000 AS TEXT)").run();
@@ -228,7 +228,6 @@ async function autoSellOrders(env, okx, { verifyDailyClose = false, deferTrigger
   const trades = await dueTrades(env.DB);
   let sold = 0;
   let failed = 0;
-  let marketSellConfirmed = false;
   for (const trade of trades) {
     let state;
     let ordId = trade.sell_order_id;
@@ -249,17 +248,10 @@ async function autoSellOrders(env, okx, { verifyDailyClose = false, deferTrigger
     if (state === "FILLED" || state === "INSUFFICIENT_VALUE") {
       await env.DB.prepare("UPDATE filled_orders SET sold_status='SOLD',trigger_rebuild_pending=?,updated_at=CURRENT_TIMESTAMP WHERE tradeid=? AND sold_status IN ('PROCESSING','SELL_SUBMITTED')").bind(state === "FILLED" ? 1 : 0, trade.tradeid).run();
       sold += 1;
-      marketSellConfirmed ||= state === "FILLED";
     } else if (["FAILED", "NOT_FOUND"].includes(state)) {
       await releaseTrade(env.DB, trade.tradeid);
       failed += 1;
     }
-  }
-  const rebuild = await env.DB.prepare("SELECT 1 AS pending FROM filled_orders WHERE trigger_rebuild_pending=1 LIMIT 1").first();
-  if ((rebuild || marketSellConfirmed) && !deferTriggerRebuild) {
-    const pending = await okx.pendingTriggers();
-    if (!pending.some((order) => order.ordType === "trigger" && order.side === "buy")) await createAlgoTriggers(env, okx);
-    await env.DB.prepare("UPDATE filled_orders SET trigger_rebuild_pending=0,updated_at=CURRENT_TIMESTAMP WHERE trigger_rebuild_pending=1").run();
   }
   let unsettledBeforeToday = 0;
   if (verifyDailyClose) {
