@@ -7,7 +7,9 @@ TRADING_ENABLED = "true"
 OKX_TESTNET = "false"
 OKX_MIN_USD_VALUE = "0.01"
 # Conservative per-task pacing for OKX reads; scheduled jobs are serialized.
-OKX_REQUEST_GAP_MS = "350"
+# OKX public endpoints are IP-limited; Cloudflare egress is shared.  Keep a
+# full trigger rebuild below one request per second to avoid shared-IP 429s.
+OKX_REQUEST_GAP_MS = "1200"
 
 [[durable_objects.bindings]]
 name = "CRON_DEDUP"
