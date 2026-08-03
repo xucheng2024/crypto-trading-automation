@@ -30,7 +30,10 @@ export class OKXClient {
     this.secretKey = env.OKX_SECRET_KEY;
     this.passphrase = env.OKX_PASSPHRASE;
     this.demo = String(env.OKX_TESTNET || "false").toLowerCase() === "true";
-    this.fetcher = fetcher;
+    // Cloudflare's native fetch must not be invoked with this client as its
+    // receiver ("Illegal invocation").  The arrow wrapper preserves an
+    // unbound call while still allowing a fetch implementation in tests.
+    this.fetcher = (...args) => fetcher(...args);
     this.baseUrl = "https://www.okx.com";
   }
 

@@ -24,6 +24,17 @@ test("private request includes an OKX signature and never retries mutations", as
   assert.equal(captured.method, "POST");
 });
 
+test("fetch implementation is not called with the OKX client as receiver", async () => {
+  let receiver;
+  const fetcher = function () {
+    receiver = this;
+    return Promise.resolve(new Response(JSON.stringify({ code: "0", data: [] }), { status: 200 }));
+  };
+  const client = new OKXClient({ OKX_API_KEY: "key", OKX_SECRET_KEY: "secret", OKX_PASSPHRASE: "pass" }, fetcher);
+  await client.pendingLimits();
+  assert.notEqual(receiver, client);
+});
+
 test("pending orders paginate past the first 100 rows", async () => {
   const calls = [];
   const client = new OKXClient({ OKX_API_KEY: "key", OKX_SECRET_KEY: "secret", OKX_PASSPHRASE: "pass" }, async (url) => {
