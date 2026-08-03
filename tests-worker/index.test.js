@@ -9,7 +9,7 @@ test("safe default pauses before credentials, APIs, or database writes", async (
   assert.equal(result.paused, true);
 });
 
-test("scheduled runs skip while a run is active, while true duplicate keys are rejected", async () => {
+test("scheduled runs skip while manual runs queue, while true duplicate keys are rejected", async () => {
   let storedRuns = {};
   const ctx = {
     storage: {
@@ -40,14 +40,17 @@ test("scheduled runs skip while a run is active, while true duplicate keys are r
   const second = await coordinator.fetch(request("second", true));
   assert.deepEqual(await second.json(), { skippedBusy: true, runKey: "second" });
 
+  const manual = coordinator.fetch(request("manual", false));
+
   const duplicate = await coordinator.fetch(request("first", true));
   assert.deepEqual(await duplicate.json(), { skippedBusy: true, runKey: "first" });
 
   releaseFirst();
   assert.equal((await first).status, 200);
+  assert.equal((await manual).status, 200);
   const completedDuplicate = await coordinator.fetch(request("first", true));
   assert.deepEqual(await completedDuplicate.json(), { duplicate: true, runKey: "first" });
-  assert.deepEqual(events, ["start:first", "end:first"]);
+  assert.deepEqual(events, ["start:first", "end:first", "start:manual", "end:manual"]);
 });
 
 test("trigger rebuild is deferred across the 23:55 to 00:05 SGT quiet window", () => {

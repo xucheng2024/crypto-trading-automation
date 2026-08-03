@@ -47,9 +47,10 @@ async function runScheduled(event, env) {
   const scheduledTime = Number(event.scheduledTime || Date.now());
   const minute = Math.floor(scheduledTime / 60_000);
   const runKey = `${event.cron}:${tasks.join(",")}:${minute}`;
-  // A late run is not useful: the following normal Cron catches the latest
-  // state, while a backlog can delay protection and sell reconciliation.
-  return enqueueRun(env, runKey, tasks, { ...flagsForCron(event.cron, scheduledTime), ...(event.options || {}) }, { skipIfBusy: true });
+  // A late scheduled run is not useful: the following normal Cron catches the
+  // latest state.  Manual runs are deliberate operator actions and must wait.
+  const skipIfBusy = event.cron !== "manual";
+  return enqueueRun(env, runKey, tasks, { ...flagsForCron(event.cron, scheduledTime), ...(event.options || {}) }, { skipIfBusy });
 }
 
 async function validateOkx(env, scope = "all") {
