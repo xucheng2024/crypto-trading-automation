@@ -1,7 +1,7 @@
 import { ALLOWED_TASKS, CRON_TASKS, flagsForCron, tradingEnabled } from "./config.js";
 import { logRun } from "./db.js";
 import { OKXClient } from "./okx.js";
-import { TASKS } from "./tasks.js";
+import { fetchDelistAnnouncements, TASKS } from "./tasks.js";
 
 function json(data, status = 200) {
   return Response.json(data, { status, headers: { "cache-control": "no-store" } });
@@ -28,15 +28,17 @@ async function executeTasks(env, tasks, options, runId) {
   return results;
 }
 
-async function claimRun(env, runKey) {
+async function enqueueRun(env, runKey, tasks, options) {
   const id = env.CRON_DEDUP.idFromName("scheduled-runs");
   const stub = env.CRON_DEDUP.get(id);
-  const response = await stub.fetch("https://coordinator/claim", {
+  const response = await stub.fetch("https://coordinator/execute", {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ runKey }),
+    body: JSON.stringify({ runKey, tasks, options }),
   });
-  return { stub, response, data: await response.json() };
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error || `Trading queue failed with HTTP ${response.status}`);
+  return data;
 }
 
 async function runScheduled(event, env) {
@@ -45,34 +47,42 @@ async function runScheduled(event, env) {
   const scheduledTime = Number(event.scheduledTime || Date.now());
   const minute = Math.floor(scheduledTime / 60_000);
   const runKey = `${event.cron}:${tasks.join(",")}:${minute}`;
-  const claim = await claimRun(env, runKey);
-  if (!claim.response.ok || !claim.data.claimed) return { duplicate: true, runKey };
-  try {
-    const results = await executeTasks(env, tasks, { ...flagsForCron(event.cron), ...(event.options || {}) }, runKey);
-    return { runKey, tasks, results };
-  } finally {
-    await claim.stub.fetch("https://coordinator/release", {
-      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ runKey, action: "release" }),
-    });
-  }
+  return enqueueRun(env, runKey, tasks, { ...flagsForCron(event.cron), ...(event.options || {}) });
 }
 
 export class CronDeduplicator {
-  constructor(ctx) { this.ctx = ctx; }
+  constructor(ctx, env, runner = executeTasks) {
+    this.ctx = ctx;
+    this.env = env;
+    this.runner = runner;
+    this.tail = Promise.resolve();
+  }
+
   async fetch(request) {
-    const { runKey, action = "claim" } = await request.json();
-    if (!runKey) return json({ error: "runKey is required" }, 400);
+    const { runKey, tasks, options = {} } = await request.json();
+    if (!runKey || !Array.isArray(tasks) || !tasks.length) return json({ error: "runKey and tasks are required" }, 400);
     const claimed = await this.ctx.storage.transaction(async (txn) => {
       const now = Date.now();
       const runs = (await txn.get("runs")) || {};
       for (const [key, expiresAt] of Object.entries(runs)) if (expiresAt <= now) delete runs[key];
-      if (action === "release") delete runs[runKey];
-      else if (Object.keys(runs).length || runs[runKey]) return false;
-      else runs[runKey] = now + 15 * 60 * 1000;
+      if (runs[runKey]) return false;
+      runs[runKey] = now + 24 * 60 * 60 * 1000;
       await txn.put("runs", runs);
       return true;
     });
-    return json({ claimed });
+    if (!claimed) return json({ duplicate: true, runKey });
+
+    const execute = this.tail.then(async () => ({
+      runKey,
+      tasks,
+      results: await this.runner(this.env, tasks, options, runKey),
+    }));
+    this.tail = execute.catch(() => undefined);
+    try {
+      return json(await execute);
+    } catch (error) {
+      return json({ error: error.message, runKey }, 500);
+    }
   }
 }
 
@@ -101,9 +111,7 @@ export default {
         await okx.requireSuccess(candles, { requireData: true, operation: "candle validation" });
         const ticker = await okx.get("/api/v5/market/ticker", { instId: "BTC-USDT" }, false);
         await okx.requireSuccess(ticker, { requireData: true, operation: "ticker validation" });
-        const announcementResponse = await fetch("https://www.okx.com/api/v5/support/announcements?annType=announcements-delistings&page=1", { signal: AbortSignal.timeout(15_000) });
-        const announcements = await announcementResponse.json();
-        if (!announcementResponse.ok || announcements.code !== "0") throw new Error(`Announcement validation failed: ${announcements.msg || announcementResponse.status}`);
+        await fetchDelistAnnouncements();
         const config = await env.DB.prepare("SELECT COUNT(*) AS count FROM crypto_limits").first();
         return json({
           ok: true,

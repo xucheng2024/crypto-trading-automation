@@ -32,31 +32,36 @@ async function instrumentRules(okx, instId) {
   return { tickSz: item.tickSz, lotSz: item.lotSz, minSz: item.minSz || item.lotSz };
 }
 
-async function cancelPendingLimits(okx, { side = "buy", instIds } = {}) {
+async function cancelPendingLimits(okx, { side = "buy", instIds, sleepFn = sleep } = {}) {
   const filter = instIds ? new Set(instIds) : null;
-  const orders = (await okx.pendingLimits()).filter((order) => (!side || order.side === side) && (!filter || filter.has(order.instId)));
+  const matches = (order) => (!side || order.side === side) && (!filter || filter.has(order.instId));
+  const orders = (await okx.pendingLimits()).filter(matches);
   const failures = [];
-  for (let i = 0; i < orders.length; i += 20) {
-    try { await okx.cancelLimits(orders.slice(i, i + 20)); } catch (error) { failures.push(error.message); }
-    await sleep(100);
+  let remaining = orders;
+  for (let attempt = 0; attempt < 3 && remaining.length; attempt += 1) {
+    for (let i = 0; i < remaining.length; i += 20) {
+      try { await okx.cancelLimits(remaining.slice(i, i + 20)); } catch (error) { failures.push(error.message); }
+      await sleepFn(100);
+    }
+    await sleepFn(300 * (attempt + 1));
+    remaining = (await okx.pendingLimits()).filter(matches);
   }
-  const remaining = (await okx.pendingLimits()).filter((order) => (!side || order.side === side) && (!filter || filter.has(order.instId)));
   if (remaining.length) throw new Error(`Failed to cancel ${remaining.length}/${orders.length} limit order(s): ${failures.join("; ")}`);
   return { found: orders.length, remaining: 0 };
 }
 
-async function cancelPendingTriggers(okx, { instIds } = {}) {
+async function cancelPendingTriggers(okx, { instIds, sleepFn = sleep } = {}) {
   const filter = instIds ? new Set(instIds) : null;
-  const initial = (await okx.pendingTriggers()).filter((order) => order.ordType === "trigger" && (!filter || filter.has(order.instId)));
-  for (let i = 0; i < initial.length; i += 10) {
-    try { await okx.cancelTriggers(initial.slice(i, i + 10)); } catch (error) { console.warn("Trigger cancellation request failed; verifying final state", error.message); }
-    await sleep(100);
-  }
+  const matches = (order) => order.ordType === "trigger" && (!filter || filter.has(order.instId));
+  const initial = (await okx.pendingTriggers()).filter(matches);
   let remaining = initial;
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    remaining = (await okx.pendingTriggers()).filter((order) => order.ordType === "trigger" && (!filter || filter.has(order.instId)));
-    if (!remaining.length) break;
-    await sleep(300 * (attempt + 1));
+  for (let attempt = 0; attempt < 3 && remaining.length; attempt += 1) {
+    for (let i = 0; i < remaining.length; i += 10) {
+      try { await okx.cancelTriggers(remaining.slice(i, i + 10)); } catch (error) { console.warn("Trigger cancellation request failed; verifying final state", error.message); }
+      await sleepFn(100);
+    }
+    await sleepFn(300 * (attempt + 1));
+    remaining = (await okx.pendingTriggers()).filter(matches);
   }
   if (remaining.length) throw new Error(`Failed to cancel ${remaining.length}/${initial.length} trigger order(s)`);
   return { found: initial.length, remaining: 0 };
@@ -259,7 +264,8 @@ async function createAlgoTriggers(env, okx) {
 }
 
 function symbolAppears(title, symbol) {
-  const aliases = [symbol, `${symbol}-USDT`, `${symbol}/USDT`, `${symbol}USDT`, `${symbol}-USDC`, `${symbol}/USDC`, `${symbol}USDC`];
+  const quotes = ["USDT", "USDC", "BTC", "ETH", "USD", "EUR", "GBP"];
+  const aliases = [symbol, ...quotes.flatMap((quote) => [`${symbol}-${quote}`, `${symbol}/${quote}`, `${symbol}${quote}`])];
   return aliases.some((alias) => {
     const escaped = alias.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
     return new RegExp(`(^|[^A-Z0-9])${escaped}([^A-Z0-9]|$)`, "i").test(title);
@@ -267,26 +273,63 @@ function symbolAppears(title, symbol) {
 }
 
 async function sellDelistedBalance(okx, symbol, announcementId) {
+  const instId = `${symbol}-USDT`;
+  const clOrdId = await stableId("del", `${announcementId}:${symbol}`);
+  let existing = await orderState(okx, instId, { clOrdId });
+  if (existing === "FILLED") return true;
+  if (existing === "PENDING") {
+    for (let attempt = 0; attempt < 3 && existing === "PENDING"; attempt += 1) {
+      await sleep(1000);
+      existing = await orderState(okx, instId, { clOrdId });
+    }
+    if (existing === "FILLED") return true;
+    throw new Error(`Existing delist sell for ${symbol} is ${existing}`);
+  }
+  if (existing !== "NOT_FOUND") throw new Error(`Unable to reconcile delist sell for ${symbol}: ${existing}`);
+
   const details = balanceDetails(await okx.balances(symbol));
   const detail = details.find((item) => String(item.ccy).toUpperCase() === symbol);
   if (!detail || decimalToNumber(detail.eqUsd) <= 0) return false;
   if (frozenAmount(detail) > 0) throw new Error(`${symbol} balance remains frozen after cancellations`);
   const available = compareDecimal(detail.availBal || "0", "0") > 0 ? detail.availBal : detail.availEq || "0";
-  const rules = await instrumentRules(okx, `${symbol}-USDT`);
+  const rules = await instrumentRules(okx, instId);
   const size = roundToStep(available, rules.lotSz, "down");
   if (compareDecimal(size, rules.minSz) < 0) return false;
-  const clOrdId = await stableId("del", `${announcementId}:${symbol}`);
-  const placed = await okx.placeOrder({ instId: `${symbol}-USDT`, tdMode: "cash", side: "sell", ordType: "market", sz: size, tgtCcy: "base_ccy", clOrdId });
-  const state = await orderState(okx, `${symbol}-USDT`, { ordId: placed.ordId });
-  if (state !== "FILLED") throw new Error(`Delist sell for ${symbol} is ${state}`);
-  return true;
+  try {
+    await okx.placeOrder({ instId, tdMode: "cash", side: "sell", ordType: "market", sz: size, tgtCcy: "base_ccy", clOrdId });
+  } catch (error) {
+    console.warn(`Delist sell outcome unknown for ${symbol}`, error.message);
+  }
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const state = await orderState(okx, instId, { clOrdId });
+    if (state === "FILLED") return true;
+    if (["FAILED", "NOT_FOUND"].includes(state)) throw new Error(`Delist sell for ${symbol} is ${state}`);
+    await sleep(1000);
+  }
+  throw new Error(`Delist sell for ${symbol} remains unconfirmed`);
+}
+
+async function fetchDelistAnnouncements(fetcher = fetch, sleepFn = sleep) {
+  const url = "https://www.okx.com/api/v5/support/announcements?annType=announcements-delistings&page=1";
+  let lastError;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      const response = await fetcher(url, { signal: AbortSignal.timeout(15_000) });
+      const text = await response.text();
+      let payload;
+      try { payload = JSON.parse(text); } catch { throw new Error(`Announcement query returned non-JSON HTTP ${response.status}`); }
+      if (!response.ok || payload.code !== "0") throw new Error(`Announcement query failed: ${payload.msg || response.status}`);
+      return payload.data?.[0]?.details || [];
+    } catch (error) {
+      lastError = error;
+      if (attempt < 2) await sleepFn(60_000 * (attempt + 1));
+    }
+  }
+  throw lastError;
 }
 
 async function monitorDelist(env, okx) {
-  const response = await fetch("https://www.okx.com/api/v5/support/announcements?annType=announcements-delistings&page=1", { signal: AbortSignal.timeout(15_000) });
-  const payload = await response.json();
-  if (!response.ok || payload.code !== "0") throw new Error(`Announcement query failed: ${payload.msg || response.status}`);
-  const announcements = payload.data?.[0]?.details || [];
+  const announcements = await fetchDelistAnnouncements();
   const cutoff = Date.now() - 24 * 60 * 60 * 1000;
   const candidates = announcements.filter((item) => Number(item.pTime) >= cutoff && /spot/i.test(item.title || ""));
   const pairs = await configuredPairs(env.DB);
@@ -326,4 +369,4 @@ export const TASKS = {
   create_algo_triggers: createAlgoTriggers,
 };
 
-export { cancelPendingLimits, cancelPendingTriggers, createAlgoTriggers, stableId };
+export { cancelPendingLimits, cancelPendingTriggers, createAlgoTriggers, fetchDelistAnnouncements, sellDelistedBalance, stableId, symbolAppears };
