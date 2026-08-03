@@ -36,9 +36,9 @@ async function cancelPendingLimits(okx, { side = "buy", instIds } = {}) {
   const filter = instIds ? new Set(instIds) : null;
   const orders = (await okx.pendingLimits()).filter((order) => (!side || order.side === side) && (!filter || filter.has(order.instId)));
   const failures = [];
-  for (const order of orders) {
-    try { await okx.cancelLimit(order.instId, order.ordId); } catch (error) { failures.push(error.message); }
-    await sleep(60);
+  for (let i = 0; i < orders.length; i += 20) {
+    try { await okx.cancelLimits(orders.slice(i, i + 20)); } catch (error) { failures.push(error.message); }
+    await sleep(100);
   }
   const remaining = (await okx.pendingLimits()).filter((order) => (!side || order.side === side) && (!filter || filter.has(order.instId)));
   if (remaining.length) throw new Error(`Failed to cancel ${remaining.length}/${orders.length} limit order(s): ${failures.join("; ")}`);
@@ -87,8 +87,7 @@ async function reconcileManualSells(env, okx) {
 async function fetchFilledOrders(env, okx, { forceDbFetch = false } = {}) {
   const last = await env.DB.prepare("SELECT MAX(CAST(ts AS INTEGER)) AS last_ts FROM filled_orders WHERE ts != '' AND ts NOT GLOB '*[^0-9]*'").first();
   const begin = last?.last_ts ? Number(last.last_ts) + 1 : Date.now() - (forceDbFetch ? 24 * 60 : 15) * 60_000;
-  const result = await okx.get("/api/v5/trade/fills", { instType: "SPOT", begin, limit: 100 });
-  const fills = (await okx.requireSuccess(result, { operation: "filled trade query" })).filter((fill) => fill.side === "buy");
+  const fills = (await okx.fillsSince(begin)).filter((fill) => fill.side === "buy");
   const saved = await saveBuyFills(env.DB, fills);
   const manuallySettled = await reconcileManualSells(env, okx);
   const activeCount = await enforcePositionCapacity(okx);

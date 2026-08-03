@@ -100,18 +100,42 @@ export class OKXClient {
   }
 
   async pendingLimits() {
-    const result = await this.get("/api/v5/trade/orders-pending", { instType: "SPOT" });
-    return this.requireSuccess(result, { operation: "pending limit query" });
+    return this.paginatedGet("/api/v5/trade/orders-pending", { instType: "SPOT" }, "ordId", "pending limit query");
   }
 
   async pendingTriggers(limit = 100) {
-    const result = await this.get("/api/v5/trade/orders-algo-pending", { ordType: "trigger", limit });
-    return this.requireSuccess(result, { operation: "pending trigger query" });
+    return this.paginatedGet("/api/v5/trade/orders-algo-pending", { ordType: "trigger", limit }, "algoId", "pending trigger query");
+  }
+
+  async paginatedGet(path, params, cursorField, operation, maxPages = 20) {
+    const rows = [];
+    let after;
+    const pageLimit = Math.min(100, Number(params.limit || 100));
+    for (let page = 0; page < maxPages; page += 1) {
+      const result = await this.get(path, { ...params, limit: pageLimit, after });
+      const data = await this.requireSuccess(result, { operation });
+      rows.push(...data);
+      if (data.length < pageLimit) return rows;
+      const next = data.at(-1)?.[cursorField];
+      if (!next || next === after) throw new Error(`${operation} pagination cursor did not advance`);
+      after = next;
+    }
+    throw new Error(`${operation} exceeded ${maxPages} pages`);
+  }
+
+  async fillsSince(begin) {
+    return this.paginatedGet("/api/v5/trade/fills", { instType: "SPOT", begin, limit: 100 }, "billId", "filled trade query", 50);
   }
 
   async cancelLimit(instId, ordId) {
     const result = await this.post("/api/v5/trade/cancel-order", { instId, ordId });
     await this.requireSuccess(result, { requireData: true, operation: `cancel limit ${instId}/${ordId}` });
+  }
+
+  async cancelLimits(orders) {
+    if (!orders.length) return;
+    const result = await this.post("/api/v5/trade/cancel-batch-orders", orders.map(({ instId, ordId }) => ({ instId, ordId })));
+    await this.requireSuccess(result, { requireData: true, operation: "cancel limit batch" });
   }
 
   async cancelTriggers(orders) {

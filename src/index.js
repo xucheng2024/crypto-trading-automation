@@ -87,6 +87,16 @@ export default {
       const latest = env.DB ? await env.DB.prepare("SELECT task,status,updated_at FROM task_runs ORDER BY updated_at DESC LIMIT 10").all().catch(() => ({ results: [] })) : { results: [] };
       return json({ service: "crypto-trading-cloudflare", status: "ok", tradingEnabled: tradingEnabled(env), storage: "D1", scheduler: "Cloudflare Cron", latestRuns: latest.results || [] });
     }
+    if (request.method === "POST" && url.pathname === "/validate-okx") {
+      if (!env.MANUAL_TRIGGER_TOKEN || request.headers.get("authorization") !== `Bearer ${env.MANUAL_TRIGGER_TOKEN}`) return json({ error: "Unauthorized" }, 401);
+      try {
+        const okx = new OKXClient(env);
+        const balances = await okx.balances();
+        return json({ ok: true, authenticated: true, accountRows: balances.length, tradingEnabled: tradingEnabled(env) });
+      } catch (error) {
+        return json({ ok: false, authenticated: false, error: error.message, tradingEnabled: tradingEnabled(env) }, 503);
+      }
+    }
     if (request.method !== "POST" || url.pathname !== "/run") return json({ error: "Not found" }, 404);
     if (!env.MANUAL_TRIGGER_TOKEN || request.headers.get("authorization") !== `Bearer ${env.MANUAL_TRIGGER_TOKEN}`) return json({ error: "Unauthorized" }, 401);
     let payload;

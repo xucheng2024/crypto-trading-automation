@@ -74,3 +74,5 @@ curl -X POST \
 ```
 
 Supported tasks are `monitor_delist`, `cancel_pending_limits`, `fetch_filled_orders`, `auto_sell_orders`, `cancel_pending_triggers`, and `create_algo_triggers`.
+
+Use the same bearer token with `POST /validate-okx` to verify Cloudflare-to-OKX authentication without placing or cancelling orders. The response contains only authentication status and the number of account result rows, never balances or credentials.
