@@ -101,18 +101,21 @@ export class OKXClient {
         try { result = JSON.parse(text); } catch {
           const error = new Error(`OKX returned non-JSON HTTP ${response.status}`);
           error.retryable = response.status === 429 || response.status >= 500;
+          error.okxRateLimited = response.status === 429;
           error.retryDelayMs = this.retryDelay(response, attempt);
           throw error;
         }
         if (!response.ok || response.status === 429 || response.status >= 500) {
           const error = new Error(`OKX HTTP ${response.status}: ${result.msg || text.slice(0, 200)}`);
           error.retryable = response.status === 429 || response.status >= 500;
+          error.okxRateLimited = response.status === 429;
           error.retryDelayMs = this.retryDelay(response, attempt);
           throw error;
         }
         if (result.code === "50011") {
           const error = new Error(`OKX rate limited: ${result.msg || result.code}`);
           error.retryable = true;
+          error.okxRateLimited = true;
           error.retryDelayMs = this.retryDelay(response, attempt);
           throw error;
         }

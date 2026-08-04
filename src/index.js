@@ -3,17 +3,35 @@ import { logRun } from "./db.js";
 import { OKXClient } from "./okx.js";
 import { fetchDelistAnnouncements, TASKS } from "./tasks.js";
 
+const OKX_RATE_LIMIT_COOLDOWN_MS = 90_000;
+
 function json(data, status = 200) {
   return Response.json(data, { status, headers: { "cache-control": "no-store" } });
 }
 
 async function executeTasks(env, tasks, options, runId) {
   if (!tradingEnabled(env)) return { paused: true, message: "TRADING_ENABLED is not true; no OKX or D1 mutations executed" };
+  const deferUntil = Number(options?.deferUntil || 0);
+  if (deferUntil > Date.now()) {
+    const retryAt = new Date(deferUntil).toISOString();
+    const results = {};
+    for (const task of tasks) {
+      results[task] = { deferred: true, retryAt, reason: "OKX rate-limit cooldown" };
+      await logRun(env.DB, runId, task, "DEFERRED", JSON.stringify(results[task]));
+    }
+    return { deferred: true, retryAt, results };
+  }
   const okx = new OKXClient(env);
   okx.assertConfigured();
   const results = {};
   const failures = [];
+  let rateLimited = false;
   for (const task of tasks) {
+    if (rateLimited) {
+      results[task] = { deferred: true, reason: "Earlier task hit OKX rate limit" };
+      await logRun(env.DB, runId, task, "DEFERRED", JSON.stringify(results[task]));
+      continue;
+    }
     await logRun(env.DB, runId, task, "RUNNING");
     try {
       results[task] = await TASKS[task](env, okx, options);
@@ -22,9 +40,14 @@ async function executeTasks(env, tasks, options, runId) {
       await logRun(env.DB, runId, task, "FAILED", String(error.stack || error).slice(0, 2000));
       failures.push(`${task}: ${error.message}`);
       results[task] = { error: error.message };
+      rateLimited ||= error.okxRateLimited === true;
     }
   }
-  if (failures.length) throw new AggregateError(failures.map((message) => new Error(message)), failures.join("; "));
+  if (failures.length) {
+    const error = new AggregateError(failures.map((message) => new Error(message)), failures.join("; "));
+    error.okxRateLimited = rateLimited;
+    throw error;
+  }
   return results;
 }
 
@@ -126,11 +149,14 @@ export class CronDeduplicator {
       return json({ duplicate: true, runKey });
     }
 
-    const execute = this.tail.then(async () => ({
-      runKey,
-      tasks,
-      results: await this.runner(this.env, tasks, options, runKey),
-    })).finally(() => { this.queueDepth -= 1; });
+    const execute = this.tail.then(async () => {
+      const cooldownUntil = Number(await this.ctx.storage.get("okxCooldownUntil")) || 0;
+      const results = await this.runner(this.env, tasks, cooldownUntil > Date.now() ? { ...options, deferUntil: cooldownUntil } : options, runKey);
+      return { runKey, tasks, results };
+    }).catch(async (error) => {
+      if (error.okxRateLimited) await this.ctx.storage.put("okxCooldownUntil", Date.now() + OKX_RATE_LIMIT_COOLDOWN_MS);
+      throw error;
+    }).finally(() => { this.queueDepth -= 1; });
     this.tail = execute.catch(() => undefined);
     try {
       return json(await execute);
