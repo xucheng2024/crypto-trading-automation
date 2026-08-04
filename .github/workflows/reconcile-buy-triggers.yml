@@ -1,11 +1,6 @@
 name: Reconcile buy triggers
 
 on:
-  schedule:
-    # 23:55 SGT: cancel the current day's buy triggers.
-    - cron: "55 15 * * *"
-    # 00:05 SGT: rebuild buy triggers from D1 and live OKX state.
-    - cron: "5 16 * * *"
   workflow_dispatch:
     inputs:
       mode:
@@ -39,8 +34,8 @@ jobs:
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
       CLOUDFLARE_D1_DATABASE_ID: ${{ secrets.CLOUDFLARE_D1_DATABASE_ID }}
       CLOUDFLARE_D1_API_TOKEN: ${{ secrets.CLOUDFLARE_D1_API_TOKEN }}
-      TRIGGER_REBUILD_CONCURRENCY: "4"
-      TRIGGER_REBUILD_PAUSE_MS: "0"
+      TRIGGER_REBUILD_CONCURRENCY: "1"
+      TRIGGER_REBUILD_PAUSE_MS: "250"
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
@@ -55,17 +50,4 @@ jobs:
               exit 1
             fi
           done
-      - id: mode
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          SCHEDULE: ${{ github.event.schedule }}
-          MANUAL_MODE: ${{ inputs.mode }}
-        run: |
-          if [ "$EVENT_NAME" = "schedule" ] && [ "$SCHEDULE" = "55 15 * * *" ]; then
-            echo "value=cancel" >> "$GITHUB_OUTPUT"
-          elif [ "$EVENT_NAME" = "schedule" ]; then
-            echo "value=rebuild" >> "$GITHUB_OUTPUT"
-          else
-            echo "value=$MANUAL_MODE" >> "$GITHUB_OUTPUT"
-          fi
-      - run: node scripts/github-trigger-reconcile.mjs "${{ steps.mode.outputs.value }}"
+      - run: node scripts/github-trigger-reconcile.mjs "${{ inputs.mode }}"
