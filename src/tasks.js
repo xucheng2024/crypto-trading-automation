@@ -211,7 +211,7 @@ async function submitSell(env, okx, trade) {
   const clOrdId = await stableId("sell", trade.tradeid);
   let placed;
   try {
-    placed = await okx.placeOrder({ instId: trade.instid, tdMode: "cash", side: "sell", ordType: "market", sz: size, clOrdId, tgtCcy: "base_ccy" });
+    placed = await okx.placeOrder({ instId: trade.instid, tdMode: "cash", side: "sell", ordType: "market", sz: size, clOrdId });
   } catch (error) {
     console.warn(`Sell outcome unknown for ${trade.tradeid}`, error.message);
     return { state: "UNKNOWN", clOrdId };
@@ -296,7 +296,7 @@ async function createPairTrigger(env, okx, pair, runDate, snapshot, candleCache,
   if (compareDecimal(size, rules.minSz) < 0) return { skipped: "below_min_size" };
   if (compareDecimal(current, target) < 0) {
     const clOrdId = await stableId("buy", `${runDate}:${pair.inst_id}`);
-    const placed = await okx.placeOrder({ instId: pair.inst_id, tdMode: "cash", side: "buy", ordType: "limit", px: price, sz: size, tgtCcy: "base_ccy", clOrdId });
+    const placed = await okx.placeOrder({ instId: pair.inst_id, tdMode: "cash", side: "buy", ordType: "limit", px: price, sz: size, clOrdId });
     return { orderId: placed.ordId, type: "limit" };
   }
   const algoClOrdId = await stableId("trg", `${runDate}:${pair.inst_id}`);
@@ -444,7 +444,7 @@ async function sellDelistedBalance(env, okx, symbol, announcementId, { sleepFn =
     sellAttempt = await createDelistSellAttempt(env.DB, announcementId, symbol, sellAttempt?.attempt);
   }
   try {
-    const placed = await okx.placeOrder({ instId, tdMode: "cash", side: "sell", ordType: "market", sz: size, tgtCcy: "base_ccy", clOrdId: sellAttempt.clOrdId });
+    const placed = await okx.placeOrder({ instId, tdMode: "cash", side: "sell", ordType: "market", sz: size, clOrdId: sellAttempt.clOrdId });
     await updateDelistSellAttempt(env.DB, announcementId, symbol, sellAttempt.attempt, "SUBMITTED", placed.ordId);
   } catch (error) {
     console.warn(`Delist sell outcome unknown for ${symbol}`, error.message);
