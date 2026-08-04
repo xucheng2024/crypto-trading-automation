@@ -13,6 +13,12 @@ async function triggerOrderClientId(prefix, orderScope, instId) {
   return stableId(prefix, `${orderScope}:${instId}`);
 }
 
+function liveOrderConfirmsPlacement(error, liveTriggerIds, liveLimitIds) {
+  if (error?.orderType === "trigger") return liveTriggerIds.has(error.orderClientId);
+  if (error?.orderType === "limit") return liveLimitIds.has(error.orderClientId);
+  return false;
+}
+
 function balanceDetails(data) {
   return Array.isArray(data?.[0]?.details) ? data[0].details : [];
 }
@@ -300,11 +306,25 @@ async function createPairTrigger(env, okx, pair, orderScope, snapshot, candleCac
   if (compareDecimal(size, rules.minSz) < 0) return { skipped: "below_min_size" };
   if (compareDecimal(current, target) < 0) {
     const clOrdId = await triggerOrderClientId("buy", orderScope, pair.inst_id);
-    const placed = await okx.placeOrder({ instId: pair.inst_id, tdMode: "cash", side: "buy", ordType: "limit", px: price, sz: size, clOrdId });
+    let placed;
+    try {
+      placed = await okx.placeOrder({ instId: pair.inst_id, tdMode: "cash", side: "buy", ordType: "limit", px: price, sz: size, clOrdId });
+    } catch (error) {
+      error.orderType = "limit";
+      error.orderClientId = clOrdId;
+      throw error;
+    }
     return { orderId: placed.ordId, type: "limit" };
   }
   const algoClOrdId = await triggerOrderClientId("trg", orderScope, pair.inst_id);
-  const placed = await okx.placeAlgo({ instId: pair.inst_id, tdMode: "cash", side: "buy", ordType: "trigger", sz: size, triggerPx: price, orderPx: price, algoClOrdId });
+  let placed;
+  try {
+    placed = await okx.placeAlgo({ instId: pair.inst_id, tdMode: "cash", side: "buy", ordType: "trigger", sz: size, triggerPx: price, orderPx: price, algoClOrdId });
+  } catch (error) {
+    error.orderType = "trigger";
+    error.orderClientId = algoClOrdId;
+    throw error;
+  }
   return { orderId: placed.algoId, type: "trigger" };
 }
 
@@ -334,7 +354,7 @@ async function createAlgoTriggers(env, okx, { clearRebuildPending = false, concu
       try {
         outcomes[index] = await createPairTrigger(env, okx, pair, orderScope, snapshot, candleCache, candleDay);
       } catch (error) {
-        outcomes[index] = { error: `${pair.inst_id}: ${error.message}` };
+        outcomes[index] = { error, instId: pair.inst_id };
       }
       if (pauseMs > 0) await sleep(pauseMs);
     }
@@ -342,9 +362,18 @@ async function createAlgoTriggers(env, okx, { clearRebuildPending = false, concu
   await Promise.all(workers);
   let created = 0;
   const skippedPairs = [...eligibility.skipped];
+  const placementErrors = outcomes.filter((outcome) => outcome?.error);
+  let liveTriggerIds = new Set();
+  let liveLimitIds = new Set();
+  if (placementErrors.some(({ error }) => error.orderClientId)) {
+    const [liveTriggers, liveLimits] = await Promise.all([okx.pendingTriggers(), okx.pendingLimits()]);
+    liveTriggerIds = new Set(liveTriggers.map((order) => order.algoClOrdId).filter(Boolean));
+    liveLimitIds = new Set(liveLimits.map((order) => order.clOrdId).filter(Boolean));
+  }
   const failures = [];
   for (const [index, outcome] of outcomes.entries()) {
-    if (outcome?.error) failures.push(outcome.error);
+    if (outcome?.error && liveOrderConfirmsPlacement(outcome.error, liveTriggerIds, liveLimitIds)) created += 1;
+    else if (outcome?.error) failures.push(`${outcome.instId}: ${outcome.error.message}`);
     else if (outcome?.skipped) skippedPairs.push({ instId: eligible[index].inst_id, reason: outcome.skipped });
     else created += 1;
   }
@@ -513,4 +542,4 @@ export const TASKS = {
   create_algo_triggers: (env, okx, options) => createAlgoTriggers(env, okx, options),
 };
 
-export { activeAssetsFromDetails, candleValues, cancelAndVerify, cancelPendingLimits, cancelPendingTriggers, createAlgoTriggers, eligibleTriggerPairs, explainTriggerEligibility, fetchDelistAnnouncements, loadSpotMarketSnapshot, sellDelistedBalance, stableId, symbolAppears, triggerOrderClientId };
+export { activeAssetsFromDetails, candleValues, cancelAndVerify, cancelPendingLimits, cancelPendingTriggers, createAlgoTriggers, eligibleTriggerPairs, explainTriggerEligibility, fetchDelistAnnouncements, liveOrderConfirmsPlacement, loadSpotMarketSnapshot, sellDelistedBalance, stableId, symbolAppears, triggerOrderClientId };

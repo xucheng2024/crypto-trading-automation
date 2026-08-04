@@ -9,6 +9,7 @@ import {
   explainTriggerEligibility,
   eligibleTriggerPairs,
   fetchDelistAnnouncements,
+  liveOrderConfirmsPlacement,
   loadSpotMarketSnapshot,
   sellDelistedBalance,
   symbolAppears,
@@ -119,6 +120,20 @@ test("trigger rebuild client IDs are stable within an attempt and rotate between
   assert.equal(first, await triggerOrderClientId("trg", "github:rebuild:123:1", "BTC-USDT"));
   assert.notEqual(first, await triggerOrderClientId("trg", "github:rebuild:123:2", "BTC-USDT"));
   assert.notEqual(first, await triggerOrderClientId("trg", "github:rebuild:456:1", "BTC-USDT"));
+});
+
+test("an accepted pending order recovers an ambiguous placement error", () => {
+  assert.equal(liveOrderConfirmsPlacement(
+    { orderType: "trigger", orderClientId: "trigger-id" },
+    new Set(["trigger-id"]),
+    new Set(),
+  ), true);
+  assert.equal(liveOrderConfirmsPlacement(
+    { orderType: "limit", orderClientId: "missing-id" },
+    new Set(),
+    new Set(["other-id"]),
+  ), false);
+  assert.equal(liveOrderConfirmsPlacement(new Error("definitive failure"), new Set(), new Set()), false);
 });
 
 test("trigger eligibility records an actionable skip reason", () => {
