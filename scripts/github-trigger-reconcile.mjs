@@ -49,6 +49,7 @@ if (mode === "cancel") {
     clearRebuildPending: true,
     concurrency: Number(process.env.TRIGGER_REBUILD_CONCURRENCY || "4"),
     pauseMs: Number(process.env.TRIGGER_REBUILD_PAUSE_MS || "0"),
+    orderScope: `${runId}:${process.env.GITHUB_RUN_ATTEMPT || "1"}`,
   }));
 }
 console.log(JSON.stringify({ runId, mode, result }));

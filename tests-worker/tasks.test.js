@@ -12,6 +12,7 @@ import {
   loadSpotMarketSnapshot,
   sellDelistedBalance,
   symbolAppears,
+  triggerOrderClientId,
 } from "../src/tasks.js";
 
 const noSleep = async () => {};
@@ -111,6 +112,13 @@ test("trigger rebuild never includes held currencies", () => {
   const pairs = [{ inst_id: "BTC-USDT" }, { inst_id: "ETH-USDT" }, { inst_id: "SOL-USDT" }];
   const eligible = eligibleTriggerPairs(pairs, [{ ccy: "BTC" }], new Set(["ETH"]), new Set(["SOL-USDT"]));
   assert.deepEqual(eligible, []);
+});
+
+test("trigger rebuild client IDs are stable within an attempt and rotate between attempts", async () => {
+  const first = await triggerOrderClientId("trg", "github:rebuild:123:1", "BTC-USDT");
+  assert.equal(first, await triggerOrderClientId("trg", "github:rebuild:123:1", "BTC-USDT"));
+  assert.notEqual(first, await triggerOrderClientId("trg", "github:rebuild:123:2", "BTC-USDT"));
+  assert.notEqual(first, await triggerOrderClientId("trg", "github:rebuild:456:1", "BTC-USDT"));
 });
 
 test("trigger eligibility records an actionable skip reason", () => {

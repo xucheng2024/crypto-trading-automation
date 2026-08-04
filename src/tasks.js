@@ -9,6 +9,10 @@ async function stableId(prefix, value, length = 24) {
   return `${prefix}${[...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("").slice(0, length)}`;
 }
 
+async function triggerOrderClientId(prefix, orderScope, instId) {
+  return stableId(prefix, `${orderScope}:${instId}`);
+}
+
 function balanceDetails(data) {
   return Array.isArray(data?.[0]?.details) ? data[0].details : [];
 }
@@ -285,7 +289,7 @@ async function dailyMarketData(env, okx, instId, snapshot, candleCache, candleDa
   return { ...candles, current, rules };
 }
 
-async function createPairTrigger(env, okx, pair, runDate, snapshot, candleCache, candleDay) {
+async function createPairTrigger(env, okx, pair, orderScope, snapshot, candleCache, candleDay) {
   const { todayOpen, yesterdayOpen, yesterdayClose, current, rules } = await dailyMarketData(env, okx, pair.inst_id, snapshot, candleCache, candleDay);
   const yesterdayOpenTimes11 = multiplyDecimal(yesterdayOpen, "11");
   const yesterdayCloseTimes10 = multiplyDecimal(yesterdayClose, "10");
@@ -295,16 +299,16 @@ async function createPairTrigger(env, okx, pair, runDate, snapshot, candleCache,
   const size = roundToStep(divideDecimal(env.OKX_ORDER_SIZE || "100", price), rules.lotSz, "down");
   if (compareDecimal(size, rules.minSz) < 0) return { skipped: "below_min_size" };
   if (compareDecimal(current, target) < 0) {
-    const clOrdId = await stableId("buy", `${runDate}:${pair.inst_id}`);
+    const clOrdId = await triggerOrderClientId("buy", orderScope, pair.inst_id);
     const placed = await okx.placeOrder({ instId: pair.inst_id, tdMode: "cash", side: "buy", ordType: "limit", px: price, sz: size, clOrdId });
     return { orderId: placed.ordId, type: "limit" };
   }
-  const algoClOrdId = await stableId("trg", `${runDate}:${pair.inst_id}`);
+  const algoClOrdId = await triggerOrderClientId("trg", orderScope, pair.inst_id);
   const placed = await okx.placeAlgo({ instId: pair.inst_id, tdMode: "cash", side: "buy", ordType: "trigger", sz: size, triggerPx: price, orderPx: price, algoClOrdId });
   return { orderId: placed.algoId, type: "trigger" };
 }
 
-async function createAlgoTriggers(env, okx, { clearRebuildPending = false, concurrency = 1, pauseMs = 80 } = {}) {
+async function createAlgoTriggers(env, okx, { clearRebuildPending = false, concurrency = 1, pauseMs = 80, orderScope = sgtDay() } = {}) {
   const assets = await activeAssets(okx);
   if (assets.length >= MAX_ACTIVE_POSITIONS) {
     if (clearRebuildPending) await env.DB.prepare("UPDATE filled_orders SET trigger_rebuild_pending=0,updated_at=CURRENT_TIMESTAMP WHERE trigger_rebuild_pending=1").run();
@@ -318,7 +322,6 @@ async function createAlgoTriggers(env, okx, { clearRebuildPending = false, concu
   ]);
   const eligibility = explainTriggerEligibility(pairs, assets, blacklist, alreadyCovered);
   const eligible = eligibility.eligible;
-  const runDate = new Date().toISOString().slice(0, 10).replaceAll("-", "");
   const candleDay = sgtDay();
   const candleCache = await loadDailyCandleCache(env.DB, candleDay);
   const snapshot = eligible.length ? await loadSpotMarketSnapshot(okx) : null;
@@ -329,7 +332,7 @@ async function createAlgoTriggers(env, okx, { clearRebuildPending = false, concu
       const index = nextPair++;
       const pair = eligible[index];
       try {
-        outcomes[index] = await createPairTrigger(env, okx, pair, runDate, snapshot, candleCache, candleDay);
+        outcomes[index] = await createPairTrigger(env, okx, pair, orderScope, snapshot, candleCache, candleDay);
       } catch (error) {
         outcomes[index] = { error: `${pair.inst_id}: ${error.message}` };
       }
@@ -510,4 +513,4 @@ export const TASKS = {
   create_algo_triggers: (env, okx, options) => createAlgoTriggers(env, okx, options),
 };
 
-export { activeAssetsFromDetails, candleValues, cancelAndVerify, cancelPendingLimits, cancelPendingTriggers, createAlgoTriggers, eligibleTriggerPairs, explainTriggerEligibility, fetchDelistAnnouncements, loadSpotMarketSnapshot, sellDelistedBalance, stableId, symbolAppears };
+export { activeAssetsFromDetails, candleValues, cancelAndVerify, cancelPendingLimits, cancelPendingTriggers, createAlgoTriggers, eligibleTriggerPairs, explainTriggerEligibility, fetchDelistAnnouncements, loadSpotMarketSnapshot, sellDelistedBalance, stableId, symbolAppears, triggerOrderClientId };
