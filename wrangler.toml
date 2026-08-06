@@ -31,8 +31,12 @@ crons = [
   "1,6,11,16,21,26,31,36,41,46,51,56 * * * *",
   # 每15分钟执行: auto_sell_orders (整点)
   "0,15,30,45 * * * *",
-  # 每天16:10 UTC = 00:10 SGT - 强制执行一次 DB-backed fetch
-  "10 16 * * *"
+  # 每天00:10 SGT = 16:10 UTC - 强制执行一次 DB-backed fetch
+  "10 16 * * *",
+  # 每天23:55 SGT = 15:55 UTC - 触发 GitHub Action 取消 buy trigger
+  "55 15 * * *",
+  # 每天00:05 SGT = 16:05 UTC - 触发 GitHub Action 重建 buy trigger
+  "5 16 * * *",
 ]
 
 # 密钥配置 (需要在Cloudflare Dashboard中设置)
