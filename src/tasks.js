@@ -533,6 +533,39 @@ async function monitorDelist(env, okx) {
   return { candidates: candidates.length, processed, protected: protectedCount };
 }
 
+async function dispatchRepositoryEvent(env, eventType, payload = {}) {
+  const token = env.GITHUB_RECONCILE_TOKEN;
+  const owner = env.GITHUB_OWNER || env.GITHUB_REPOSITORY_OWNER;
+  const repo = env.GITHUB_REPO || (env.GITHUB_REPOSITORY || "").split("/").at(-1);
+  if (!token || !owner || !repo) throw new Error("Missing GitHub dispatch environment variables");
+  const response = await fetch(`https://api.github.com/repos/${owner}/${repo}/dispatches`, {
+    method: "POST",
+    headers: {
+      "accept": "application/vnd.github+json",
+      "authorization": `Bearer ${token}`,
+      "x-github-api-version": "2022-11-28",
+      "user-agent": "cloudflare-trading-worker",
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({
+      event_type: eventType,
+      client_payload: payload,
+    }),
+  });
+  if (!response.ok) {
+    const body = await response.text();
+    throw new Error(`Failed to dispatch GitHub event ${eventType}: ${response.status} ${body}`);
+  }
+  return { status: response.status, eventType };
+}
+
+function dispatchReconcile(mode) {
+  return (env) => dispatchRepositoryEvent(env, "reconcile-triggers", { mode, source: "cloudflare-cron" });
+}
+
+const dispatchReconcileCancel = (env) => dispatchReconcile("cancel")(env);
+const dispatchReconcileRebuild = (env) => dispatchReconcile("rebuild")(env);
+
 export const TASKS = {
   monitor_delist: monitorDelist,
   cancel_pending_limits: (_env, okx) => cancelPendingLimits(okx, { side: "buy" }),
@@ -540,6 +573,8 @@ export const TASKS = {
   auto_sell_orders: autoSellOrders,
   cancel_pending_triggers: (_env, okx) => cancelPendingTriggers(okx),
   create_algo_triggers: (env, okx, options) => createAlgoTriggers(env, okx, options),
+  dispatch_reconcile_triggers_cancel: dispatchReconcileCancel,
+  dispatch_reconcile_triggers_rebuild: dispatchReconcileRebuild,
 };
 
 export { activeAssetsFromDetails, candleValues, cancelAndVerify, cancelPendingLimits, cancelPendingTriggers, createAlgoTriggers, eligibleTriggerPairs, explainTriggerEligibility, fetchDelistAnnouncements, liveOrderConfirmsPlacement, loadSpotMarketSnapshot, sellDelistedBalance, stableId, symbolAppears, triggerOrderClientId };
