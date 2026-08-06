@@ -3,6 +3,9 @@ import { acquireTrade, blacklistedSymbols, configuredPairs, dueTrades, releaseTr
 import { compareDecimal, decimalToNumber, divideDecimal, multiplyDecimal, roundToStep } from "./decimal.js";
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const TRIGGER_ORDER_MAX_ATTEMPTS = 3;
+const TRIGGER_ORDER_BASE_DELAY_MS = 1200;
+const TRIGGER_ORDER_MAX_DELAY_MS = 6000;
 
 async function stableId(prefix, value, length = 24) {
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(String(value)));
@@ -37,6 +40,35 @@ function activeAssetsFromDetails(details, threshold = POSITION_GATE_USD) {
 
 function balanceByCurrency(details) {
   return new Map(details.map((item) => [String(item.ccy || "").toUpperCase(), item]));
+}
+
+function isRetryableOrderError(error) {
+  const message = String(error?.message || "").toLowerCase();
+  return message.includes("timeout") || message.includes("timed out") || message.includes("rate limit") ||
+    message.includes("429") || message.includes("too many requests") || message.includes("temporarily") ||
+    message.includes("temporarily unavailable") || message.includes("network") || message.includes("econnreset") ||
+    message.includes("econnaborted") || message.includes("enotfound") || message.includes("etimedout");
+}
+
+async function placeWithRetry(placeFn) {
+  let lastError;
+  for (let attempt = 1; attempt <= TRIGGER_ORDER_MAX_ATTEMPTS; attempt += 1) {
+    try {
+      const placed = await placeFn();
+      return placed;
+    } catch (error) {
+      lastError = error;
+      if (attempt >= TRIGGER_ORDER_MAX_ATTEMPTS || !isRetryableOrderError(error)) {
+        error.retryAttempts = attempt - 1;
+        throw error;
+      }
+      error.retryAttempts = attempt;
+      const jitter = Math.floor(Math.random() * 300);
+      const backoffMs = Math.min(TRIGGER_ORDER_MAX_DELAY_MS, TRIGGER_ORDER_BASE_DELAY_MS * (2 ** (attempt - 1)) + jitter);
+      await sleep(backoffMs);
+    }
+  }
+  throw lastError;
 }
 
 function sgtDay(now = Date.now()) {
@@ -308,10 +340,11 @@ async function createPairTrigger(env, okx, pair, orderScope, snapshot, candleCac
     const clOrdId = await triggerOrderClientId("buy", orderScope, pair.inst_id);
     let placed;
     try {
-      placed = await okx.placeOrder({ instId: pair.inst_id, tdMode: "cash", side: "buy", ordType: "limit", px: price, sz: size, clOrdId });
+      placed = await placeWithRetry(() => okx.placeOrder({ instId: pair.inst_id, tdMode: "cash", side: "buy", ordType: "limit", px: price, sz: size, clOrdId }));
     } catch (error) {
       error.orderType = "limit";
       error.orderClientId = clOrdId;
+      if (error.retryAttempts) error.message = `${error.message} (retryAttempts=${error.retryAttempts})`;
       throw error;
     }
     return { orderId: placed.ordId, type: "limit" };
@@ -319,10 +352,11 @@ async function createPairTrigger(env, okx, pair, orderScope, snapshot, candleCac
   const algoClOrdId = await triggerOrderClientId("trg", orderScope, pair.inst_id);
   let placed;
   try {
-    placed = await okx.placeAlgo({ instId: pair.inst_id, tdMode: "cash", side: "buy", ordType: "trigger", sz: size, triggerPx: price, orderPx: price, algoClOrdId });
+    placed = await placeWithRetry(() => okx.placeAlgo({ instId: pair.inst_id, tdMode: "cash", side: "buy", ordType: "trigger", sz: size, triggerPx: price, orderPx: price, algoClOrdId }));
   } catch (error) {
     error.orderType = "trigger";
     error.orderClientId = algoClOrdId;
+    if (error.retryAttempts) error.message = `${error.message} (retryAttempts=${error.retryAttempts})`;
     throw error;
   }
   return { orderId: placed.algoId, type: "trigger" };
