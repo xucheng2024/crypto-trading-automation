@@ -17,8 +17,10 @@ on:
 concurrency:
   group: okx-buy-trigger-reconciliation
   # Do not interrupt an in-flight reconciliation: it could be between a
-  # verified cancel and order creation. Later manual runs wait safely instead.
+  # verified cancel and order creation. Keep every subsequent dispatch in FIFO
+  # order instead of GitHub replacing the single default pending run.
   cancel-in-progress: false
+  queue: max
 
 permissions:
   contents: read
