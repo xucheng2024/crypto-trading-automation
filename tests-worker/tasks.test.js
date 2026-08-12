@@ -66,6 +66,22 @@ test("limit cancellation resubmits orders that remain pending", async () => {
   assert.deepEqual(result, { found: 1, remaining: 0 });
 });
 
+test("limit cancellation keeps recent orders but cancels older orders", async () => {
+  const now = 1_000_000;
+  const recent = { instId: "ONE-USDT", ordId: "recent", side: "buy", cTime: String(now - 59_999) };
+  const old = { instId: "BTC-USDT", ordId: "old", side: "buy", cTime: String(now - 60_000) };
+  const pages = [[recent, old], [recent]];
+  const cancelled = [];
+  const okx = {
+    pendingLimits: async () => pages.shift() || [recent],
+    cancelLimits: async (orders) => cancelled.push(...orders.map((order) => order.ordId)),
+  };
+
+  const result = await cancelPendingLimits(okx, { minAgeMs: 60_000, now, sleepFn: noSleep });
+  assert.deepEqual(cancelled, ["old"]);
+  assert.deepEqual(result, { found: 1, remaining: 0 });
+});
+
 test("trigger cancellation resubmits orders that remain pending", async () => {
   const order = { instId: "BTC-USDT", algoId: "1", ordType: "trigger" };
   const pages = [[order], [order], []];

@@ -155,12 +155,20 @@ async function cancelAndVerify({ loadPending, cancelBatch, matches, batchSize, l
   return { found: orders.length, remaining: 0 };
 }
 
-async function cancelPendingLimits(okx, { side = "buy", instIds, sleepFn = sleep } = {}) {
+const RECENT_LIMIT_ORDER_GRACE_MS = 60_000;
+
+async function cancelPendingLimits(okx, { side = "buy", instIds, minAgeMs = 0, now = Date.now(), sleepFn = sleep } = {}) {
   const filter = instIds ? new Set(instIds) : null;
   return cancelAndVerify({
     loadPending: () => okx.pendingLimits(),
     cancelBatch: (orders) => okx.cancelLimits(orders),
-    matches: (order) => (!side || order.side === side) && (!filter || filter.has(order.instId)),
+    matches: (order) => {
+      if (side && order.side !== side) return false;
+      if (filter && !filter.has(order.instId)) return false;
+      if (!minAgeMs) return true;
+      const createdAt = Number(order.cTime);
+      return Number.isFinite(createdAt) && createdAt <= now - minAgeMs;
+    },
     batchSize: 20,
     label: "limit order",
     sleepFn,
@@ -602,7 +610,7 @@ const dispatchReconcileRebuild = (env) => dispatchReconcile("rebuild")(env);
 
 export const TASKS = {
   monitor_delist: monitorDelist,
-  cancel_pending_limits: (_env, okx) => cancelPendingLimits(okx, { side: "buy" }),
+  cancel_pending_limits: (_env, okx) => cancelPendingLimits(okx, { side: "buy", minAgeMs: RECENT_LIMIT_ORDER_GRACE_MS }),
   fetch_filled_orders: fetchFilledOrders,
   auto_sell_orders: autoSellOrders,
   cancel_pending_triggers: (_env, okx) => cancelPendingTriggers(okx),
