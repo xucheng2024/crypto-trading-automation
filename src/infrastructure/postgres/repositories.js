@@ -36,13 +36,13 @@ export class TradingStateRepository {
   async insertFill(tx, fill) {
     return tx.query(`INSERT INTO filled_orders(
       account_id,inst_id,base_ccy,trade_id,bill_id,source,side,fill_size,fill_time,
-      hold_hours,strategy_config_hash,sell_time,protection_price,sell_state,allocation_state,execution_mode
-    ) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
+      hold_hours,strategy_config_hash,sell_time,protection_price,sell_state,allocation_state,execution_mode,execution_route
+    ) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
     ON CONFLICT(inst_id,trade_id) DO NOTHING`, [
       fill.accountId, fill.instId, fill.baseCcy, fill.tradeId, fill.billId ?? null,
       fill.source, fill.side, fill.fillSize, fill.fillTime, fill.holdHours ?? null,
       fill.strategyConfigHash ?? null, fill.sellTime ?? null, fill.protectionPrice ?? null,
-      fill.sellState ?? null, fill.allocationState ?? null, fill.executionMode ?? "cross",
+      fill.sellState ?? null, fill.allocationState ?? null, fill.executionMode ?? "cross", fill.executionRoute ?? "margin",
     ]);
   }
 
@@ -89,8 +89,8 @@ export class TradingStateRepository {
     return row;
   }
 
-  async recordSystemSell(tx, { accountId, instId, baseCcy, tradeId, fillSize, fillTime, sourceBuyTradeId, executionMode = "cross" }) {
-    const inserted = await this.insertFill(tx, { accountId, instId, baseCcy, tradeId, source: "SYSTEM", side: "SELL", fillSize, fillTime, allocationState: "APPLIED", executionMode });
+  async recordSystemSell(tx, { accountId, instId, baseCcy, tradeId, fillSize, fillTime, sourceBuyTradeId, executionMode = "cross", executionRoute = "margin" }) {
+    const inserted = await this.insertFill(tx, { accountId, instId, baseCcy, tradeId, source: "SYSTEM", side: "SELL", fillSize, fillTime, allocationState: "APPLIED", executionMode, executionRoute });
     if (inserted.rowCount === 0) return { applied: false, reason: "DUPLICATE_TRADE" };
     const source = await this.applySystemSell(tx, { accountId, sourceBuyTradeId, fillSize });
     return { applied: true, source };
@@ -192,10 +192,10 @@ export class OrderRepository {
       reservation_state,frozen_target_usd,decision_quote_ts,decision_quote_hash,
       decision_candle_ts,decision_candle_hash,decision_market_key,execution_limit_price,
       instrument_version,hold_hours,strategy_config_hash,admission_equity,
-      admission_exposure,account_snapshot_version,execution_mode
+      admission_exposure,account_snapshot_version,execution_mode,execution_route
     ) VALUES(
       $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'PREPARED',$11,$12,'ACTIVE',$13,$14,$15,$16,$17,
-      $18,$19,$20,$21,$22,$23,$24,$25,$26
+      $18,$19,$20,$21,$22,$23,$24,$25,$26,$27
     )`, [
       attempt.accountId, attempt.intent, attempt.instId, attempt.baseCcy, attempt.clOrdId,
       attempt.payloadHash, attempt.sourceBuyTradeId ?? null, attempt.strategyDay ?? null,
@@ -207,7 +207,7 @@ export class OrderRepository {
       attempt.executionLimitPrice ?? null, attempt.instrumentVersion ?? null,
       attempt.holdHours ?? null, attempt.strategyConfigHash ?? null,
       attempt.admissionEquity ?? null, attempt.admissionExposure ?? null,
-      attempt.accountSnapshotVersion ?? null, attempt.executionMode ?? "cross",
+      attempt.accountSnapshotVersion ?? null, attempt.executionMode ?? "cross", attempt.executionRoute ?? "margin",
     ]);
   }
 

@@ -61,7 +61,7 @@ export class SellService {
     if (result?.rowCount !== 1) return { accepted: false, reason: "CAS_LOST" };
     const current = result.rows?.[0] ?? { ...fill, sell_state: "SELL_TRIGGERED", protection_price: event.protection, version: BigInt(fill.version) + 1n };
     this.fills.set(event.key, current);
-    this.coordinator.enqueue({ intent: "SELL", accountId, instId, baseCcy: field(current, "base_ccy", "baseCcy"), sourceBuyTradeId: tradeId, remainingSize: subtractDecimal(field(current, "fill_size", "fillSize"), field(current, "disposed_size", "disposedSize") ?? "0"), fillVersion: current.version, sellTime: Number(field(current, "sell_time", "sellTime")), availableBase: current.availableBase, bidPx: this.market.ticker(instId)?.bidPx ?? this.market.ticker(instId)?.last, executionMode: field(current, "execution_mode", "executionMode") });
+    this.coordinator.enqueue({ intent: "SELL", accountId, instId, baseCcy: field(current, "base_ccy", "baseCcy"), sourceBuyTradeId: tradeId, remainingSize: subtractDecimal(field(current, "fill_size", "fillSize"), field(current, "disposed_size", "disposedSize") ?? "0"), fillVersion: current.version, sellTime: Number(field(current, "sell_time", "sellTime")), availableBase: current.availableBase, bidPx: this.market.ticker(instId)?.bidPx ?? this.market.ticker(instId)?.last, executionMode: field(current, "execution_mode", "executionMode"), executionRoute: field(current, "execution_route", "executionRoute") });
     this._emit({ type: "sell_triggered", reason: "SELL_TRIGGERED", sourceBuyTradeId: tradeId });
     return { accepted: true, reason: "SELL_TRIGGERED" };
   }

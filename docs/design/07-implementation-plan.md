@@ -14,7 +14,7 @@
 必须替换：
 
 - algo trigger 和每日 cancel/rebuild；
-- tdMode=cash 的新单路径；
+- 同一交易对在 Margin 失败后改走 Spot 的回退路径；
 - 固定 OKX_ORDER_SIZE 资金；
 - autoSellOrders 逐 fill/逐 REST 一次性卖出；
 - mutation 盲重试；
@@ -142,9 +142,9 @@ recovery 作为 reconciliation-service 的一组用例，不再建立独立服�
 - REST profile、server-time、签名、expTime、集中限频、响应校验和只读 GET retry全部走共享 transport。
 - mutation 提交一次 + 未知结果查询。
 - Public/Private/Business WS、ping/pong、订阅确认、64008 和 REST baseline。
-- Private account/balance_and_position 提供共享账户风险和可售量；orders(ANY) 在入口识别本系统订单，另纳管管理起点之后配置交易对且确认 `tdMode=cross|cash` 的外部 SPOT/MARGIN BUY/SELL fills。REST fill 回补必须按 `ordId` 联查 order details/history 确认实际模式，不能从不含 `tdMode` 的 fill 猜测。isolated BUY、永续、资产和仓位不进入业务逻辑；不扫描 pending algo 或 positions。
-- 固定 Multi-currency `acctLv=3`，新订单按小时刷新路由：MARGIN/USDT 可用优先 cross，否则 SPOT cash；不实现 Portfolio/isolated 分支。
-- autoLoan 只从 account config 验证，不把它拼进 order payload；managed 退出沿用 BUY fill 的 `execution_mode`，cross 发送 `reduceOnly=true`，cash 省略。启动和每小时分别查询账户级 SPOT/MARGIN instruments，包含 USDT 时 cross 发送 `tradeQuoteCcy=USDT`，否则回退 cash。
+- Private account/balance_and_position 提供共享账户风险和可售量；orders(ANY) 在入口识别本系统订单，另纳管管理起点之后配置交易对且模式可确认的外部 SPOT/MARGIN BUY/SELL fills。REST fill 回补必须按 `ordId` 联查 order details/history 确认实际模式，不能从不含 `tdMode` 的 fill 猜测。isolated BUY、永续、资产和仓位不进入业务逻辑；不扫描 pending algo 或 positions。
+- 固定 Multi-currency `acctLv=3`、`autoLoan=true`，所有新订单使用 `tdMode=cross`。按小时刷新的是能力分类：MARGIN/USDT live 为 `margin`，否则 SPOT live 为 `spot`；这不是优先级或失败回退，不实现 Portfolio/isolated 分支。
+- autoLoan 只从 account config 验证，不把它拼进 order payload；Margin 路由先消耗自有 USDT、不足时由 OKX 借贷，Spot-only 路由只用自有资金。managed 退出沿用 BUY fill 的 `execution_mode` 与 `execution_route`，Margin 发送 `reduceOnly=true`，Spot 省略。启动和每小时分别查询账户级 SPOT/MARGIN instruments；Margin 路由在需要时发送 `tradeQuoteCcy=USDT`，Spot 路由省略。
 
 验收：fake transport 和录制事件覆盖断线、乱序、超时、单次 NOT_FOUND、多源对账和重连；不使用 OKX 模拟盘。
 
@@ -168,17 +168,17 @@ recovery 作为 reconciliation-service 的一组用例，不再建立独立服�
 
 ### T6 逐 fill SELL 与债务观察
 
-- 每个 managed BUY tradeId 保存 source、`execution_mode`、fill_size、disposed_size、hold_hours、strategy_config_hash、sell_time、保护价和 sell_state。SYSTEM fill 继承 BUY attempt 的冻结配置，ACCOUNT fill 使用首次纳管时的配置，sell_time 以后不重算。remaining 读取时计算，不保存实际 fee/feeCcy。generation 只存在于 order_attempts，breach latch 只在内存；不聚合。
+- 每个 managed BUY tradeId 保存 source、实际 `execution_mode`、语义 `execution_route`、fill_size、disposed_size、hold_hours、strategy_config_hash、sell_time、保护价和 sell_state。SYSTEM fill 继承 BUY attempt 的冻结配置与路由，ACCOUNT fill 使用首次纳管时确认的模式/路由，sell_time 以后不重算。remaining 读取时计算，不保存实际 fee/feeCcy。generation 只存在于 order_attempts，breach latch 只在内存；不聚合。
 - ticker 跌破条件按 fill 在 Market Projection 中单调锁存，防止 coalescing 覆盖瞬时命中。
 - 每个 fill 按自己的确认剩余 base 数量提交 market sell，不按固定金额拆单。
 - 所有 mutation HTTP 请求经 Order Coordinator 单通道串行提交，每次即时携带当前 1 至 5 个同类、不同 instId/base 的订单；同一 `(accountId, baseCcy)` 的非终态 attempt 继续阻止替代退出单。
 - partial/unknown/restart recovery；命中后不再等待价格。
-- 本系统 orders 按 `clOrdId/tag` 对账；fill 入口统一接收管理起点之后配置交易对且确认 cross/cash 的 BUY/SELL。BUY 直接成为 managed fill；SYSTEM SELL 按 attempt 更新指定 BUY；ACCOUNT SELL 一律先 PENDING，连续 fills watermark 安全覆盖其 fillTime 且无同 base 活动 attempt 后，才向时间不晚于该 SELL 的最早 BUY 一次分配并保存 allocated_size；PENDING 阻止同 base 新退出。isolated 和永续忽略。每次 SELL/DELIST 按持久化模式查询 max-avail；cross 使用 reduce-only，cash 使用现货可售量。不查询 bills，不归因手续费或利息。
+- 本系统 orders 按 `clOrdId/tag` 对账；fill 入口统一接收管理起点之后配置交易对且模式可确认的 SPOT/MARGIN BUY/SELL。BUY 直接成为 managed fill；SYSTEM SELL 按 attempt 更新指定 BUY；ACCOUNT SELL 一律先 PENDING，连续 fills watermark 安全覆盖其 fillTime 且无同 base 活动 attempt 后，才向时间不晚于该 SELL 的最早 BUY 一次分配并保存 allocated_size；PENDING 阻止同 base 新退出。isolated 和永续忽略。每次 SELL/DELIST 以持久化路由查询 max-avail；Margin 使用 reduce-only，Spot-only 使用现货可售量。不查询 bills，不归因手续费或利息。
 - market sell 始终按 base 数量下单，不发送 `tgtCcy/slippagePct`。
 - SELL 与 DELIST 复用 `order_attempts` 的同币非终态部分唯一约束、行内 base reservation 和剩余量确认，不复制下单/恢复代码。
 - 只有真实 SYSTEM/ACCOUNT SELL fills 使单 fill remaining 归零才标记 SOLD；可售余额归零时保留 `SELL_TRIGGERED` 并低频复核。不存在 position slot。`AUTO_REPAY=false`，不维护 REPAY_PENDING，不计算借款利息。
 
-验收：SYSTEM BUY 与管理起点之后的 ACCOUNT cross/cash BUY tradeId 各形成独立任务；重启回看不倒灌管理起点之前的成交，REST fills 必须联查订单确认实际模式；ACCOUNT SELL 先于更早 ACCOUNT BUY 到达时保持 PENDING，watermark 覆盖并补齐 BUY 后才按时间分配，期间不创建同 base 系统退出；所有 managed fill 按持久化模式退出，cross 使用 reduce-only、cash 省略，isolated BUY 和永续不创建任务；同 base 始终一张非终态系统卖单，partial/UNKNOWN/重启不重复。另用集成测试明确记录：reduceOnly 不能隔离共享现货，系统订单已提交后同时人工卖出仍可能双双成交，应用不能声称跨客户端互斥。
+验收：SYSTEM BUY 与管理起点之后的 ACCOUNT SPOT/MARGIN BUY tradeId 各形成独立任务；重启回看不倒灌管理起点之前的成交，REST fills 必须联查订单确认实际模式；ACCOUNT SELL 先于更早 ACCOUNT BUY 到达时保持 PENDING，watermark 覆盖并补齐 BUY 后才按时间分配，期间不创建同 base 系统退出；所有 managed fill 按持久化路由退出，Margin 使用 reduce-only、Spot-only 省略，isolated BUY 和永续不创建任务；同 base 始终一张非终态系统卖单，partial/UNKNOWN/重启不重复。同币种 Margin 可用量为零或下单失败时不创建第二张 Spot 订单。另用集成测试明确记录：reduceOnly 不能隔离共享现货，系统订单已提交后同时人工卖出仍可能双双成交，应用不能声称跨客户端互斥。
 
 ### T7 退市、审计和运维
 
@@ -283,7 +283,7 @@ recovery 作为 reconciliation-service 的一组用例，不再建立独立服�
 4. 只取消旧系统通过其所有权标记识别出的 triggers/遗留挂单，并查询对应 pending/history/fills；人工确认旧系统 managed 持仓和相关借款已经处置干净。未通过核对时禁止启用 `FULL`。
 5. 使用已校验 JSON 离线导入 D1 protection 并生成版本化 limit 配置；不导入 D1 daily limit cache，Azure 从 OKX 日 K 重算。生产镜像不连接 D1；共享账户其他策略的余额、负债、订单和仓位不在清理范围内。
 6. 启动 Trading Engine，三类 WS + REST baseline 达到 READY。
-7. 启动前检查账户为 `acctLv=3`、autoLoan、动态 cross/cash 路由、杠杆和持久化出口模式；market sell 使用 base 数量且不发送 `tgtCcy/slippagePct`；系统只自动对账自己的非终态 attempt。
+7. 启动前检查账户为 `acctLv=3`、autoLoan、动态 `margin|spot` 能力分类、杠杆和持久化出口路由；所有新单为 cross，market sell 使用 base 数量且不发送 `tgtCcy/slippagePct`；系统只自动对账自己的非终态 attempt。
 8. RECOVERING 无矛盾且快照新鲜后自动 READY，开启完整 BUY/SELL/DELIST。
 9. 首笔订单直接使用共享账户最新 `min(totalEq,adjEq)` 和本策略 exposure 计算，不使用固定小额、cash 过渡、Shadow 或模拟盘。
 

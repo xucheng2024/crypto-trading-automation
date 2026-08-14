@@ -13,8 +13,8 @@ function add(left, right) {
 
 /** The only component allowed to invoke an injected mutation transport. */
 export class OrderCoordinator {
-  constructor({ transaction, orders, state, transport, ownerGuard, readyGate, market, account, mode = () => "OFF", executionMode = () => "cross", tradeQuoteCurrency = () => null, isBuyAllowed = () => true, clock = { nowMs: () => Date.now() }, config, telemetry = () => {}, onExitSettled = null, slo = null }) {
-    Object.assign(this, { transaction, orders, state, transport, ownerGuard, readyGate, market, account, mode, executionMode, tradeQuoteCurrency, isBuyAllowed, clock, config, telemetry, onExitSettled, slo });
+  constructor({ transaction, orders, state, transport, ownerGuard, readyGate, market, account, mode = () => "OFF", executionRoute = () => "margin", tradeQuoteCurrency = () => null, isBuyAllowed = () => true, clock = { nowMs: () => Date.now() }, config, telemetry = () => {}, onExitSettled = null, slo = null }) {
+    Object.assign(this, { transaction, orders, state, transport, ownerGuard, readyGate, market, account, mode, executionRoute, tradeQuoteCurrency, isBuyAllowed, clock, config, telemetry, onExitSettled, slo });
     this.pending = { BUY: new Map(), SELL: new Map(), DELIST: new Map() }; this.submitting = false; this.accepting = true; this.isolatedBases = new Set();
   }
   enqueue(intent) { if (!this.accepting) return false; const group = this.pending[intent.intent]; if (!group) throw new Error("unknown intent"); const key = intent.intent === "BUY" ? intent.instId : `${intent.baseCcy}:${intent.sourceBuyTradeId}`; group.set(key, intent); return true; }
@@ -50,12 +50,13 @@ export class OrderCoordinator {
     const eligible = candidates.filter((intent) => (!intent.waitForRiskVersion || riskVersion > intent.waitForRiskVersion) && this._buyGuard(intent).allowed);
     if (!eligible.length) return [];
     const maxAvailStarted = this.clock.nowMs();
-    const routed = eligible.map((intent) => ({ intent, executionMode: this._executionMode(intent), tradeQuoteCcy: intent.tradeQuoteCcy ?? this.tradeQuoteCurrency(intent.instId) })).filter(({ intent, executionMode }) => {
-      if (executionMode) return true;
-      this._emit({ type: "buy_deferred", reason: "EXECUTION_MODE_UNAVAILABLE", instId: intent.instId }); return false;
+    const routed = eligible.map((intent) => { const executionRoute = this._executionRoute(intent); return { intent, executionRoute, executionMode: executionRoute ? "cross" : null, tradeQuoteCcy: intent.tradeQuoteCcy ?? this.tradeQuoteCurrency(intent.instId) }; }).filter(({ intent, executionRoute, executionMode }) => {
+      if (executionRoute && executionMode) return true;
+      this._emit({ type: "buy_deferred", reason: "EXECUTION_ROUTE_UNAVAILABLE", instId: intent.instId }); return false;
     });
     const groups = Map.groupBy(routed, (row) => row.executionMode);
     const modeByInst = new Map(routed.map(({ intent, executionMode }) => [intent.instId, executionMode]));
+    const routeByInst = new Map(routed.map(({ intent, executionRoute }) => [intent.instId, executionRoute]));
     const quoteByInst = new Map(routed.map(({ intent, tradeQuoteCcy }) => [intent.instId, tradeQuoteCcy]));
     const avail = (await Promise.all([...groups].map(([tdMode, rows]) => this.transport.maxAvailSize(rows.map(({ intent }) => intent.instId).join(","), { tdMode })))).flat(); this.slo?.record("signal_max_avail", maxAvailStarted);
     const byInst = new Map((avail ?? []).map((row) => [row.instId, row.availBuy]));
@@ -66,7 +67,7 @@ export class OrderCoordinator {
         intent.waitForRiskVersion = riskVersion;
         this._emit({ type: "buy_deferred", reason: "INSUFFICIENT_FUNDS_WAIT_RISK_VERSION", instId: intent.instId, riskVersion });
       }
-      return available ? [{ ...intent, availBuy, executionMode: modeByInst.get(intent.instId), tradeQuoteCcy: quoteByInst.get(intent.instId) }] : [];
+      return available ? [{ ...intent, availBuy, executionMode: modeByInst.get(intent.instId), executionRoute: routeByInst.get(intent.instId), tradeQuoteCcy: quoteByInst.get(intent.instId) }] : [];
     });
   }
   async submitBuys(candidates) {
@@ -86,9 +87,11 @@ export class OrderCoordinator {
         const maxNotional = min(remainingTarget, intent.availBuy, this._remainingCapacity());
         const size = roundToStep(divideDecimal(maxNotional, multiplyDecimal(executionPrice, `1${TRADE_FEE_RATE}`)), instrument.lotSz, "down");
         if (compareDecimal(size, instrument.minSz) < 0) continue;
-        const executionMode = this._executionMode(intent);
+        const executionRoute = this._executionRoute(intent);
+        const executionMode = executionRoute ? "cross" : null;
+        if (!executionMode) continue;
         const tradeQuoteCcy = intent.tradeQuoteCcy ?? this.tradeQuoteCurrency(intent.instId);
-        const payload = { instId: intent.instId, tdMode: executionMode, side: "buy", ordType: "ioc", px: executionPrice, sz: size, tag: this.config.strategyTag, ...(executionMode === "cross" && tradeQuoteCcy ? { tradeQuoteCcy } : {}) };
+        const payload = { instId: intent.instId, tdMode: executionMode, side: "buy", ordType: "ioc", px: executionPrice, sz: size, tag: this.config.strategyTag, ...(executionRoute === "margin" && tradeQuoteCcy ? { tradeQuoteCcy } : {}) };
         const tuple = { instId: intent.instId, strategyDay: intent.strategyDay, generation: intent.generation };
         const clOrdId = await createClOrdId(this.config.orderVersion, "BUY", tuple); payload.clOrdId = clOrdId;
         const hash = await payloadHash(payload); const marketKey = await payloadHash({ quote, candle });
@@ -97,7 +100,7 @@ export class OrderCoordinator {
           strategyDay: intent.strategyDay, generation: intent.generation, plannedSize: size, reservedExposureUsd: multiplyDecimal(multiplyDecimal(size, executionPrice), `1${TRADE_FEE_RATE}`),
           frozenTargetUsd: frozenTarget, decisionQuoteTs: quote.ts, decisionQuoteHash: await payloadHash(quote), decisionCandleTs: candle.ts, decisionCandleHash: await payloadHash(candle), decisionMarketKey: marketKey,
           executionLimitPrice: executionPrice, instrumentVersion: String(instrument.version ?? "1"), holdHours: intent.holdHours, strategyConfigHash: intent.configHash,
-          admissionEquity: adjustedEquity(this.account.value), admissionExposure: intent.managedExposure ?? "0", accountSnapshotVersion: String(this.account.value.version), executionMode,
+          admissionEquity: adjustedEquity(this.account.value), admissionExposure: intent.managedExposure ?? "0", accountSnapshotVersion: String(this.account.value.version), executionMode, executionRoute,
         };
         try {
           const reserve = await this.orders.reserveBuy(tx, attempt, { managedExposure: intent.managedExposure ?? "0", maxExposure: multiplyDecimal(BUY_ADMISSION_LEVERAGE, attempt.admissionEquity) });
@@ -162,9 +165,9 @@ export class OrderCoordinator {
     if (!eligible.length) return [];
     let available;
     try {
-      const routed = eligible.map((intent) => ({ intent, executionMode: this._executionMode(intent) })).filter((row) => row.executionMode);
-      const groups = Map.groupBy(routed, (row) => row.executionMode);
-      available = (await Promise.all([...groups].map(([tdMode, rows]) => this.transport.maxAvailSize(rows.map(({ intent }) => intent.instId).join(","), tdMode === "cross" ? { tdMode, reduceOnly: true } : { tdMode })))).flat();
+      const routed = eligible.map((intent) => ({ intent, executionRoute: this._executionRoute(intent), executionMode: this._executionMode(intent) })).filter((row) => row.executionRoute && row.executionMode);
+      const groups = Map.groupBy(routed, (row) => `${row.executionMode}:${row.executionRoute}`);
+      available = (await Promise.all([...groups].map(([, rows]) => { const { executionMode: tdMode, executionRoute } = rows[0]; return this.transport.maxAvailSize(rows.map(({ intent }) => intent.instId).join(","), tdMode === "cross" && executionRoute === "margin" ? { tdMode, reduceOnly: true } : { tdMode }); }))).flat();
     }
     catch (error) { this._emit({ type: "exit_deferred", intent: kind, reason: "MAX_AVAIL_FAILED", error: error?.message }); return []; }
     const byInst = new Map((available ?? []).map((row) => [row.instId, row.availSell]));
@@ -194,10 +197,11 @@ export class OrderCoordinator {
           if (!this._exitGuard(intent, kind).allowed) continue;
           const instrument = this.market.instrument(intent.instId);
           const executionMode = this._executionMode(intent);
-          const payload = { instId: intent.instId, tdMode: executionMode, side: "sell", ordType: "market", ...(executionMode === "cross" ? { reduceOnly: true } : {}), sz: intent.plannedSize, tag: this.config.strategyTag };
+          const executionRoute = this._executionRoute(intent);
+          const payload = { instId: intent.instId, tdMode: executionMode, side: "sell", ordType: "market", ...(executionMode === "cross" && executionRoute === "margin" ? { reduceOnly: true } : {}), sz: intent.plannedSize, tag: this.config.strategyTag };
           const tuple = { instId: intent.instId, tradeId: intent.sourceBuyTradeId, generation: intent.generation ?? 0, intent: kind };
           const clOrdId = await createClOrdId(this.config.orderVersion, kind, tuple); payload.clOrdId = clOrdId;
-          const attempt = { accountId: this.config.accountId, intent: kind, instId: intent.instId, baseCcy: intent.baseCcy ?? instrument.base, clOrdId, payloadHash: await payloadHash(payload), sourceBuyTradeId: intent.sourceBuyTradeId, generation: intent.generation ?? 0, plannedSize: intent.plannedSize, reservedBaseSize: intent.plannedSize, executionMode };
+          const attempt = { accountId: this.config.accountId, intent: kind, instId: intent.instId, baseCcy: intent.baseCcy ?? instrument.base, clOrdId, payloadHash: await payloadHash(payload), sourceBuyTradeId: intent.sourceBuyTradeId, generation: intent.generation ?? 0, plannedSize: intent.plannedSize, reservedBaseSize: intent.plannedSize, executionMode, executionRoute };
           const reserve = await this.orders.reserveExit(tx, attempt);
           if (reserve?.authorized !== false) rows.push({ intent, attempt, payload });
           else this._emit({ type: "exit_deferred", intent: kind, reason: reserve.reason, sourceBuyTradeId: intent.sourceBuyTradeId });
@@ -237,7 +241,7 @@ export class OrderCoordinator {
       await this.transaction(async (tx) => {
         await this.orders.lockExitBase?.(tx, attempt.account_id ?? attempt.accountId, attempt.base_ccy ?? attempt.baseCcy);
         for (const fill of fills) {
-          const applied = await this.state.recordSystemSell(tx, { accountId: attempt.account_id ?? attempt.accountId, instId: attempt.inst_id ?? attempt.instId, baseCcy: attempt.base_ccy ?? attempt.baseCcy, sourceBuyTradeId: attempt.source_buy_trade_id ?? attempt.sourceBuyTradeId, tradeId: fill.tradeId, fillSize: fill.fillSz, fillTime: fill.fillTime, executionMode: attempt.execution_mode ?? attempt.executionMode ?? "cross" });
+          const applied = await this.state.recordSystemSell(tx, { accountId: attempt.account_id ?? attempt.accountId, instId: attempt.inst_id ?? attempt.instId, baseCcy: attempt.base_ccy ?? attempt.baseCcy, sourceBuyTradeId: attempt.source_buy_trade_id ?? attempt.sourceBuyTradeId, tradeId: fill.tradeId, fillSize: fill.fillSz, fillTime: fill.fillTime, executionMode: attempt.execution_mode ?? attempt.executionMode ?? "cross", executionRoute: attempt.execution_route ?? attempt.executionRoute ?? "margin" });
           source ??= applied.source;
         }
         source ??= await this.state.findManagedBuy?.(tx, { accountId: attempt.account_id ?? attempt.accountId, tradeId: attempt.source_buy_trade_id ?? attempt.sourceBuyTradeId });
@@ -257,7 +261,7 @@ export class OrderCoordinator {
     const remaining = source ? subtractDecimal(source.fill_size, source.disposed_size) : "0";
     if (settled?.rowCount === 1 && compareDecimal(remaining, "0") > 0 && (attempt.intent !== "DELIST" || !this.onExitSettled)) {
       const instId = attempt.inst_id ?? attempt.instId; const quote = this.market.ticker(instId);
-      this.enqueue({ intent: attempt.intent, accountId: attempt.account_id ?? attempt.accountId, instId, baseCcy: attempt.base_ccy ?? attempt.baseCcy, sourceBuyTradeId: attempt.source_buy_trade_id ?? attempt.sourceBuyTradeId, remainingSize: remaining, fillVersion: source.version, generation: Number(attempt.generation) + 1, sellTime: 0, availableBase: remaining, bidPx: quote?.bidPx ?? quote?.last, executionMode: source.execution_mode ?? source.executionMode ?? attempt.execution_mode ?? attempt.executionMode });
+      this.enqueue({ intent: attempt.intent, accountId: attempt.account_id ?? attempt.accountId, instId, baseCcy: attempt.base_ccy ?? attempt.baseCcy, sourceBuyTradeId: attempt.source_buy_trade_id ?? attempt.sourceBuyTradeId, remainingSize: remaining, fillVersion: source.version, generation: Number(attempt.generation) + 1, sellTime: 0, availableBase: remaining, bidPx: quote?.bidPx ?? quote?.last, executionMode: source.execution_mode ?? source.executionMode ?? attempt.execution_mode ?? attempt.executionMode, executionRoute: source.execution_route ?? source.executionRoute ?? attempt.execution_route ?? attempt.executionRoute });
     }
     if (settled?.rowCount === 1 && this.onExitSettled) {
       try { await this.onExitSettled({ attempt, source, remaining }); }
@@ -269,15 +273,19 @@ export class OrderCoordinator {
     const filled = fills.reduce((sum, fill) => add(sum, fill.fillSz), "0");
     if (compareDecimal(filled, accFillSz) !== 0) return { settled: false, reason: "FILLS_INCOMPLETE" };
     await this.transaction(async (tx) => {
-      for (const fill of fills) await this.state.insertFill(tx, { accountId: attempt.account_id, instId: attempt.inst_id, baseCcy: attempt.base_ccy, tradeId: fill.tradeId, source: "SYSTEM", side: "BUY", fillSize: fill.fillSz, fillTime: fill.fillTime, holdHours: attempt.hold_hours, strategyConfigHash: attempt.strategy_config_hash, sellTime: Number(fill.fillTime) + Number(attempt.hold_hours) * 3_600_000, sellState: "WAITING", executionMode: attempt.execution_mode ?? attempt.executionMode ?? "cross" });
+      for (const fill of fills) await this.state.insertFill(tx, { accountId: attempt.account_id, instId: attempt.inst_id, baseCcy: attempt.base_ccy, tradeId: fill.tradeId, source: "SYSTEM", side: "BUY", fillSize: fill.fillSz, fillTime: fill.fillTime, holdHours: attempt.hold_hours, strategyConfigHash: attempt.strategy_config_hash, sellTime: Number(fill.fillTime) + Number(attempt.hold_hours) * 3_600_000, sellState: "WAITING", executionMode: attempt.execution_mode ?? attempt.executionMode ?? "cross", executionRoute: attempt.execution_route ?? attempt.executionRoute ?? "margin" });
       await this.orders.markSettled(tx, attempt.cl_ord_id, exchangeState, compareDecimal(accFillSz, "0") > 0 ? "CONVERTED" : "RELEASED");
     });
     return { settled: true };
   }
   _remainingCapacity() { const snapshot = this.account.value; if (!snapshot) return "0"; const equity = adjustedEquity(snapshot); return multiplyDecimal(BUY_ADMISSION_LEVERAGE, equity); }
   _executionMode(intent) {
-    const value = intent.executionMode ?? intent.execution_mode ?? this.executionMode(intent.instId);
+    const value = intent.executionMode ?? intent.execution_mode ?? (this._executionRoute(intent) ? "cross" : null);
     return value === "cross" || value === "cash" ? value : null;
+  }
+  _executionRoute(intent) {
+    const value = intent.executionRoute ?? intent.execution_route ?? this.executionRoute(intent.instId);
+    return value === "margin" || value === "spot" ? value : null;
   }
   _buyGuard(intent) {
     if (intent.generation > 0 && !this.canCreateNextBuy({ previousAttempt: intent.previousAttempt, nextMarketKey: intent.nextMarketKey })) return { allowed: false, reason: "GENERATION_NOT_SETTLED_OR_DUPLICATE" };

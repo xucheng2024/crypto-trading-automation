@@ -41,7 +41,7 @@ owner lock 必须由不参与连接池复用的专用 PostgreSQL session 持有�
 - Reconciliation/Recovery：启动、断线和周期只读对账；只向 Order Coordinator 提交观察结果，不直接转换订单状态。
 - Telemetry port：异步聚合日志和 summary，不拥有业务状态。
 
-生产允许共享 `acctLv=3` 账户。每张本系统订单同时带版本化 `clOrdId` 前缀和固定 `STRATEGY_TAG`（不超过 16 位字母数字）；已持久化 attempt 的精确 clOrdId 也是所有权事实。管理起点之后，配置交易对上确认 `tdMode=cross|cash` 的 ACCOUNT SPOT/MARGIN BUY fill 直接纳入 managed inventory，并持久化实际模式；ACCOUNT SELL 一律先 PENDING，等 SPOT/MARGIN 连续 fills watermarks 覆盖其 fillTime 且无同 base 活动退出 attempt 后才按时间顺序减少 managed inventory，期间阻止该 base 新系统退出。ACCOUNT fills 不伪造外部订单状态机。切换前余额、isolated 和 FUTURES/SWAP/OPTION fills 仍忽略。共享账户无法为已提交系统订单与同时发生的人工卖单提供原子互斥，这是不使用独立子账户的明确剩余风险。
+生产允许共享 `acctLv=3`、`autoLoan=true` 账户。新单全部使用 `tdMode=cross`，同时按账户 instruments 保存 `execution_route=margin|spot`：Margin 路由允许 OKX 在自有 USDT 不足时自动借贷，Spot-only 路由只使用自有资金；两者之间不存在失败回退。每张本系统订单同时带版本化 `clOrdId` 前缀和固定 `STRATEGY_TAG`（不超过 16 位字母数字）；已持久化 attempt 的精确 clOrdId 也是所有权事实。管理起点之后，配置交易对上确认的 ACCOUNT SPOT/MARGIN BUY fill 直接纳入 managed inventory，并持久化实际模式和路由；ACCOUNT SELL 一律先 PENDING，等 SPOT/MARGIN 连续 fills watermarks 覆盖其 fillTime 且无同 base 活动退出 attempt 后才按时间顺序减少 managed inventory，期间阻止该 base 新系统退出。ACCOUNT fills 不伪造外部订单状态机。切换前余额、isolated 和 FUTURES/SWAP/OPTION fills 仍忽略。共享账户无法为已提交系统订单与同时发生的人工卖单提供原子互斥，这是不使用独立子账户的明确剩余风险。
 
 模块通过进程内有界优先级队列通信：
 
@@ -128,7 +128,7 @@ Daily Limit 只由 Trading Engine 使用纯函数按需计算并原子持久化�
 | 用途 | OKX API / channel | 关键约束 |
 |---|---|---|
 | 规则/退市 | `GET /api/v5/public/instruments?instType=SPOT`; Public `instruments` | `state=live` 才可买；`tickSz/lotSz/minSz/expTime` 增量更新 |
-| 账户可交易合约 | `GET /api/v5/account/instruments?instType=SPOT` 与 `instType=MARGIN` | 启动时交叉确认配置交易对对当前账户/实体可做 cross MARGIN，并读取 `tradeQuoteCcyList`；包含 USDT 时固定发送、空列表时省略、非空但不含 USDT 时 NOT_READY |
+| 账户可交易合约 | `GET /api/v5/account/instruments?instType=SPOT` 与 `instType=MARGIN` | 启动时确认 SPOT 可交易并将 MARGIN/USDT 能力分类为 `margin`，其余 SPOT-only 分类为 `spot`；两类新单均为 `tdMode=cross`，不存在失败回退 |
 | 行情/K 线 | Public `tickers`; Business `candle5m` | ticker 用 `last/askPx/bidPx`; candle 只收 `confirm=1` |
 | 新加坡日线 | `GET /api/v5/market/candles?...&bar=1D` | `1D` 是 UTC+8，不要误用 `1Dutc`；数组按 `[ts,o,h,l,c,vol,volCcy,volCcyQuote,confirm]` 解析，当日 K 可为 `confirm=0`，昨日 K 必须为 `confirm=1` |
 | 维护 | `GET /api/v5/system/status`; Public `status` | 仅系统维护，不能推导具体币种退市 |

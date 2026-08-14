@@ -2,7 +2,7 @@
 
 ## 一条 BUY fill 就是一条卖出任务
 
-每个 managed BUY fill 都按 `instId + tradeId` 幂等保存并直接承载自己的卖出状态与 `execution_mode`。managed BUY 包括本系统 BUY，以及管理起点之后配置交易对上的 ACCOUNT cross/cash SPOT/MARGIN BUY fill；不纳管 isolated fill：
+每个 managed BUY fill 都按 `instId + tradeId` 幂等保存并直接承载自己的卖出状态、实际 `execution_mode` 与语义 `execution_route`。managed BUY 包括本系统 BUY，以及管理起点之后配置交易对上的 ACCOUNT SPOT/MARGIN BUY fill；不纳管 isolated fill：
 
 ~~~text
 sell_time = fill_ts + hold_hours * 3,600,000 ms
@@ -93,14 +93,14 @@ planned_size = roundToStep(
 )
 ~~~
 
-所有 managed BUY 均按其持久化执行模式退出；cross 使用 `reduceOnly=true`，cash 不发送 `reduceOnly`：
+所有 managed BUY 均按其持久化路由退出；两类新单都使用 `tdMode=cross`，Margin 路由使用 `reduceOnly=true`，Spot-only 路由不发送 `reduceOnly`：
 
 ~~~text
 instId=<fill instrument>
 side=sell
 ordType=market
-tdMode=<fill.execution_mode: cross|cash>
-reduceOnly=<仅 cross 为 true；cash 省略>
+tdMode=<fill.execution_mode；新单固定 cross>
+reduceOnly=<仅 execution_route=margin 为 true；spot 省略>
 sz=<planned base currency quantity>
 clOrdId=<版本前缀 + 稳定哈希，不超过 32 位字母数字>
 tag=<固定 STRATEGY_TAG>
@@ -113,7 +113,7 @@ market sell 不发送 `posSide`、Futures-mode-only `ccy`、`tgtCcy` 或 `slippa
 ## 共享账户外部交易
 
 - `FUTURES/SWAP/OPTION` 订单和 fills 全部忽略，不创建任务、不平仓；其风险只通过账户级 `totalEq/adjEq/mgnRatio/max-avail-size` 影响后续 BUY。
-- 管理起点之后，配置交易对上 `tdMode=cross` 的所有 SPOT/MARGIN BUY fills 都按 `(inst_id,trade_id)` 进入同一种 managed BUY 模型；只用 `source=SYSTEM|ACCOUNT` 区分来源。使用真实 `fillTime + 该币种 hold_hours` 和 fillSz。ACCOUNT BUY 不创建伪造的 BUY `order_attempt`，也不倒推日限价或准入结果。`cash`/isolated 或无法确认属于 cross profile 的 fill 首版 fail closed、告警并忽略。
+- 管理起点之后，配置交易对上已确认的 SPOT/MARGIN BUY fills 都按 `(inst_id,trade_id)` 进入同一种 managed BUY 模型；只用 `source=SYSTEM|ACCOUNT` 区分来源。SYSTEM fill 从 attempt 继承冻结的路由，ACCOUNT fill 根据其已确认订单/instType 分类。使用真实 `fillTime + 该币种 hold_hours` 和 fillSz。ACCOUNT BUY 不创建伪造的 BUY `order_attempt`，也不倒推日限价或准入结果；isolated 或无法确认的 fill fail closed、告警并忽略。
 - 外部 BUY 一经纳管会立即计入本策略 exposure；若使本策略达到 3 倍硬线，只触发 BUY HALT/告警，不自动提前卖出。外部 isolated MARGIN、FUTURES/SWAP/OPTION BUY 仍忽略。
 - 配置交易对上的 ACCOUNT SELL fill 按 `(inst_id,trade_id)` 先统一保存为 PENDING，不因“当前还没看到 managed BUY”立即判为多余。系统先完成覆盖该 sell `fillTime` 的连续 REST fills 重叠回补，并要求相关 SPOT/MARGIN fills watermarks 的较小值已越过该时间；这样更早发生但更晚到达的 ACCOUNT BUY 会先入账，且不能用一个 instType 的水位代替另一个。若同 base 存在 PREPARED/SUBMITTED/UNKNOWN 系统退出 attempt，继续保持 PENDING。
 - 定义 `fill_order_key=(fillTime, numeric billId, tradeId)`。watermark 安全且没有活动系统退出 attempt 后，在同一 account/base 短事务锁内按 ACCOUNT SELL 的 fill_order_key 顺序处理，只向 `BUY fill_order_key <= ACCOUNT SELL fill_order_key` 的最早 managed BUY fills 分配 `min(fillSz, managed remaining)`，增加 `disposed_size`，再把 SELL fill 标记 APPLIED并保存 allocated_size；同毫秒成交不能只比较 fillTime。billId 缺失或非法时保持 PENDING、回补并告警，禁止猜顺序。只有到达连续 watermark 后仍超出 managed remaining 的部分才一次性忽略。任一 PENDING ACCOUNT SELL 会阻止同 base 创建新的 SYSTEM SELL/DELIST attempt，先触发回补和分配，避免外部卖出已经发生却又重复退出；watermark 长时间不健康必须告警。
@@ -154,14 +154,14 @@ DELIST 与普通 SELL 共用同一 base 资产的非终态订单约束：
 ## 必测不变量
 
 - 三条 BUY tradeId 产生三条独立 sell tasks，不创建 managed_position/group/items。
-- 管理起点之后配置交易对的外部 cross/cash BUY fill 会创建 managed SELL_WATCH；切换前 BUY、isolated BUY、永续和单纯余额变化不会创建任务。
+- 管理起点之后配置交易对的外部已确认 SPOT/MARGIN BUY fill 会创建 managed SELL_WATCH；切换前 BUY、isolated BUY、永续和单纯余额变化不会创建任务。
 - 所有 managed BUY 最终均以 `tdMode=cross, reduceOnly=true` 卖出；`reduceOnly` 不替代 managed remaining 和 reservation 数量保护。
 - 每条 fill 精确使用入账时冻结的 `fill_ts + hold_hours`；配置更新不改变旧 fill。
 - 每次 ticker 更新检查该 instId 所有到期 SELL_WATCH fills；重复/倒序事件不重复触发。
 - 命中后锁存；价格反弹、提交失败或 partial 都不会回到价格等待。
 - 所有 mutation HTTP 请求严格串行；同一 `(accountId, baseCcy)` 的 UNKNOWN/非终态退出还会阻止该 base 创建替代订单。
 - 单 fill 小于 minSz/0.1 USDT 时进入 `DUST_PENDING`，不与其他 fills 聚合；恢复可交易后直接继续退出而不重新等待价格。
-- market sell 使用 base `sz`，沿用持久化 `execution_mode`；cross 发送 `reduceOnly=true`，cash 省略，不发送 `tgtCcy/slippagePct`。
+- market sell 使用 base `sz`，沿用持久化 `execution_mode` 与 `execution_route`；Margin 路由发送 `reduceOnly=true`，Spot-only 路由省略，不发送 `tgtCcy/slippagePct`。
 - partial/UNKNOWN/重启不会重复卖出同一数量。
 - ACCOUNT SELL 的 WS/REST 重复事件和重启回看不会重复扣减；所有 ACCOUNT SELL 先 PENDING，等待连续 watermarks 和活动系统退出 attempt 终态后再按顺序分配。测试不得把这解释为能够阻止两个已提交订单在 OKX 同时成交。
 - 退市优先领取不会与普通 SELL 重叠，也不会卖出 managed remaining 之外的余额。

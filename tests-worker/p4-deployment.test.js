@@ -35,15 +35,15 @@ test("P4 REST baseline validates server, account, leverage and configured instru
   const rows = ["BTC-USDT", "SPOT-USDT"].map((instId) => ({ instId, state: "live", tickSz: "0.1", lotSz: "0.001", minSz: "0.001", baseCcy: instId.split("-")[0], quoteCcy: "USDT", uTime: "1" }));
   const rest = { syncServerTime: async () => {}, systemStatus: async () => [], publicInstruments: async () => rows, tickers: async () => rows.map((row) => ({ instId: row.instId, ts: "2", last: "100", askPx: "101", bidPx: "99" })), accountConfig: async () => [{ acctLv: "3", autoLoan: "true" }], accountInstruments: async (type) => type === "MARGIN" ? [{ instId: "BTC-USDT", state: "live", tradeQuoteCcyList: "USDT" }] : rows, leverageInfo: async () => [{ instId: "BTC-USDT", lever: "3" }], balance: async () => [{ totalEq: "100", adjEq: "99", uTime: "2" }] };
   const result = await runRestBaseline({ rest, instIds: ["BTC-USDT", "SPOT-USDT"], market: { updateInstrument: (row) => instruments.set(row.instId, row), updateTicker: () => {} }, account: { update: (row) => Boolean(capital = row) }, readyGate: { set: (name, value) => ready.set(name, value) }, clock: { nowMs: () => 3 } });
-  assert.equal(result.quoteCurrency.get("BTC-USDT"), "USDT"); assert.equal(result.executionModes.get("BTC-USDT"), "cross"); assert.equal(result.executionModes.get("SPOT-USDT"), "cash"); assert.equal(instruments.get("BTC-USDT").base, "BTC"); assert.equal(capital.totalEq, "100"); assert.equal(ready.get("account"), true); assert.equal(ready.get("instruments"), true);
+  assert.equal(result.quoteCurrency.get("BTC-USDT"), "USDT"); assert.equal(result.executionRoutes.get("BTC-USDT"), "margin"); assert.equal(result.executionRoutes.get("SPOT-USDT"), "spot"); assert.equal(instruments.get("BTC-USDT").base, "BTC"); assert.equal(capital.totalEq, "100"); assert.equal(ready.get("account"), true); assert.equal(ready.get("instruments"), true);
   await assert.rejects(runRestBaseline({ rest: { ...rest, systemStatus: async () => [{ state: "ongoing" }] }, instIds: ["BTC-USDT"], market: {}, account: {}, readyGate: {}, clock: { nowMs: () => 3 } }), /OKX_SERVICE_UNAVAILABLE/);
 });
 
 test("P5 route refresh atomically changes only future routing and removes unavailable instruments", async () => {
-  const executionModes = new Map([["OLD-USDT", "cross"]]); const quoteCurrencies = new Map([["OLD-USDT", "USDT"]]);
+  const executionRoutes = new Map([["OLD-USDT", "margin"]]); const quoteCurrencies = new Map([["OLD-USDT", "USDT"]]);
   const rest = { accountConfig: async () => [{ acctLv: "3", autoLoan: true }], accountInstruments: async (type) => type === "SPOT" ? [{ instId: "BTC-USDT", state: "live" }] : [] };
-  const counts = await refreshExecutionRoutes({ rest, instIds: ["BTC-USDT", "GONE-USDT"], executionModes, quoteCurrencies });
-  assert.deepEqual(counts, { cross: 0, cash: 1, unavailable: 1 }); assert.deepEqual([...executionModes], [["BTC-USDT", "cash"]]); assert.equal(quoteCurrencies.has("OLD-USDT"), false);
+  const counts = await refreshExecutionRoutes({ rest, instIds: ["BTC-USDT", "GONE-USDT"], executionRoutes, quoteCurrencies });
+  assert.deepEqual(counts, { margin: 0, spot: 1, unavailable: 1 }); assert.deepEqual([...executionRoutes], [["BTC-USDT", "spot"]]); assert.equal(quoteCurrencies.has("OLD-USDT"), false);
 });
 
 test("P4 preflight requires authorization, supplies required GET params and rejects mutations", async () => {

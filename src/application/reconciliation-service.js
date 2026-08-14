@@ -96,7 +96,10 @@ export class ReconciliationService {
   async ingestFill(tx, fill, order) {
     const managed = classifyManagedFill(fill, order, this.ownership);
     if (!managed) return false;
-    if (managed.source === "ACCOUNT" && order?.clOrdId && typeof this.orders.findByClOrdId === "function" && await this.orders.findByClOrdId(tx, order.clOrdId)) managed.source = "SYSTEM";
+    if (order?.clOrdId && typeof this.orders.findByClOrdId === "function") {
+      const attempt = await this.orders.findByClOrdId(tx, order.clOrdId);
+      if (attempt) { managed.source = "SYSTEM"; managed.executionMode = attempt.execution_mode ?? attempt.executionMode ?? managed.executionMode; managed.executionRoute = attempt.execution_route ?? attempt.executionRoute ?? managed.executionRoute; }
+    }
     const isBuy = managed.side === "buy";
     if (isBuy && !this.ownership.holdHoursByInst?.[managed.instId]) { emit(this.telemetry, { type: "account_fill", reason: "STRATEGY_CONFIG_MISSING", instId: managed.instId }); return false; }
     const baseCcy = managed.instId.split("-")[0];
@@ -105,6 +108,7 @@ export class ReconciliationService {
       accountId: this.ownership.accountId, instId: managed.instId, baseCcy, tradeId: managed.tradeId, billId: managed.billId,
       source: managed.source, side: isBuy ? "BUY" : "SELL", fillSize: managed.sz, fillTime: managed.fillTime,
       executionMode: managed.executionMode,
+      executionRoute: managed.executionRoute,
       ...(isBuy ? { holdHours: this.ownership.holdHoursByInst?.[managed.instId], strategyConfigHash: this.ownership.configHash, sellTime: Number(managed.fillTime) + Number(this.ownership.holdHoursByInst?.[managed.instId] ?? 0) * 3_600_000, sellState: "WAITING" } : { allocationState: "PENDING" }),
     });
     if (managed.source === "ACCOUNT" && isBuy) this.onAccountBuy(managed.instId);

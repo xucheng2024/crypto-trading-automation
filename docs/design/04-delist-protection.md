@@ -1,6 +1,6 @@
 # 04 Instrument Protection 与退市
 
-本模块只处理配置的 `BASE-USDT` 买入资格和 managed BUY fills 的退出；managed BUY 同时包含系统和管理起点后的 ACCOUNT cross/cash BUY。共享账户其他余额、订单和衍生品仓位不属于本模块；退出沿用 fill 持久化的 `execution_mode`，不实现 isolated 分支。
+本模块只处理配置的 `BASE-USDT` 买入资格和 managed BUY fills 的退出；managed BUY 同时包含系统和管理起点后的 ACCOUNT SPOT/MARGIN BUY。共享账户其他余额、订单和衍生品仓位不属于本模块；退出沿用 fill 持久化的 `execution_mode` 与 `execution_route`，不实现 isolated 分支。
 
 ## 信号优先级
 

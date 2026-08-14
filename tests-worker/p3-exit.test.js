@@ -19,14 +19,14 @@ test("P3 exits submit immediate five-base batches with DELIST priority and no sh
       markSubmitted: async (_tx, id) => { attempts.get(id).state = "SUBMITTED"; }, markUnknown: async (_tx, id) => { attempts.get(id).state = "UNKNOWN"; }, markNotCreated: async (_tx, id) => { attempts.get(id).state = "NOT_CREATED"; },
     },
     transport: {
-      maxAvailSize: async (ids, options) => { if (options.tdMode === "cross") assert.equal(options.reduceOnly, true); else assert.deepEqual(options, { tdMode: "cash" }); return ids.split(",").map((instId) => ({ instId, availSell: "2" })); },
+      maxAvailSize: async (ids, options) => { assert.equal(options.tdMode, "cross"); return ids.split(",").map((instId) => ({ instId, availSell: "2" })); },
       submitBatchOrders: async (rows) => { payloads.push(rows); return rows.map((row, index) => ({ clOrdId: row.clOrdId, status: index === 0 ? "UNKNOWN" : "SUBMITTED", ordId: String(index) })); },
     },
   });
   for (let index = 0; index < 20; index += 1) {
     const base = `C${String(index).padStart(2, "0")}`; const instId = `${base}-USDT`;
     market.updateInstrument({ instId, ts: 1, state: "live", tickSz: "0.1", lotSz: "0.1", minSz: "0.1", base });
-    coordinator.enqueue({ intent: "SELL", instId, baseCcy: base, sourceBuyTradeId: `buy-${base}`, remainingSize: "1", availableBase: "100", bidPx: "10", fillVersion: 1, sellTime: 1, ...(index === 0 ? { executionMode: "cash" } : {}) });
+    coordinator.enqueue({ intent: "SELL", instId, baseCcy: base, sourceBuyTradeId: `buy-${base}`, remainingSize: "1", availableBase: "100", bidPx: "10", fillVersion: 1, sellTime: 1, ...(index === 0 ? { executionRoute: "spot" } : {}) });
   }
   coordinator.enqueue({ intent: "DELIST", instId: "C19-USDT", baseCcy: "C19", sourceBuyTradeId: "delist-buy", remainingSize: "1", availableBase: "100", bidPx: "10", fillVersion: 1, sellTime: 1 });
   assert.equal((await coordinator.drainOnce()).count, 1, "DELIST preempts queued SELL");
@@ -34,7 +34,7 @@ test("P3 exits submit immediate five-base batches with DELIST priority and no sh
   assert.deepEqual(payloads.map((batch) => batch.length), [1, 5, 5, 5, 5]);
   for (const batch of payloads.flat()) {
     assert.equal(batch.side, "sell"); assert.equal(batch.ordType, "market"); assert.equal(batch.sz, "1");
-    if (batch.instId === "C00-USDT") { assert.equal(batch.tdMode, "cash"); assert.equal("reduceOnly" in batch, false); }
+    if (batch.instId === "C00-USDT") { assert.equal(batch.tdMode, "cross"); assert.equal("reduceOnly" in batch, false); }
     else { assert.equal(batch.tdMode, "cross"); assert.equal(batch.reduceOnly, true); }
   }
   assert.equal([...attempts.values()].filter((row) => row.state === "UNKNOWN").length, 5, "UNKNOWN keeps its own reservation and no replacement is enqueued");

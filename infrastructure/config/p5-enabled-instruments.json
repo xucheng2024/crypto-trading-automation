@@ -2,11 +2,11 @@
   "schema_version": 2,
   "observed_at": "2026-08-14T13:12:04+08:00",
   "source": "OKX read-only account SPOT/MARGIN instrument endpoints plus p5-strategy.json protection state",
-  "routing": "MARGIN_LIVE prefers cross; otherwise SPOT_LIVE uses cash; blacklisted instruments are excluded",
+  "routing": "Under acctLv=3 all system orders use tdMode=cross; MARGIN_LIVE routes may auto-borrow, otherwise SPOT_LIVE routes use owned funds only; blacklisted instruments are excluded",
   "configured_count": 153,
   "enabled_count": 146,
-  "cross_count": 96,
-  "cash_count": 50,
+  "margin_count": 96,
+  "spot_count": 50,
   "enabled": [
     "1INCH-USDT", "AAVE-USDT", "ACH-USDT", "ADA-USDT", "AEVO-USDT", "ALGO-USDT", "APE-USDT", "API3-USDT",
     "APT-USDT", "ARB-USDT", "ATOM-USDT", "AVAX-USDT", "AXS-USDT", "BABYDOGE-USDT", "BANANA-USDT", "BAND-USDT",
@@ -29,7 +29,7 @@
     "ZIL-USDT", "ZRX-USDT"
   ],
   "routes": {
-    "cross": [
+    "margin": [
       "1INCH-USDT", "AAVE-USDT", "ACH-USDT", "ADA-USDT", "ALGO-USDT", "APE-USDT", "API3-USDT", "APT-USDT",
       "ARB-USDT", "ATOM-USDT", "AVAX-USDT", "AXS-USDT", "BAT-USDT", "BCH-USDT", "BETH-USDT", "BIGTIME-USDT",
       "BIO-USDT", "BLUR-USDT", "BNB-USDT", "BONK-USDT", "BTC-USDT", "CELO-USDT", "CFX-USDT", "CHZ-USDT",
@@ -43,7 +43,7 @@
       "SUI-USDT", "SUSHI-USDT", "TIA-USDT", "TRB-USDT", "TRX-USDT", "TURBO-USDT", "UMA-USDT", "UNI-USDT",
       "WLD-USDT", "XLM-USDT", "XRP-USDT", "YFI-USDT", "YGG-USDT", "ZETA-USDT", "ZIL-USDT", "ZRX-USDT"
     ],
-    "cash": [
+    "spot": [
       "AEVO-USDT", "BABYDOGE-USDT", "BANANA-USDT", "BAND-USDT", "BNT-USDT", "CATI-USDT", "CELR-USDT", "CFG-USDT",
       "CTC-USDT", "DEGEN-USDT", "DGB-USDT", "DOGS-USDT", "ELF-USDT", "FET-USDT", "FLR-USDT", "G-USDT",
       "GLM-USDT", "GOAT-USDT", "ICX-USDT", "ID-USDT", "ILV-USDT", "JOE-USDT", "KAIA-USDT", "KNC-USDT",

@@ -14,9 +14,9 @@ if (text.includes("maintenanceVaultRead") || text.includes("maintenance") && tex
 if (text.includes("allOf: []") || !text.includes("metricName:") || !text.includes("threshold:")) throw new Error("metric alerts must define concrete criteria");
 for (const invalid of ["SNATConnectionCount", "TotalPullCount", "threshold > 0"]) if (text.includes(invalid)) throw new Error(`invalid alert rule retained: ${invalid}`);
 if (instrumentArtifact.enabled_count !== instrumentArtifact.enabled.length || new Set(instrumentArtifact.enabled).size !== instrumentArtifact.enabled.length) throw new Error("P5 enabled instrument artifact count/uniqueness mismatch");
-const cross = instrumentArtifact.routes?.cross ?? []; const cash = instrumentArtifact.routes?.cash ?? [];
-if (instrumentArtifact.cross_count !== cross.length || instrumentArtifact.cash_count !== cash.length) throw new Error("P5 route artifact count mismatch");
-if (new Set([...cross, ...cash]).size !== instrumentArtifact.enabled.length || [...cross, ...cash].some((instId) => !instrumentArtifact.enabled.includes(instId))) throw new Error("P5 cross/cash routes must exactly partition enabled instruments");
+const margin = instrumentArtifact.routes?.margin ?? []; const spot = instrumentArtifact.routes?.spot ?? [];
+if (instrumentArtifact.margin_count !== margin.length || instrumentArtifact.spot_count !== spot.length) throw new Error("P5 route artifact count mismatch");
+if (new Set([...margin, ...spot]).size !== instrumentArtifact.enabled.length || [...margin, ...spot].some((instId) => !instrumentArtifact.enabled.includes(instId))) throw new Error("P5 margin/spot routes must exactly partition enabled instruments");
 const blacklisted = new Set(strategyArtifact.instrument_protection.filter((row) => row.state === "BLACKLISTED").map((row) => row.inst_id));
 if (instrumentArtifact.enabled.some((instId) => blacklisted.has(instId))) throw new Error("P5 enabled instrument artifact contains a blacklisted instrument");
 const localParameters = await readFile("infrastructure/bicep/parameters.p5.json", "utf8").then(JSON.parse).catch(() => null);

@@ -57,9 +57,9 @@ test("P2 BUY coordinator uses one fake batch, persists item-independent outcomes
     async markNotCreated(_tx, id) { Object.assign(attempts.get(id), { state: "NOT_CREATED", reservationState: "RELEASED" }); },
     async markSettled(_tx, id) { Object.assign(attempts.get(id), { state: "SETTLED" }); },
   };
-  const coordinator = new OrderCoordinator({ transaction: async (fn) => fn({}), orders, state: { insertFill: async () => {} }, ownerGuard: { isHeld: () => true }, readyGate: ready(), market, account, mode: () => "FULL", executionMode: (instId) => instId === "SOL-USDT" ? "cash" : "cross", clock: now, config, slo, telemetry: (event) => events.push(event), transport: {
-    maxAvailSize: async (ids, options) => { assert.ok(["cross", "cash"].includes(options.tdMode)); return ids.split(",").map((instId) => ({ instId, availBuy: "100" })); },
-    submitBatchOrders: async (payload) => { sends += 1; assert.equal(payload.length, 3); assert.ok(payload.filter((item) => item.instId !== "SOL-USDT").every((item) => item.tdMode === "cross" && item.ordType === "ioc" && item.tradeQuoteCcy === "USDT")); const cashOrder = payload.find((item) => item.instId === "SOL-USDT"); assert.equal(cashOrder.tdMode, "cash"); assert.equal("tradeQuoteCcy" in cashOrder, false); return [{ clOrdId: payload[0].clOrdId, status: "SUBMITTED", ordId: "1" }, { clOrdId: payload[1].clOrdId, status: "NOT_CREATED", reason: "rejected" }, { clOrdId: payload[2].clOrdId, status: "UNKNOWN", reason: "timeout" }]; },
+  const coordinator = new OrderCoordinator({ transaction: async (fn) => fn({}), orders, state: { insertFill: async () => {} }, ownerGuard: { isHeld: () => true }, readyGate: ready(), market, account, mode: () => "FULL", executionRoute: (instId) => instId === "SOL-USDT" ? "spot" : "margin", clock: now, config, slo, telemetry: (event) => events.push(event), transport: {
+    maxAvailSize: async (ids, options) => { assert.equal(options.tdMode, "cross"); return ids.split(",").map((instId) => ({ instId, availBuy: "100" })); },
+    submitBatchOrders: async (payload) => { sends += 1; assert.equal(payload.length, 3); assert.ok(payload.filter((item) => item.instId !== "SOL-USDT").every((item) => item.tdMode === "cross" && item.ordType === "ioc" && item.tradeQuoteCcy === "USDT")); const spotOrder = payload.find((item) => item.instId === "SOL-USDT"); assert.equal(spotOrder.tdMode, "cross"); assert.equal("tradeQuoteCcy" in spotOrder, false); return [{ clOrdId: payload[0].clOrdId, status: "SUBMITTED", ordId: "1" }, { clOrdId: payload[1].clOrdId, status: "NOT_CREATED", reason: "rejected" }, { clOrdId: payload[2].clOrdId, status: "UNKNOWN", reason: "timeout" }]; },
   } });
   for (const instId of ["BTC-USDT", "ETH-USDT", "SOL-USDT"]) {
     if (instId !== "BTC-USDT") { market.updateInstrument({ instId, ts: 1, state: "live", tickSz: "0.1", lotSz: "0.001", minSz: "0.001", base: instId.split("-")[0], version: 1 }); market.updateTicker({ instId, ts: 2, last: "95", askPx: "95", bidPx: "94" }); market.updateCandle({ instId, ts: 1, open: "90", low: "89", confirm: true }); }
@@ -82,20 +82,20 @@ test("P2 BUY final guard releases PREPARED reservation when owner, mode, READY, 
   assert.equal((await coordinator.drainOnce()).reason, "FINAL_GUARD"); assert.equal(sends, 0); assert.equal([...attempts.values()][0].reservationState, "RELEASED");
 });
 
-test("P5 route refresh cannot change a BUY mode between availability and submission", async () => {
+test("P5 route refresh cannot change a BUY route between availability and submission", async () => {
   const now = clock(10); const market = setupMarket(now); const account = new AccountCapitalSnapshot({ clock: now }); account.update({ ts: 1, totalEq: "150", adjEq: "150" });
-  let route = "cross"; let quote = "USDT";
-  const coordinator = new OrderCoordinator({ transaction: async (fn) => fn({}), orders: {}, state: {}, ownerGuard: { isHeld: () => true }, readyGate: ready(), market, account, mode: () => "FULL", executionMode: () => route, tradeQuoteCurrency: () => quote, clock: now, config,
-    transport: { maxAvailSize: async () => { route = "cash"; quote = null; return [{ instId: "BTC-USDT", availBuy: "100" }]; } },
+  let route = "margin"; let quote = "USDT";
+  const coordinator = new OrderCoordinator({ transaction: async (fn) => fn({}), orders: {}, state: {}, ownerGuard: { isHeld: () => true }, readyGate: ready(), market, account, mode: () => "FULL", executionRoute: () => route, tradeQuoteCurrency: () => quote, clock: now, config,
+    transport: { maxAvailSize: async () => { route = "spot"; quote = null; return [{ instId: "BTC-USDT", availBuy: "100" }]; } },
   });
-  const prepared = await coordinator.prepareBuys([{ intent: "BUY", instId: "BTC-USDT", generation: 0, eligibleSince: 1, strategyDay: "2026-08-14", dailyLimitPrice: "100", holdHours: "24", configHash: "cfg", managedExposure: "0" }]);
-  assert.equal(prepared[0].executionMode, "cross"); assert.equal(prepared[0].tradeQuoteCcy, "USDT"); assert.equal(route, "cash");
+  const prepared = await coordinator.prepareBuys([{ intent: "BUY", instId: "BTC-USDT", generation: 0, eligibleSince: 1, strategyDay: "2026-08-14", dailyLimitPrice: "100", holdHours: "24", configHash: "cfg", managedExposure: "0", executionMode: "cash" }]);
+  assert.equal(prepared[0].executionMode, "cross"); assert.equal(prepared[0].executionRoute, "margin"); assert.equal(prepared[0].tradeQuoteCcy, "USDT"); assert.equal(route, "spot");
 });
 
-test("P5 zero cross availability never falls through to a second cash order for the same instrument", async () => {
+test("P5 zero margin-route availability never retries the same instrument as a spot route", async () => {
   const now = clock(10); const market = setupMarket(now); const account = new AccountCapitalSnapshot({ clock: now }); account.update({ ts: 1, totalEq: "150", adjEq: "150" });
   const modes = []; let submissions = 0;
-  const coordinator = new OrderCoordinator({ transaction: async (fn) => fn({}), orders: {}, state: {}, ownerGuard: { isHeld: () => true }, readyGate: ready(), market, account, mode: () => "FULL", executionMode: () => "cross", clock: now, config,
+  const coordinator = new OrderCoordinator({ transaction: async (fn) => fn({}), orders: {}, state: {}, ownerGuard: { isHeld: () => true }, readyGate: ready(), market, account, mode: () => "FULL", executionRoute: () => "margin", clock: now, config,
     transport: { maxAvailSize: async (_ids, options) => { modes.push(options.tdMode); return [{ instId: "BTC-USDT", availBuy: "0" }]; }, submitBatchOrders: async () => { submissions += 1; return []; } },
   });
   coordinator.enqueue({ intent: "BUY", instId: "BTC-USDT", generation: 0, eligibleSince: 1, strategyDay: "2026-08-14", dailyLimitPrice: "100", holdHours: "24", configHash: "cfg", managedExposure: "0" });
@@ -119,7 +119,7 @@ test("P2 recovery paginates fills/history, deduplicates tradeId, persists waterm
   assert.equal(outcome.outcome, "RETAIN_UNKNOWN");
 });
 
-test("P2 ACCOUNT ledger admits configured cross and cash spot/margin fills and stops later SYSTEM BUY", async () => {
+test("P2 ACCOUNT ledger preserves confirmed mode and derives spot/margin route before stopping later SYSTEM BUY", async () => {
   const stored = []; const stopped = []; const service = new ReconciliationService({ ownerGuard: { isHeld: () => true }, readyGate: new ReadyGate(), safetyWaitMs: 0, ownership: { accountId: "a", managedAfter: 100, enabledInstIds: ["BTC-USDT"], holdHoursByInst: { "BTC-USDT": "24" }, configHash: "cfg" }, onAccountBuy: (instId) => stopped.push(instId), state: { insertFill: async (_tx, row) => stored.push(row) }, orders: {}, transport: {} });
   const crossBuy = { instType: "SPOT", instId: "BTC-USDT", side: "buy", tradeId: "a", fillTime: "101", billId: "1", fillSz: "1" };
   assert.equal(await service.ingestFill({}, crossBuy, { tdMode: "cross", clOrdId: "manual", tag: "other" }), true);
@@ -127,7 +127,7 @@ test("P2 ACCOUNT ledger admits configured cross and cash spot/margin fills and s
   assert.equal(await service.ingestFill({}, { ...crossBuy, tradeId: "old", fillTime: "99" }, { tdMode: "cross" }), false);
   assert.equal(await service.ingestFill({}, { ...crossBuy, tradeId: "swap", instType: "SWAP" }, { tdMode: "cross" }), false);
   assert.equal(await service.ingestFill({}, { ...crossBuy, tradeId: "other", instId: "ETH-USDT" }, { tdMode: "cross" }), false);
-  assert.deepEqual(stopped, ["BTC-USDT", "BTC-USDT"]); assert.deepEqual(stored.map((row) => [row.source, row.side, row.tradeId, row.executionMode]), [["ACCOUNT", "BUY", "a", "cross"], ["ACCOUNT", "BUY", "cash", "cash"]]);
+  assert.deepEqual(stopped, ["BTC-USDT", "BTC-USDT"]); assert.deepEqual(stored.map((row) => [row.source, row.side, row.tradeId, row.executionMode, row.executionRoute]), [["ACCOUNT", "BUY", "a", "cross", "spot"], ["ACCOUNT", "BUY", "cash", "cash", "spot"]]);
 });
 
 test("P2 boundaries retain decimal equity, fee reservation, leverage gates, daily-gain edge, and tick changes", () => {

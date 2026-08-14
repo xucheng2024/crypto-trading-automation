@@ -49,7 +49,7 @@ export function validateAccountProfile({ config, spotInstruments = [], marginIns
   const spot = new Map(spotInstruments.map((row) => [row.instId, row]));
   const margin = new Map(marginInstruments.map((row) => [row.instId, row]));
   const quoteCurrency = new Map();
-  const executionModes = new Map();
+  const executionRoutes = new Map();
   const unavailable = [];
   for (const instId of enabledInstIds) {
     const spotRow = spot.get(instId);
@@ -61,14 +61,14 @@ export function validateAccountProfile({ config, spotInstruments = [], marginIns
     const currencies = String(marginRow?.tradeQuoteCcyList || "").split(",").filter(Boolean);
     const marginUsable = marginRow && (!marginRow.state || marginRow.state === "live") && (!currencies.length || currencies.includes("USDT"));
     if (!marginUsable) {
-      executionModes.set(instId, "cash");
+      executionRoutes.set(instId, "spot");
       quoteCurrency.set(instId, null);
       continue;
     }
-    executionModes.set(instId, "cross");
+    executionRoutes.set(instId, "margin");
     quoteCurrency.set(instId, currencies.length ? "USDT" : null);
   }
-  return { ready: true, quoteCurrency, executionModes, unavailable };
+  return { ready: true, quoteCurrency, executionRoutes, unavailable };
 }
 
 export function classifyManagedFill(fill, order, { managedAfter, enabledInstIds, systemClOrdIdPrefix, strategyTag, attemptClOrdIds = [] }) {
@@ -76,7 +76,7 @@ export function classifyManagedFill(fill, order, { managedAfter, enabledInstIds,
   if (Number(fill.fillTime) < Number(managedAfter) || !["cross", "cash"].includes(order?.tdMode)) return null;
   const inLedger = Boolean(order?.clOrdId && (attemptClOrdIds instanceof Set ? attemptClOrdIds.has(order.clOrdId) : attemptClOrdIds.includes(order.clOrdId)));
   const ownedPrefixAndTag = Boolean(order?.clOrdId && systemClOrdIdPrefix && strategyTag && order.clOrdId.startsWith(systemClOrdIdPrefix) && order.tag === strategyTag);
-  return { source: inLedger || ownedPrefixAndTag ? "SYSTEM" : "ACCOUNT", instId: fill.instId, tradeId: fill.tradeId, side: fill.side, fillTime: fill.fillTime, billId: fill.billId, sz: fill.fillSz, executionMode: order.tdMode };
+  return { source: inLedger || ownedPrefixAndTag ? "SYSTEM" : "ACCOUNT", instId: fill.instId, tradeId: fill.tradeId, side: fill.side, fillTime: fill.fillTime, billId: fill.billId, sz: fill.fillSz, executionMode: order.tdMode, executionRoute: order.tdMode === "cash" || fill.instType === "SPOT" ? "spot" : "margin" };
 }
 
 // Compatibility export for callers compiled against the original cross-only name.
