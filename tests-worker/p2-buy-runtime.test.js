@@ -92,6 +92,16 @@ test("P5 route refresh cannot change a BUY mode between availability and submiss
   assert.equal(prepared[0].executionMode, "cross"); assert.equal(prepared[0].tradeQuoteCcy, "USDT"); assert.equal(route, "cash");
 });
 
+test("P5 zero cross availability never falls through to a second cash order for the same instrument", async () => {
+  const now = clock(10); const market = setupMarket(now); const account = new AccountCapitalSnapshot({ clock: now }); account.update({ ts: 1, totalEq: "150", adjEq: "150" });
+  const modes = []; let submissions = 0;
+  const coordinator = new OrderCoordinator({ transaction: async (fn) => fn({}), orders: {}, state: {}, ownerGuard: { isHeld: () => true }, readyGate: ready(), market, account, mode: () => "FULL", executionMode: () => "cross", clock: now, config,
+    transport: { maxAvailSize: async (_ids, options) => { modes.push(options.tdMode); return [{ instId: "BTC-USDT", availBuy: "0" }]; }, submitBatchOrders: async () => { submissions += 1; return []; } },
+  });
+  coordinator.enqueue({ intent: "BUY", instId: "BTC-USDT", generation: 0, eligibleSince: 1, strategyDay: "2026-08-14", dailyLimitPrice: "100", holdHours: "24", configHash: "cfg", managedExposure: "0" });
+  assert.equal((await coordinator.drainOnce()).reason, "NO_ELIGIBLE"); assert.deepEqual(modes, ["cross"]); assert.equal(submissions, 0);
+});
+
 test("P2 recovery paginates fills/history, deduplicates tradeId, persists watermarks, and keeps a lone NOT_FOUND UNKNOWN", async () => {
   const stored = []; const watermarks = []; const calls = [];
   const page = (name) => async (instType, params = {}) => {

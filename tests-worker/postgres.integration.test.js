@@ -161,6 +161,20 @@ test("temporary PostgreSQL enforces P1-B invariants", { timeout: 60_000 }, async
       }
     });
 
+    await t.test("cash then margin and margin then cash share the same 2.95 exposure ceiling", async () => {
+      const cases = [
+        { accountId: "cash-first", first: "cash", second: "cross" },
+        { accountId: "cross-first", first: "cross", second: "cash" },
+      ];
+      for (const row of cases) {
+        assert.equal((await tx(db.admin, (client) => orders.reserveBuy(client, buy(`${row.accountId}-one`, { accountId: row.accountId, instId: "BTC-USDT", baseCcy: "BTC", exposure: "100", executionMode: row.first }), admission("295")))).authorized, true);
+        assert.equal((await tx(db.admin, (client) => orders.reserveBuy(client, buy(`${row.accountId}-two`, { accountId: row.accountId, instId: "ETH-USDT", baseCcy: "ETH", exposure: "195", executionMode: row.second }), admission("295")))).authorized, true);
+        assert.deepEqual(await tx(db.admin, (client) => orders.reserveBuy(client, buy(`${row.accountId}-three`, { accountId: row.accountId, instId: "SOL-USDT", baseCcy: "SOL", exposure: "0.01", executionMode: "cash" }), admission("295"))), { authorized: false, reason: "EXPOSURE_LIMIT" });
+        const modes = (await db.admin.query("SELECT execution_mode FROM order_attempts WHERE account_id=$1 ORDER BY id", [row.accountId])).rows.map((item) => item.execution_mode);
+        assert.deepEqual(modes, [row.first, row.second]);
+      }
+    });
+
     await t.test("numeric admission never converts through JavaScript Number", async () => {
       assert.deepEqual(await tx(db.admin, (client) => orders.reserveBuy(client, buy("precise-one", { accountId: "precise", exposure: "9007199254740993.00000000" }), admission("9007199254740993.00000001"))), { authorized: true });
       assert.deepEqual(await tx(db.admin, (client) => orders.reserveBuy(client, buy("precise-two", { accountId: "precise", instId: "ETH-USDT", baseCcy: "ETH", exposure: "0.00000002" }), admission("9007199254740993.00000001"))), { authorized: false, reason: "EXPOSURE_LIMIT" });
