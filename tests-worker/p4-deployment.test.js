@@ -16,6 +16,7 @@ import { EntraPostgresPool, AZURE_POSTGRES_SCOPE } from "../src/infrastructure/p
 import { createApplicationInsightsTelemetry, isImportantTelemetry } from "../src/infrastructure/azure/application-insights-telemetry.js";
 import { EngineRecurringWork } from "../src/application/engine-recurring-work.js";
 import { EngineWorkLoop } from "../src/application/engine-work-loop.js";
+import { ReadyGate } from "../src/application/trading-engine.js";
 
 test("P4 runtime validates safety timing and defaults OFF", () => {
   const config = loadAzureRuntimeConfig({});
@@ -205,19 +206,21 @@ test("P4 baseline failure releases the owner and never starts WS", async () => {
 });
 
 test("P4 production composition routes fake WS baselines into projections and keeps account fail-closed", async () => {
+  const readyGate = new ReadyGate();
   const sockets = []; const socketFactory = () => {
     const listeners = new Map(); const socket = { sent: [], addEventListener(name, fn) { listeners.set(name, fn); }, send(value) { this.sent.push(JSON.parse(value)); }, close() { listeners.get('close')?.(); }, emit(name, data) { listeners.get(name)?.(name === 'message' ? { data: JSON.stringify(data) } : {}); } };
     sockets.push(socket); return socket;
   };
   const ownerGuard = { held: false, isHeld() { return this.held; }, onLost: () => () => {}, acquire: async () => (ownerGuard.held = true), release: async () => { ownerGuard.held = false; } };
   const composed = await composeProductionRuntime({ TRADING_MODE: 'EXIT_ONLY', OKX_INSTRUMENTS: 'BTC-USDT', KEY_VAULT_URI: 'https://vault.example', POSTGRES_URL: 'postgresql://host/db' }, {
-    socketFactory, ownerGuard, ownerClient: {}, keyVault: { readOkxCredentials: async () => ({ apiKey: 'a', secretKey: 'b', passphrase: 'c' }) },
+    socketFactory, ownerGuard, ownerClient: {}, readyGate, keyVault: { readOkxCredentials: async () => ({ apiKey: 'a', secretKey: 'b', passphrase: 'c' }) },
     pool: { query: async () => ({ rows: [{ attempts: 'order_attempts', fills: 'filled_orders', watermarks: 'sync_watermarks' }] }), transaction: async (fn) => fn({}), end: async () => {} },
-    reconciliation: { recover: async () => ({ ready: false }) }, baseline: async () => {}, orderConfig: { strategyTag: 'azure', orderVersion: 'v1' },
+    reconciliation: { recover: async () => ({ ready: false }) }, baseline: async () => readyGate.set('instruments', true), orderConfig: { strategyTag: 'azure', orderVersion: 'v1' },
   });
   try {
     await composed.start(); sockets.forEach((socket) => socket.emit('open'));
     await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(composed.readyGate.snapshot().dependencies.instruments, true);
     // public ACKs: ticker, instruments and status; business has one candle ACK.
     for (const arg of [{ channel: 'tickers', instId: 'BTC-USDT' }, { channel: 'instruments', instType: 'SPOT' }, { channel: 'status' }]) sockets[0].emit('message', { event: 'subscribe', code: '0', arg });
     sockets[1].emit('message', { event: 'login', code: '0' });

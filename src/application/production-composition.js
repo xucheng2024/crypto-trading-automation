@@ -93,8 +93,9 @@ export async function composeProductionRuntime(env, injected = {}) {
   if (!injected.ws && !instIds.length) throw new Error("OKX_INSTRUMENTS_REQUIRED");
   const instrumentBaseline = new Set();
   // Subscription ACKs never establish account readiness. A valid account
-  // observation is required. Likewise every configured instrument needs a
-  // usable snapshot before the instrument baseline can open the READY gate.
+  // observation is required. The REST baseline establishes instrument
+  // readiness; public WS freshness is a separate gate, so a reconnect must
+  // not discard already validated static instrument metadata.
   const observePublic = (row) => {
     if (row.type === "ticker") engine.receiveTicker(row);
     else if (row.type === "instrument") {
@@ -105,7 +106,7 @@ export async function composeProductionRuntime(env, injected = {}) {
   };
   const observePrivate = (row) => { if (row.type === "account" && account.update(row)) readyGate.set("account", true); };
   const observeBusiness = (row) => { if (row.type === "candle5m") engine.receiveCandle(row); };
-  const ws = injected.ws ?? { public: new OkxPublicWsClient({ instIds, socketFactory, profile, clock: runtime.clock, onObservation: observePublic, onState: (s) => { readyGate.set("public", s.fresh); if (!s.fresh) { instrumentBaseline.clear(); readyGate.set("instruments", false); } } }), private: new OkxPrivateWsClient({ socketFactory, credentials, profile, clock: runtime.clock, onObservation: observePrivate, onState: (s) => readyGate.set("private", s.fresh) }), business: new OkxBusinessWsClient({ instIds, socketFactory, profile, clock: runtime.clock, onObservation: observeBusiness, onState: (s) => readyGate.set("business", s.fresh) }) };
+  const ws = injected.ws ?? { public: new OkxPublicWsClient({ instIds, socketFactory, profile, clock: runtime.clock, onObservation: observePublic, onState: (s) => readyGate.set("public", s.fresh) }), private: new OkxPrivateWsClient({ socketFactory, credentials, profile, clock: runtime.clock, onObservation: observePrivate, onState: (s) => readyGate.set("private", s.fresh) }), business: new OkxBusinessWsClient({ instIds, socketFactory, profile, clock: runtime.clock, onObservation: observeBusiness, onState: (s) => readyGate.set("business", s.fresh) }) };
   const migrationCheck = injected.migrationCheck ?? (async () => {
     const result = await pool.query(`SELECT to_regclass('public.order_attempts') AS attempts, to_regclass('public.filled_orders') AS fills,
       to_regclass('public.sync_watermarks') AS watermarks,
