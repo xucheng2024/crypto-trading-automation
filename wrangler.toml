@@ -3,7 +3,7 @@ main = "src/index.js"
 compatibility_date = "2026-08-03"
 
 [vars]
-TRADING_ENABLED = "true"
+TRADING_ENABLED = "false"
 OKX_TESTNET = "false"
 OKX_MIN_USD_VALUE = "0.01"
 # Conservative per-task pacing for OKX reads; scheduled jobs are serialized.
@@ -26,18 +26,9 @@ tag = "v1"
 new_sqlite_classes = ["CronDeduplicator"]
 
 [triggers]
-crons = [
-  # 每5分钟执行: monitor_delist + cancel_pending_limits + fetch_filled_orders (错开整点，避免与15分钟冲突)
-  "1,6,11,16,21,26,31,36,41,46,51,56 * * * *",
-  # 每15分钟执行: auto_sell_orders (整点)
-  "0,15,30,45 * * * *",
-  # 每天00:10 SGT = 16:10 UTC - 强制执行一次 DB-backed fetch
-  "10 16 * * *",
-  # 每天23:55 SGT = 15:55 UTC - 触发 GitHub Action 取消 buy trigger
-  "55 15 * * *",
-  # 每天00:05 SGT = 16:05 UTC - 触发 GitHub Action 重建 buy trigger
-  "5 16 * * *",
-]
+# Legacy scheduling is intentionally disabled before the Azure OFF cutover.
+# Keep the Worker and D1 for rollback/audit, but do not recreate these crons.
+crons = []
 
 # 密钥配置 (需要在Cloudflare Dashboard中设置)
 # OKX_API_KEY / OKX_SECRET_KEY / OKX_PASSPHRASE must be Worker secrets.
