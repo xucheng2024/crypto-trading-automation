@@ -46,4 +46,6 @@ jobs:
       - run: npm test
       - run: npm run test:iac
       - run: npm run test:container
-      - run: npm run migrate:rehearsal
+      # `npm test` already executes the real PostgreSQL integration suite;
+      # keep the distinct migration report without starting that suite twice.
+      - run: node scripts/migration-rehearsal.mjs
