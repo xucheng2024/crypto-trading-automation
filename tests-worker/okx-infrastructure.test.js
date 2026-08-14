@@ -105,7 +105,7 @@ function fakeTimers() {
 test("P1 Public WS requires every ACK, normalizes status, permits same-time corrections, isolates watermarks, and reconnects on 64008", () => {
   let now = 0; const sockets = []; const observations = []; const states = []; const timers = fakeTimers();
   const client = new OkxPublicWsClient({ instIds: ["BTC-USDT", "ETH-USDT"], socketFactory: () => { const socket = new FakeSocket(); sockets.push(socket); return socket; }, clock: { nowMs: () => now }, timers, random: () => 0.5, onObservation: (event) => observations.push(event), onState: (state) => states.push(state) });
-  const ack = (socket, arg) => socket.emit("message", JSON.stringify({ event: "subscribe", code: "0", arg }));
+  const ack = (socket, arg) => socket.emit("message", JSON.stringify({ event: "subscribe", arg }));
   client.connect(); sockets[0].emit("open"); ack(sockets[0], { channel: "tickers", instId: "BTC-USDT" }); assert.equal(client.snapshot().baseline, false);
   ack(sockets[0], { channel: "tickers", instId: "ETH-USDT" }); ack(sockets[0], { channel: "instruments", instType: "SPOT" }); ack(sockets[0], { channel: "status" }); assert.equal(client.snapshot().baseline, true);
   sockets[0].emit("message", JSON.stringify({ arg: { channel: "instruments", instType: "SPOT" }, data: [{ instId: "BTC-USDT", uTime: "20" }, { instId: "ETH-USDT", uTime: "10" }] }));
@@ -138,10 +138,12 @@ test("P1 WS freshness expires at idleMs and the idle timer actively reconnects",
 test("P1 Private WS retains backoff until login and every subscription succeeds; Business emits only confirmed candles", async () => {
   const sockets = []; const candles = []; const privateEvents = []; const timers = fakeTimers();
   const privateClient = new OkxPrivateWsClient({ credentials, socketFactory: () => { const socket = new FakeSocket(); sockets.push(socket); return socket; }, timers, random: () => 0.5, onObservation: (event) => privateEvents.push(event) });
+  let signed; const signingClient = new OkxPrivateWsClient({ credentials: { sign: async (text) => { signed = text; return "signature"; } }, socketFactory: () => new FakeSocket() });
+  assert.equal(await signingClient.loginSignature("123"), "signature"); assert.equal(signed, "123GET/users/self/verify");
   privateClient.connect(); await privateClient.open(sockets[0]); assert.match(sockets[0].sent[0], /login/); sockets[0].emit("message", JSON.stringify({ event: "login", code: "60009" })); timers.runTimeouts(); assert.equal(sockets.length, 2); assert.deepEqual(timers.delays, [500]);
   await privateClient.open(sockets[1]); sockets[1].emit("message", JSON.stringify({ event: "login", code: "60009" })); assert.deepEqual(timers.delays, [500, 1_000]);
   timers.runTimeouts(); await privateClient.open(sockets[2]); sockets[2].emit("message", JSON.stringify({ event: "login", code: "0" }));
-  for (const arg of [{ channel: "account" }, { channel: "balance_and_position" }, { channel: "orders", instType: "ANY" }]) sockets[2].emit("message", JSON.stringify({ event: "subscribe", code: "0", arg }));
+  for (const arg of [{ channel: "account" }, { channel: "balance_and_position" }, { channel: "orders", instType: "ANY" }]) sockets[2].emit("message", JSON.stringify({ event: "subscribe", arg }));
   sockets[2].emit("message", JSON.stringify({ arg: { channel: "balance_and_position" }, data: [{ pTime: "41", uTime: "99", ccy: "USDT" }] }));
   assert.equal(privateClient.retry, 0); assert.equal(privateEvents[0].ts, 41); assert.equal(typeof privateEvents[0].ts, "number");
   const businessSockets = [];

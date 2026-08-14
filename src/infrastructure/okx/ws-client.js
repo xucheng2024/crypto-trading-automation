@@ -77,7 +77,7 @@ export class OkxWsClient {
     if (message.code === "64008") return this.reconnect();
     if (message.event === "login") { if (message.code !== "0") return this.reconnect(); this.subscribe(); return; }
     if (message.event === "subscribe") {
-      if (message.code !== "0" || !message.arg || !this.pendingAcks.delete(key(message.arg))) return this.reconnect();
+      if ((message.code !== undefined && message.code !== "0") || !message.arg || !this.pendingAcks.delete(key(message.arg))) return this.reconnect();
       if (this.pendingAcks.size === 0) { this.baseline = true; this.retry = 0; this.emitState(); }
       return;
     }
