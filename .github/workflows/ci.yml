@@ -45,6 +45,7 @@ jobs:
       - run: npm ci
       - run: npm test
       - run: npm run test:iac
+      - run: npm run migrate:fingerprint
       - run: npm run test:container
       # `npm test` already executes the real PostgreSQL integration suite;
       # keep the distinct migration report without starting that suite twice.

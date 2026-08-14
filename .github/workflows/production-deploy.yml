@@ -10,6 +10,7 @@ on:
         type: boolean
 
 permissions:
+  actions: read
   contents: read
   id-token: write
 
@@ -28,38 +29,19 @@ jobs:
   validate:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-      - name: Install PostgreSQL server binaries for integration tests
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes postgresql
-          pg_bin="$(pg_config --bindir)"
-          wrapper_dir="$RUNNER_TEMP/postgres-bin"
-          mkdir --parents "$wrapper_dir"
-          printf '%s\n' '#!/usr/bin/env bash' 'set -euo pipefail' 'args=("$@")' 'data_dir=""' 'for ((i=0; i<${#args[@]}; i++)); do if [ "${args[$i]}" = "-D" ]; then data_dir="${args[$((i+1))]}"; fi; done' "\"$pg_bin/initdb\" \"\${args[@]}\"" 'printf "\nunix_socket_directories = '\''/tmp'\''\n" >> "$data_dir/postgresql.conf"' > "$wrapper_dir/initdb"
-          chmod +x "$wrapper_dir/initdb"
-          echo "$pg_bin" >> "$GITHUB_PATH"
-          echo "$wrapper_dir" >> "$GITHUB_PATH"
-      - name: Verify PostgreSQL can start as the runner user
-        shell: bash
+      - name: Require a successful CI run for this exact commit
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          data_dir="$(mktemp -d)"
-          log_file="$data_dir/postgres.log"
-          cleanup() { pg_ctl -D "$data_dir" -m immediate -w stop >/dev/null 2>&1 || true; cat "$log_file" 2>/dev/null || true; rm -rf "$data_dir"; }
-          trap cleanup EXIT
-          initdb -D "$data_dir" --no-locale -E UTF8 -A trust
-          pg_ctl -D "$data_dir" -l "$log_file" -o '-p 55432 -h 127.0.0.1' -w start
-      - run: npm ci
-      - run: npm test
-      - run: npm run test:iac
-      - run: npm run test:container
-      # `npm test` already executes the real PostgreSQL integration suite.
-      - run: node scripts/migration-rehearsal.mjs
+          for attempt in {1..24}; do
+            count="$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?head_sha=${GITHUB_SHA}&event=push&status=success&per_page=1" --jq '.total_count')"
+            [ "$count" -gt 0 ] && exit 0
+            echo "Waiting for CI success for ${GITHUB_SHA} (attempt ${attempt}/24)"
+            sleep 5
+          done
+          echo "No successful CI run found for ${GITHUB_SHA}" >&2
+          exit 1
 
   build:
     needs: validate
@@ -73,14 +55,28 @@ jobs:
           client-id: ${{ secrets.AZURE_DEPLOY_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-      - uses: docker/setup-buildx-action@v3
-      - run: az acr login --name "$ACR_NAME"
-      - run: docker buildx build --platform linux/amd64 --push --cache-from type=gha --cache-to type=gha,mode=max --tag "$ACR_LOGIN_SERVER/trading-engine:${GITHUB_SHA}" .
+      - id: cached
+        name: Reuse an image already built for this commit
+        shell: bash
+        run: |
+          if az acr repository show --name "$ACR_NAME" --image "trading-engine:${GITHUB_SHA}" --output none 2>/dev/null; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+      - if: ${{ steps.cached.outputs.exists != 'true' }}
+        uses: docker/setup-buildx-action@v3
+      - if: ${{ steps.cached.outputs.exists != 'true' }}
+        run: az acr login --name "$ACR_NAME"
+      - if: ${{ steps.cached.outputs.exists != 'true' }}
+        run: docker buildx build --platform linux/amd64 --push --cache-from type=gha --cache-to type=gha,mode=max --tag "$ACR_LOGIN_SERVER/trading-engine:${GITHUB_SHA}" .
       - id: image
         run: |
           digest="$(az acr repository show --name "$ACR_NAME" --image "trading-engine:${GITHUB_SHA}" --query digest --output tsv)"
           image="$ACR_LOGIN_SERVER/trading-engine@$digest"
-          docker buildx imagetools inspect "$image" | grep --fixed-strings "linux/amd64"
+          if [ "${{ steps.cached.outputs.exists }}" != "true" ]; then
+            docker buildx imagetools inspect "$image" | grep --fixed-strings "linux/amd64"
+          fi
           echo "image=$image" >> "$GITHUB_OUTPUT"
 
   migrate:
@@ -89,31 +85,51 @@ jobs:
     environment: production-migrate
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-      - run: npm ci --omit=dev
       - uses: azure/login@v2
         with:
           client-id: ${{ secrets.AZURE_MIGRATION_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      - id: plan
+        name: Skip PostgreSQL when the reviewed migration set is unchanged
+        shell: bash
+        run: |
+          set -euo pipefail
+          server="$(node -p 'new URL(process.env.POSTGRES_MIGRATION_URL).hostname.split(".")[0]')"
+          expected="$(node scripts/postgres-migration-fingerprint.mjs)"
+          current="$(az postgres flexible-server show --resource-group "$RESOURCE_GROUP" --name "$server" --query tags.githubMigrationHash --output tsv)"
+          changed=true
+          [ "$current" = "$expected" ] && changed=false
+          {
+            echo "server=$server"
+            echo "hash=$expected"
+            echo "changed=$changed"
+          } >> "$GITHUB_OUTPUT"
+          echo "Migration set changed: $changed"
+      - if: ${{ steps.plan.outputs.changed == 'true' }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - if: ${{ steps.plan.outputs.changed == 'true' }}
+        run: npm ci --omit=dev
       - id: firewall
+        if: ${{ steps.plan.outputs.changed == 'true' }}
         name: Create the short-lived migration firewall rule
         shell: bash
         run: |
           set -euo pipefail
           test -n "$POSTGRES_MIGRATION_URL"
-          server="$(node -p 'new URL(process.env.POSTGRES_MIGRATION_URL).hostname.split(".")[0]')"
+          server="${{ steps.plan.outputs.server }}"
           runner_ip="$(curl --fail --silent --show-error https://api.ipify.org)"
           rule="github-migration-${GITHUB_RUN_ID}"
           az postgres flexible-server firewall-rule create --resource-group "$RESOURCE_GROUP" --server-name "$server" --name "$rule" --start-ip-address "$runner_ip" --end-ip-address "$runner_ip" --output none
           echo "server=$server" >> "$GITHUB_OUTPUT"
           echo "rule=$rule" >> "$GITHUB_OUTPUT"
       - name: Apply reviewed migrations through Entra authentication
+        if: ${{ steps.plan.outputs.changed == 'true' }}
         run: npm run migrate:apply
-      - if: ${{ always() }}
+      - if: ${{ always() && steps.plan.outputs.changed == 'true' }}
         name: Remove the short-lived migration firewall rule
         shell: bash
         env:
@@ -121,6 +137,12 @@ jobs:
           RULE: ${{ steps.firewall.outputs.rule }}
         run: |
           test -z "$SERVER" || test -z "$RULE" || az postgres flexible-server firewall-rule delete --resource-group "$RESOURCE_GROUP" --server-name "$SERVER" --name "$RULE" --yes --output none
+      - if: ${{ steps.plan.outputs.changed == 'true' }}
+        name: Record the successfully applied migration set
+        shell: bash
+        run: |
+          server_id="$(az postgres flexible-server show --resource-group "$RESOURCE_GROUP" --name "${{ steps.plan.outputs.server }}" --query id --output tsv)"
+          az tag update --resource-id "$server_id" --operation Merge --tags githubMigrationHash="${{ steps.plan.outputs.hash }}" --output none
 
   deploy_off:
     needs: [build, migrate]
@@ -141,16 +163,16 @@ jobs:
         run: |
           set -euo pipefail
           suffix="off-${GITHUB_SHA:0:7}-${GITHUB_RUN_NUMBER}"
-          az containerapp update --name "$CONTAINER_APP_NAME" --resource-group "$RESOURCE_GROUP" --image "$IMAGE" --set-env-vars TRADING_MODE=OFF --revision-suffix "$suffix" --output none
-          revision="$(az containerapp show --name "$CONTAINER_APP_NAME" --resource-group "$RESOURCE_GROUP" --query properties.latestRevisionName --output tsv)"
+          revision="$(az containerapp update --name "$CONTAINER_APP_NAME" --resource-group "$RESOURCE_GROUP" --image "$IMAGE" --set-env-vars TRADING_MODE=OFF --revision-suffix "$suffix" --query properties.latestRevisionName --output tsv)"
           for old in $(az containerapp revision list --name "$CONTAINER_APP_NAME" --resource-group "$RESOURCE_GROUP" --query "[?properties.active].name" --output tsv); do
             [ "$old" = "$revision" ] || az containerapp revision deactivate --name "$CONTAINER_APP_NAME" --resource-group "$RESOURCE_GROUP" --revision "$old" --output none
           done
-          az containerapp revision restart --name "$CONTAINER_APP_NAME" --resource-group "$RESOURCE_GROUP" --revision "$revision" --output none
-          for attempt in {1..30}; do
+          for attempt in {1..36}; do
             state="$(az containerapp revision show --name "$CONTAINER_APP_NAME" --resource-group "$RESOURCE_GROUP" --revision "$revision" --query "[properties.runningState, properties.healthState]" --output tsv | paste -sd ' ' -)"
+            echo "Revision $revision: $state (attempt $attempt/36)"
             [ "$state" = "RunningAtMaxScale Healthy" ] && break
-            sleep 10
+            [[ "$state" == Failed* || "$state" == Degraded* ]] && exit 1
+            sleep 5
           done
           [ "$state" = "RunningAtMaxScale Healthy" ]
           [ "$(az containerapp revision list --name "$CONTAINER_APP_NAME" --resource-group "$RESOURCE_GROUP" --query "[?properties.active].name | length(@)" --output tsv)" = "1" ]
@@ -174,16 +196,16 @@ jobs:
         run: |
           set -euo pipefail
           suffix="full-${GITHUB_SHA:0:7}-${GITHUB_RUN_NUMBER}"
-          az containerapp update --name "$CONTAINER_APP_NAME" --resource-group "$RESOURCE_GROUP" --image "$IMAGE" --set-env-vars TRADING_MODE=FULL --revision-suffix "$suffix" --output none
-          revision="$(az containerapp show --name "$CONTAINER_APP_NAME" --resource-group "$RESOURCE_GROUP" --query properties.latestRevisionName --output tsv)"
+          revision="$(az containerapp update --name "$CONTAINER_APP_NAME" --resource-group "$RESOURCE_GROUP" --image "$IMAGE" --set-env-vars TRADING_MODE=FULL --revision-suffix "$suffix" --query properties.latestRevisionName --output tsv)"
           for old in $(az containerapp revision list --name "$CONTAINER_APP_NAME" --resource-group "$RESOURCE_GROUP" --query "[?properties.active].name" --output tsv); do
             [ "$old" = "$revision" ] || az containerapp revision deactivate --name "$CONTAINER_APP_NAME" --resource-group "$RESOURCE_GROUP" --revision "$old" --output none
           done
-          az containerapp revision restart --name "$CONTAINER_APP_NAME" --resource-group "$RESOURCE_GROUP" --revision "$revision" --output none
-          for attempt in {1..30}; do
+          for attempt in {1..36}; do
             state="$(az containerapp revision show --name "$CONTAINER_APP_NAME" --resource-group "$RESOURCE_GROUP" --revision "$revision" --query "[properties.runningState, properties.healthState]" --output tsv | paste -sd ' ' -)"
+            echo "Revision $revision: $state (attempt $attempt/36)"
             [ "$state" = "RunningAtMaxScale Healthy" ] && break
-            sleep 10
+            [[ "$state" == Failed* || "$state" == Degraded* ]] && exit 1
+            sleep 5
           done
           [ "$state" = "RunningAtMaxScale Healthy" ]
           [ "$(az containerapp revision list --name "$CONTAINER_APP_NAME" --resource-group "$RESOURCE_GROUP" --query "[?properties.active].name | length(@)" --output tsv)" = "1" ]

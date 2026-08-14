@@ -52,6 +52,18 @@ protected `production-full` environment before it can change the mode. The
 workflow has a repository-wide `production-deploy` concurrency group, so two
 deployments cannot modify revisions concurrently.
 
+After an OFF deployment has already been verified, use **Production promote
+FULL** for the separately authorized transition. It promotes the exact healthy
+OFF digest after the `production-full` approval without rebuilding, rerunning
+tests, reopening the database firewall, or reapplying migrations.
+
+Production deploy requires a successful `CI` run for the exact commit instead
+of repeating the suite. Images tagged with the same commit are reused. The
+PostgreSQL server records the reviewed migration-set fingerprint after a
+successful application; unchanged sets skip dependency installation and the
+short-lived firewall cycle.
+
 `scripts/apply-postgres-migrations.mjs` stores a SHA-256 hash for each reviewed
 migration in `schema_migrations`. A changed historical migration fails closed;
-new migrations must be append-only and added to that script's ordered list.
+new migrations must be append-only and added to
+`scripts/postgres-migration-manifest.mjs` in execution order.

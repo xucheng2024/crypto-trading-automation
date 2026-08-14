@@ -1,0 +1,56 @@
+name: Production promote FULL
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: production-deploy
+  cancel-in-progress: false
+
+env:
+  RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP }}
+  CONTAINER_APP_NAME: ${{ vars.CONTAINER_APP_NAME }}
+
+jobs:
+  promote_full:
+    runs-on: ubuntu-latest
+    environment: production-full
+    steps:
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_DEPLOY_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      - name: Promote the current healthy OFF digest
+        shell: bash
+        run: |
+          set -euo pipefail
+          revision="$(az containerapp show --name "$CONTAINER_APP_NAME" --resource-group "$RESOURCE_GROUP" --query properties.latestReadyRevisionName --output tsv)"
+          state="$(az containerapp revision show --name "$CONTAINER_APP_NAME" --resource-group "$RESOURCE_GROUP" --revision "$revision" --query "[properties.runningState, properties.healthState]" --output tsv | paste -sd ' ' -)"
+          active="$(az containerapp revision list --name "$CONTAINER_APP_NAME" --resource-group "$RESOURCE_GROUP" --query "[?properties.active].name | length(@)" --output tsv)"
+          mode="$(az containerapp revision show --name "$CONTAINER_APP_NAME" --resource-group "$RESOURCE_GROUP" --revision "$revision" --query "properties.template.containers[0].env[?name=='TRADING_MODE'].value | [0]" --output tsv)"
+          image="$(az containerapp revision show --name "$CONTAINER_APP_NAME" --resource-group "$RESOURCE_GROUP" --revision "$revision" --query properties.template.containers[0].image --output tsv)"
+          [ "$state" = "RunningAtMaxScale Healthy" ]
+          [ "$active" = "1" ]
+          [ "$mode" = "OFF" ]
+          [[ "$image" == *@sha256:* ]]
+
+          digest="${image##*@sha256:}"
+          suffix="full-${digest:0:7}-${GITHUB_RUN_NUMBER}"
+          promoted="$(az containerapp update --name "$CONTAINER_APP_NAME" --resource-group "$RESOURCE_GROUP" --image "$image" --set-env-vars TRADING_MODE=FULL --revision-suffix "$suffix" --query properties.latestRevisionName --output tsv)"
+          for old in $(az containerapp revision list --name "$CONTAINER_APP_NAME" --resource-group "$RESOURCE_GROUP" --query "[?properties.active].name" --output tsv); do
+            [ "$old" = "$promoted" ] || az containerapp revision deactivate --name "$CONTAINER_APP_NAME" --resource-group "$RESOURCE_GROUP" --revision "$old" --output none
+          done
+          for attempt in {1..36}; do
+            state="$(az containerapp revision show --name "$CONTAINER_APP_NAME" --resource-group "$RESOURCE_GROUP" --revision "$promoted" --query "[properties.runningState, properties.healthState]" --output tsv | paste -sd ' ' -)"
+            echo "Revision $promoted: $state (attempt $attempt/36)"
+            [ "$state" = "RunningAtMaxScale Healthy" ] && break
+            [[ "$state" == Failed* || "$state" == Degraded* ]] && exit 1
+            sleep 5
+          done
+          [ "$state" = "RunningAtMaxScale Healthy" ]
+          [ "$(az containerapp revision list --name "$CONTAINER_APP_NAME" --resource-group "$RESOURCE_GROUP" --query "[?properties.active].name | length(@)" --output tsv)" = "1" ]

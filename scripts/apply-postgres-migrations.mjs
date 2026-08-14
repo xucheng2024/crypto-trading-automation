@@ -2,8 +2,8 @@ import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { DefaultAzureCredential } from "@azure/identity";
 import { EntraPostgresPool } from "../src/infrastructure/postgres/entra-pool.js";
+import { postgresMigrations } from "./postgres-migration-manifest.mjs";
 
-const migrations = ["0001_p1_core.sql", "0002_p3_exit.sql", "0003_p4_import.sql", "0004_hybrid_execution.sql", "0005_execution_route.sql", "0006_decision_observability.sql", "0007_sell_force_hold.sql"];
 const connectionString = process.env.POSTGRES_MIGRATION_URL;
 if (!connectionString) throw new Error("POSTGRES_MIGRATION_URL is required");
 if (new URL(connectionString).password) throw new Error("POSTGRES_MIGRATION_URL must not contain a password");
@@ -17,7 +17,7 @@ try {
     applied_at timestamptz NOT NULL DEFAULT now()
   )`);
   await pool.query("SELECT pg_advisory_lock(763489102349876123)");
-  for (const name of migrations) {
+  for (const name of postgresMigrations) {
     const sql = await readFile(new URL(`../migrations/postgres/${name}`, import.meta.url), "utf8");
     const contentHash = createHash("sha256").update(sql).digest("hex");
     const existing = await pool.query("SELECT content_hash FROM schema_migrations WHERE name=$1", [name]);

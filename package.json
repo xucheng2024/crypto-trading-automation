@@ -8,6 +8,7 @@
     "trading-engine": "node src/entrypoints/azure/trading-engine.js",
     "maintenance": "node scripts/run-maintenance.mjs",
     "migrate:apply": "node scripts/apply-postgres-migrations.mjs",
+    "migrate:fingerprint": "node scripts/postgres-migration-fingerprint.mjs",
     "migrate:rehearsal": "node scripts/migration-rehearsal.mjs && node --test tests-worker/postgres.integration.test.js",
     "import:rehearsal": "node --test tests-worker/postgres.integration.test.js",
     "read-only-preflight": "node scripts/read-only-preflight.mjs",
