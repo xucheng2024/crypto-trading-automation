@@ -80,7 +80,7 @@ export class OrderCoordinator {
       for (const intent of candidates) {
         const guard = this._buyGuard(intent);
         if (!guard.allowed) continue;
-        const instrument = this.market.instrument(intent.instId); const quote = this.market.ticker(intent.instId); const candle = this.market.candle(intent.instId);
+        const { instrument, quote, candle } = guard;
         const executionPrice = roundToStep(intent.dailyLimitPrice, instrument.tickSz, "down");
         if (compareDecimal(quote.askPx, executionPrice) > 0) continue;
         const frozenTarget = intent.frozenTargetUsd ?? multiplyDecimal(BUY_ADMISSION_LEVERAGE, adjustedEquity(this.account.value));
@@ -309,7 +309,9 @@ export class OrderCoordinator {
     const risk = assessLeverage({ committedExposure: intent.managedExposure ?? "0", ...this.account.value });
     if (risk.hardStopped) return { allowed: false, reason: "HARD_STOP" };
     const signal = buySignal({ last: quote.last, askPx: quote.askPx, limitPrice: roundToStep(intent.dailyLimitPrice, instrument.tickSz, "down"), previousClosedHigh: candle.high });
-    return signal.eligible ? { allowed: true } : { allowed: false, reason: signal.reason };
+    // The same snapshot backs both the allow/deny decision and attempt construction in
+    // submitBuys, so a quote/candle read can never drift from the freshness check that gated it.
+    return signal.eligible ? { allowed: true, quote, candle, instrument, signal } : { allowed: false, reason: signal.reason };
   }
   _exitGuard(intent, kind) {
     if (this.mode() === "OFF") return { allowed: false, reason: "MODE" };
