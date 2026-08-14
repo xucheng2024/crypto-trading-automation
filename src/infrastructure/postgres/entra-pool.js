@@ -14,10 +14,21 @@ export class EntraPostgresPool {
     if (!credential?.getToken) throw new TypeError("PostgreSQL TokenCredential is required");
     if (ssl?.rejectUnauthorized !== true) throw new Error("PostgreSQL TLS certificate verification is required");
     this.credential = credential; this.logger = logger; this.onUnavailable = onUnavailable; this.closed = false;
-    this.pool = new Pool({ connectionString, max, ssl, password: async () => {
+    // Do not combine `connectionString` with a password callback. node-postgres
+    // parses the URL after the other options and its empty URL password would
+    // overwrite the Entra token callback.
+    this.pool = new Pool({
+      host: parsed.hostname,
+      port: parsed.port ? Number(parsed.port) : 5432,
+      user: decodeURIComponent(parsed.username),
+      database: decodeURIComponent(parsed.pathname.slice(1)),
+      max,
+      ssl,
+      password: async () => {
       try { const token = await credential.getToken(AZURE_POSTGRES_SCOPE); if (!token?.token || token.expiresOnTimestamp <= Date.now()) throw new Error("expired"); return token.token; }
       catch { logger({ reason: "POSTGRES_TOKEN_UNAVAILABLE", connection: redacted(connectionString) }); throw new Error("POSTGRES_TOKEN_UNAVAILABLE"); }
-    } });
+      },
+    });
     this.pool.on?.("error", () => { this.onUnavailable("POSTGRES_POOL_ERROR"); logger({ reason: "POSTGRES_POOL_ERROR", connection: redacted(connectionString) }); });
   }
   async connect() { if (this.closed) throw new Error("POSTGRES_POOL_CLOSED"); try { return await this.pool.connect(); } catch (error) { this.onUnavailable("POSTGRES_POOL_UNAVAILABLE"); this.logger({ reason: "POSTGRES_POOL_UNAVAILABLE" }); throw error; } }

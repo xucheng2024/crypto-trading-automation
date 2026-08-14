@@ -149,6 +149,7 @@ test("P4 Entra PostgreSQL pool uses official scope, TLS verification and fails r
   const credential = { getToken: async (scope) => { assert.equal(scope, AZURE_POSTGRES_SCOPE); return { token: 'short-token', expiresOnTimestamp: Date.now() + 10_000 }; } };
   assert.throws(() => new EntraPostgresPool({ connectionString: 'postgresql://user:secret@host/db', credential, Pool: FakePool }), /must not contain a password/);
   const adapter = new EntraPostgresPool({ connectionString: 'postgresql://user@host/db', credential, Pool: FakePool, logger: (event) => events.push(event), onUnavailable: (reason) => events.push({ reason }) });
+  assert.equal(options.connectionString, undefined); assert.equal(options.host, 'host'); assert.equal(options.port, 5432); assert.equal(options.user, 'user'); assert.equal(options.database, 'db');
   assert.equal(options.ssl.rejectUnauthorized, true); assert.equal(await options.password(), 'short-token'); await assert.rejects(adapter.connect(), /pool exhausted/);
   assert.deepEqual(events, [{ reason: 'POSTGRES_POOL_UNAVAILABLE' }, { reason: 'POSTGRES_POOL_UNAVAILABLE' }]);
 });
