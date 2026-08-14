@@ -5,17 +5,18 @@ import { AccountCapitalSnapshot, BoundedPriorityQueue, MarketProjection, ReadyGa
 import { OrderCoordinator } from "../src/application/order-coordinator.js";
 import { ReconciliationService } from "../src/application/reconciliation-service.js";
 import { VirtualSloMetrics } from "../src/application/slo-metrics.js";
-import { assessLeverage, dailyLimit } from "../src/domain/rules.js";
+import { assessLeverage, dailyLimit, expectedClosedCandleTs } from "../src/domain/rules.js";
 
 const clock = (value = 0) => ({ value, nowMs() { return this.value; } });
 const config = { accountId: "account", orderVersion: "P2", strategyTag: "STRAT", orderExpiryMs: 1_000, quoteFreshMs: 100, accountFreshMs: 100 };
+const clockReady = { clockFresh: () => true, clockSkewMs: 0 };
 
 function ready() { const gate = new ReadyGate(); for (const key of gate.required) gate.set(key, true); return gate; }
 function setupMarket(now) {
   const market = new MarketProjection({ clock: now });
   market.updateInstrument({ instId: "BTC-USDT", ts: 1, state: "live", tickSz: "0.1", lotSz: "0.001", minSz: "0.001", base: "BTC", version: 1 });
   market.updateTicker({ instId: "BTC-USDT", ts: 2, last: "95", askPx: "95", bidPx: "94" });
-  market.updateCandle({ instId: "BTC-USDT", ts: 1, open: "90", high: "90", low: "89", confirm: true });
+  market.updateCandle({ instId: "BTC-USDT", ts: expectedClosedCandleTs(now.nowMs()), open: "90", high: "90", low: "89", confirm: true });
   return market;
 }
 
@@ -58,11 +59,12 @@ test("P2 BUY coordinator uses one fake batch, persists item-independent outcomes
     async markSettled(_tx, id) { Object.assign(attempts.get(id), { state: "SETTLED" }); },
   };
   const coordinator = new OrderCoordinator({ transaction: async (fn) => fn({}), orders, state: { insertFill: async () => {} }, ownerGuard: { isHeld: () => true }, readyGate: ready(), market, account, mode: () => "FULL", executionRoute: (instId) => instId === "SOL-USDT" ? "spot" : "margin", clock: now, config, slo, telemetry: (event) => events.push(event), transport: {
+    ...clockReady,
     maxAvailSize: async (ids, options) => { assert.equal(options.tdMode, "cross"); return ids.split(",").map((instId) => ({ instId, availBuy: "100" })); },
     submitBatchOrders: async (payload) => { sends += 1; assert.equal(payload.length, 3); assert.ok(payload.filter((item) => item.instId !== "SOL-USDT").every((item) => item.tdMode === "cross" && item.ordType === "ioc" && item.tradeQuoteCcy === "USDT")); const spotOrder = payload.find((item) => item.instId === "SOL-USDT"); assert.equal(spotOrder.tdMode, "cross"); assert.equal("tradeQuoteCcy" in spotOrder, false); return [{ clOrdId: payload[0].clOrdId, status: "SUBMITTED", ordId: "1" }, { clOrdId: payload[1].clOrdId, status: "NOT_CREATED", reason: "rejected" }, { clOrdId: payload[2].clOrdId, status: "UNKNOWN", reason: "timeout" }]; },
   } });
   for (const instId of ["BTC-USDT", "ETH-USDT", "SOL-USDT"]) {
-    if (instId !== "BTC-USDT") { market.updateInstrument({ instId, ts: 1, state: "live", tickSz: "0.1", lotSz: "0.001", minSz: "0.001", base: instId.split("-")[0], version: 1 }); market.updateTicker({ instId, ts: 2, last: "95", askPx: "95", bidPx: "94" }); market.updateCandle({ instId, ts: 1, open: "90", high: "90", low: "89", confirm: true }); }
+    if (instId !== "BTC-USDT") { market.updateInstrument({ instId, ts: 1, state: "live", tickSz: "0.1", lotSz: "0.001", minSz: "0.001", base: instId.split("-")[0], version: 1 }); market.updateTicker({ instId, ts: 2, last: "95", askPx: "95", bidPx: "94" }); market.updateCandle({ instId, ts: expectedClosedCandleTs(now.nowMs()), open: "90", high: "90", low: "89", confirm: true }); }
     coordinator.enqueue({ intent: "BUY", instId, generation: 0, eligibleSince: 1, strategyDay: "2026-08-14", dailyLimitPrice: "100", holdHours: "24", configHash: "cfg", tradeQuoteCcy: "USDT", managedExposure: "0" });
   }
   const result = await coordinator.drainOnce();
@@ -76,7 +78,7 @@ test("P2 BUY final guard releases PREPARED reservation when owner, mode, READY, 
   let held = true; const attempts = new Map(); let sends = 0;
   const coordinator = new OrderCoordinator({ transaction: async (fn) => fn({}), state: {}, market, account, readyGate: ready(), ownerGuard: { isHeld: () => held }, mode: () => "FULL", clock: now, config,
     orders: { reserveBuy: async (_tx, a) => { attempts.set(a.clOrdId, { ...a, state: "PREPARED" }); held = false; return { authorized: true }; }, markNotCreated: async (_tx, id) => Object.assign(attempts.get(id), { state: "NOT_CREATED", reservationState: "RELEASED" }) },
-    transport: { maxAvailSize: async () => [{ instId: "BTC-USDT", availBuy: "100" }], submitBatchOrders: async () => { sends += 1; return []; } },
+    transport: { ...clockReady, maxAvailSize: async () => [{ instId: "BTC-USDT", availBuy: "100" }], submitBatchOrders: async () => { sends += 1; return []; } },
   });
   coordinator.enqueue({ intent: "BUY", instId: "BTC-USDT", generation: 0, eligibleSince: 1, strategyDay: "2026-08-14", dailyLimitPrice: "100", holdHours: "24", configHash: "cfg", managedExposure: "0" });
   assert.equal((await coordinator.drainOnce()).reason, "FINAL_GUARD"); assert.equal(sends, 0); assert.equal([...attempts.values()][0].reservationState, "RELEASED");
@@ -86,7 +88,7 @@ test("P5 route refresh cannot change a BUY route between availability and submis
   const now = clock(10); const market = setupMarket(now); const account = new AccountCapitalSnapshot({ clock: now }); account.update({ ts: 1, totalEq: "150", adjEq: "150" });
   let route = "margin"; let quote = "USDT";
   const coordinator = new OrderCoordinator({ transaction: async (fn) => fn({}), orders: {}, state: {}, ownerGuard: { isHeld: () => true }, readyGate: ready(), market, account, mode: () => "FULL", executionRoute: () => route, tradeQuoteCurrency: () => quote, clock: now, config,
-    transport: { maxAvailSize: async () => { route = "spot"; quote = null; return [{ instId: "BTC-USDT", availBuy: "100" }]; } },
+    transport: { ...clockReady, maxAvailSize: async () => { route = "spot"; quote = null; return [{ instId: "BTC-USDT", availBuy: "100" }]; } },
   });
   const prepared = await coordinator.prepareBuys([{ intent: "BUY", instId: "BTC-USDT", generation: 0, eligibleSince: 1, strategyDay: "2026-08-14", dailyLimitPrice: "100", holdHours: "24", configHash: "cfg", managedExposure: "0", executionMode: "cash" }]);
   assert.equal(prepared[0].executionMode, "cross"); assert.equal(prepared[0].executionRoute, "margin"); assert.equal(prepared[0].tradeQuoteCcy, "USDT"); assert.equal(route, "spot");
@@ -96,7 +98,7 @@ test("P5 zero margin-route availability never retries the same instrument as a s
   const now = clock(10); const market = setupMarket(now); const account = new AccountCapitalSnapshot({ clock: now }); account.update({ ts: 1, totalEq: "150", adjEq: "150" });
   const modes = []; let submissions = 0;
   const coordinator = new OrderCoordinator({ transaction: async (fn) => fn({}), orders: {}, state: {}, ownerGuard: { isHeld: () => true }, readyGate: ready(), market, account, mode: () => "FULL", executionRoute: () => "margin", clock: now, config,
-    transport: { maxAvailSize: async (_ids, options) => { modes.push(options.tdMode); return [{ instId: "BTC-USDT", availBuy: "0" }]; }, submitBatchOrders: async () => { submissions += 1; return []; } },
+    transport: { ...clockReady, maxAvailSize: async (_ids, options) => { modes.push(options.tdMode); return [{ instId: "BTC-USDT", availBuy: "0" }]; }, submitBatchOrders: async () => { submissions += 1; return []; } },
   });
   coordinator.enqueue({ intent: "BUY", instId: "BTC-USDT", generation: 0, eligibleSince: 1, strategyDay: "2026-08-14", dailyLimitPrice: "100", holdHours: "24", configHash: "cfg", managedExposure: "0" });
   assert.equal((await coordinator.drainOnce()).reason, "NO_ELIGIBLE"); assert.deepEqual(modes, ["cross"]); assert.equal(submissions, 0);
@@ -107,7 +109,7 @@ test("P5 one eligible margin instrument can consume the full 2.95 account capaci
   let attempt;
   const coordinator = new OrderCoordinator({ transaction: async (fn) => fn({}), state: {}, ownerGuard: { isHeld: () => true }, readyGate: ready(), market, account, mode: () => "FULL", executionRoute: () => "margin", tradeQuoteCurrency: () => "USDT", clock: now, config,
     orders: { reserveBuy: async (_tx, row) => { attempt = row; return { authorized: true }; }, markSubmitted: async () => {} },
-    transport: { maxAvailSize: async () => [{ instId: "BTC-USDT", availBuy: "1000" }], submitBatchOrders: async (rows) => rows.map((row) => ({ clOrdId: row.clOrdId, status: "SUBMITTED", ordId: "one" })) },
+    transport: { ...clockReady, maxAvailSize: async () => [{ instId: "BTC-USDT", availBuy: "1000" }], submitBatchOrders: async (rows) => rows.map((row) => ({ clOrdId: row.clOrdId, status: "SUBMITTED", ordId: "one" })) },
   });
   coordinator.enqueue({ intent: "BUY", instId: "BTC-USDT", generation: 0, eligibleSince: 1, strategyDay: "2026-08-14", dailyLimitPrice: "100", holdHours: "24", configHash: "cfg", managedExposure: "0" });
   assert.equal((await coordinator.drainOnce()).submitted, true);
@@ -188,7 +190,7 @@ test("P2 commit-ack-loss reads the PREPARED business key and missing batch items
       findByClOrdId: async () => existing,
       markUnknown: async () => {}, markNotCreated: async () => {}, markSubmitted: async () => {},
     },
-    transport: { maxAvailSize: async () => [{ instId: "BTC-USDT", availBuy: "100" }], submitBatchOrders: async () => { sends += 1; return []; } },
+    transport: { ...clockReady, maxAvailSize: async () => [{ instId: "BTC-USDT", availBuy: "100" }], submitBatchOrders: async () => { sends += 1; return []; } },
   });
   coordinator.enqueue({ intent: "BUY", instId: "BTC-USDT", generation: 0, eligibleSince: 1, strategyDay: "2026-08-14", dailyLimitPrice: "100", holdHours: "24", configHash: "cfg", managedExposure: "0" });
   assert.equal((await coordinator.drainOnce()).reason, "COMMIT_ACK_LOST");
@@ -197,7 +199,7 @@ test("P2 commit-ack-loss reads the PREPARED business key and missing batch items
   const attempts = new Map();
   const missing = new OrderCoordinator({ transaction: async (fn) => fn({}), market, account, readyGate: ready(), ownerGuard: { isHeld: () => true }, mode: () => "FULL", clock: now, config, state: {},
     orders: { reserveBuy: async (_tx, attempt) => { attempts.set(attempt.clOrdId, { state: "PREPARED" }); return { authorized: true }; }, markUnknown: async (_tx, id, reason) => Object.assign(attempts.get(id), { state: "UNKNOWN", reason }), markNotCreated: async () => {}, markSubmitted: async () => {} },
-    transport: { maxAvailSize: async () => [{ instId: "BTC-USDT", availBuy: "100" }], submitBatchOrders: async () => [] },
+    transport: { ...clockReady, maxAvailSize: async () => [{ instId: "BTC-USDT", availBuy: "100" }], submitBatchOrders: async () => [] },
   });
   missing.enqueue({ intent: "BUY", instId: "BTC-USDT", generation: 0, eligibleSince: 1, strategyDay: "2026-08-14", dailyLimitPrice: "100", holdHours: "24", configHash: "cfg", managedExposure: "0" });
   await missing.drainOnce();
@@ -210,7 +212,7 @@ test("P2 insufficient funds waits for a newer safe risk version, while protectio
   const attempts = new Map(); const intent = { intent: "BUY", instId: "BTC-USDT", generation: 0, eligibleSince: 1, strategyDay: "2026-08-14", dailyLimitPrice: "100", holdHours: "24", configHash: "cfg", managedExposure: "0" };
   const coordinator = new OrderCoordinator({ transaction: async (fn) => fn({}), market, account, readyGate: ready(), ownerGuard: { isHeld: () => true }, mode: () => "FULL", isBuyAllowed: () => !removed, clock: now, config, telemetry: (event) => events.push(event), state: {},
     orders: { reserveBuy: async (_tx, attempt) => { attempts.set(attempt.clOrdId, { state: "PREPARED" }); protectedAtReserve = true; removed = true; return { authorized: true }; }, markNotCreated: async (_tx, id, reason) => Object.assign(attempts.get(id), { state: "NOT_CREATED", reservationState: "RELEASED", reason }), markUnknown: async () => {}, markSubmitted: async () => {} },
-    transport: { maxAvailSize: async () => { maxAvailReads += 1; return maxAvailReads === 1 ? [{ instId: "BTC-USDT", availBuy: "0" }] : [{ instId: "BTC-USDT", availBuy: "10" }]; }, submitBatchOrders: async () => { submits += 1; return []; } },
+    transport: { ...clockReady, maxAvailSize: async () => { maxAvailReads += 1; return maxAvailReads === 1 ? [{ instId: "BTC-USDT", availBuy: "0" }] : [{ instId: "BTC-USDT", availBuy: "10" }]; }, submitBatchOrders: async () => { submits += 1; return []; } },
   });
   coordinator.enqueue(intent);
   assert.equal((await coordinator.drainOnce()).reason, "NO_ELIGIBLE");

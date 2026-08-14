@@ -2,8 +2,8 @@
 // credential-free maintenance Job: these actions use the authenticated OKX
 // read port but never the mutation transport.
 export class EngineRecurringWork {
-  constructor({ timers = globalThis, telemetry = () => {}, announcementMs = 60_000, reconcileMs = 300_000, routeMs = 3_600_000, weeklyMs = 7 * 86_400_000, metricsMs = 60_000, announcements = async () => {}, reconcile = async () => {}, refreshRoutes = async () => {}, weeklyReconcile = reconcile, reportMetrics = async () => {} } = {}) {
-    Object.assign(this, { timers, telemetry, announcementMs, reconcileMs, routeMs, weeklyMs, metricsMs, announcements, reconcile, refreshRoutes, weeklyReconcile, reportMetrics });
+  constructor({ timers = globalThis, telemetry = () => {}, announcementMs = 60_000, reconcileMs = 300_000, routeMs = 3_600_000, weeklyMs = 7 * 86_400_000, metricsMs = 60_000, clockSyncMs = 300_000, candleReviewMs = 15_000, announcements = async () => {}, reconcile = async () => {}, refreshRoutes = async () => {}, weeklyReconcile = reconcile, reportMetrics = async () => {}, clockSync = async () => {}, reviewCandles = async () => {} } = {}) {
+    Object.assign(this, { timers, telemetry, announcementMs, reconcileMs, routeMs, weeklyMs, metricsMs, clockSyncMs, candleReviewMs, announcements, reconcile, refreshRoutes, weeklyReconcile, reportMetrics, clockSync, reviewCandles });
     this.handles = []; this.busy = false;
   }
   _emit(event) { try { Promise.resolve(this.telemetry(event)).catch(() => {}); } catch { /* telemetry cannot alter scheduling */ } }
@@ -29,6 +29,8 @@ export class EngineRecurringWork {
     add("ROUTE_REFRESH", this.routeMs, this.refreshRoutes);
     add("WEEKLY_RECONCILE", this.weeklyMs, this.weeklyReconcile);
     add("METRICS", this.metricsMs, this.reportMetrics, false);
+    add("CLOCK_SYNC", this.clockSyncMs, this.clockSync, false);
+    add("CANDLE_REVIEW", this.candleReviewMs, this.reviewCandles, false);
   }
   stop() { for (const handle of this.handles.splice(0)) this.timers.clearInterval(handle); }
 }

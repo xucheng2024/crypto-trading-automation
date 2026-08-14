@@ -24,9 +24,9 @@ function normalize(kind, arg, row) {
 }
 
 export class OkxWsClient {
-  constructor({ kind, instIds = [], credentials = {}, profile = OKX_PROFILES.GLOBAL, socketFactory, clock = { nowMs: () => Date.now() }, random = Math.random, timers = globalThis, idleMs = 20_000, onObservation = () => {}, onState = () => {} }) {
+  constructor({ kind, instIds = [], credentials = {}, profile = OKX_PROFILES.GLOBAL, socketFactory, clock = { nowMs: () => Date.now() }, clockSkewMs = () => 0, random = Math.random, timers = globalThis, idleMs = 20_000, onObservation = () => {}, onState = () => {} }) {
     if (!subscriptions[kind] || typeof socketFactory !== "function") throw new TypeError("kind and socketFactory are required");
-    this.kind = kind; this.instIds = instIds; this.credentials = credentials; this.profile = profile; this.socketFactory = socketFactory; this.clock = clock; this.random = random; this.timers = timers; this.idleMs = idleMs; this.onObservation = onObservation; this.onState = onState;
+    this.kind = kind; this.instIds = instIds; this.credentials = credentials; this.profile = profile; this.socketFactory = socketFactory; this.clock = clock; this.clockSkewMs = clockSkewMs; this.random = random; this.timers = timers; this.idleMs = idleMs; this.onObservation = onObservation; this.onState = onState;
     this.generation = 0; this.connected = false; this.baseline = false; this.lastMessageAt = 0; this.lastTs = new Map(); this.pendingAcks = new Set(); this.retry = 0; this.socket = null; this.pingTimer = null; this.reconnectTimer = null;
   }
   get url() { return this.profile[`${this.kind}WsUrl`]; }
@@ -42,7 +42,7 @@ export class OkxWsClient {
     if (socket !== this.socket) return;
     this.generation += 1; this.connected = true; this.baseline = false; this.lastTs.clear(); this.pendingAcks.clear(); this.lastMessageAt = this.clock.nowMs();
     if (this.kind === "private") {
-      const timestamp = String(Math.floor(this.clock.nowMs() / 1000));
+      const timestamp = String(Math.floor((this.clock.nowMs() + Number(this.clockSkewMs() ?? 0)) / 1000));
       const sign = await this.loginSignature(timestamp);
       if (socket !== this.socket) return;
       socket.send(JSON.stringify({ op: "login", args: [{ apiKey: this.credentials.apiKey, passphrase: this.credentials.passphrase, timestamp, sign }] }));

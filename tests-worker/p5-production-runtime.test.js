@@ -27,7 +27,7 @@ test("P5 daily selection and production planner create a BUY only above the stri
     recordAdversePrice: async () => ({ rowCount: 0 }), listManagedFills: async () => [],
   };
   const planner = new BuySignalPlanner({ accountId: "a", instIds: ["BTC-USDT"], strategyConfig: { contentHash: "a".repeat(64), rows: { "BTC-USDT": { bestLimit: "95", holdHours: "6" } } }, market, account,
-    coordinator: { enqueue: (intent) => Boolean(intents.push(intent)) }, state, orders: { listBuyCycle: async () => ({ attempts: [], consumedUsd: "0" }) }, transaction: async (fn) => fn({}), rest: { clockSkewMs: 0, candles: async (_instId, options) => options.bar === "1D" ? rows : [[String(current - 180_000), "93", "94.5", "92", "94", "1", "1", "1", "1"]] }, readyGate: gate, clock, telemetry: (event) => events.push(event),
+    coordinator: { enqueue: (intent) => Boolean(intents.push(intent)) }, state, orders: { listBuyCycle: async () => ({ attempts: [], consumedUsd: "0" }) }, transaction: async (fn) => fn({}), rest: { clockSkewMs: 0, clockFresh: () => true, candles: async (_instId, options) => options.bar === "1D" ? rows : [[String(current - 180_000), "93", "94.5", "92", "94", "1", "1", "1", "1"]] }, readyGate: gate, clock, telemetry: (event) => events.push(event),
   });
   await planner.prime(); assert.equal(gate.snapshot().dependencies.strategy, true); assert.equal(stored.get("BTC-USDT:2026-08-14").todayOpen, "100");
   assert.deepEqual(await planner.observe({ type: "ticker", instId: "BTC-USDT" }), { queued: true, reason: "BUY_QUEUED" });
@@ -56,7 +56,7 @@ test("P5 planner refuses a new BUY when any managed position lacks a fresh quote
   const account = new AccountCapitalSnapshot({ clock }); account.update({ ts: current, totalEq: "100", adjEq: "100" });
   const intents = []; let restCalls = 0;
   const planner = new BuySignalPlanner({ accountId: "a", instIds: ["BTC-USDT"], strategyConfig: { contentHash: "b".repeat(64), rows: { "BTC-USDT": { bestLimit: "100", holdHours: "24" } } }, market, account,
-    coordinator: { enqueue: (intent) => Boolean(intents.push(intent)) }, state: {}, orders: { listBuyCycle: async () => ({ attempts: [], consumedUsd: "0" }) }, transaction: async (fn) => fn({}), rest: { clockSkewMs: 0, tickers: async () => { restCalls += 1; return [{ instId: "ETH-USDT", ts: current, last: "10", bidPx: "9.9", askPx: "10" }]; } }, readyGate: new ReadyGate(), clock,
+    coordinator: { enqueue: (intent) => Boolean(intents.push(intent)) }, state: {}, orders: { listBuyCycle: async () => ({ attempts: [], consumedUsd: "0" }) }, transaction: async (fn) => fn({}), rest: { clockSkewMs: 0, clockFresh: () => true, tickers: async () => { restCalls += 1; return [{ instId: "ETH-USDT", ts: current, last: "10", bidPx: "9.9", askPx: "10" }]; } }, readyGate: new ReadyGate(), clock,
   });
   planner.currentDay = "2026-08-14"; planner.daily.set("BTC-USDT:2026-08-14", { status: "READY", dailyLimitPrice: "100" });
   planner.ledger = [{ account_id: "a", inst_id: "ETH-USDT", side: "BUY", fill_size: "1", disposed_size: "0" }];
@@ -71,10 +71,29 @@ test("P5 planner blocks a new-day duplicate position but permits the current BUY
   market.updateTicker({ instId: "BTC-USDT", ts: current, last: "95", askPx: "95", bidPx: "94.9" }); market.updateCandle({ instId: "BTC-USDT", ts: current - 180_000, high: "94", low: "90", confirm: true });
   const account = new AccountCapitalSnapshot({ clock }); account.update({ ts: current, totalEq: "100", adjEq: "100" }); const intents = []; let attempts = [];
   const planner = new BuySignalPlanner({ accountId: "a", instIds: ["BTC-USDT"], strategyConfig: { contentHash: "c".repeat(64), rows: { "BTC-USDT": { bestLimit: "100", holdHours: "24" } } }, market, account,
-    coordinator: { enqueue: (intent) => Boolean(intents.push(intent)) }, state: {}, orders: { listBuyCycle: async () => ({ attempts, consumedUsd: "10" }) }, transaction: async (fn) => fn({}), rest: { clockSkewMs: 0 }, readyGate: new ReadyGate(), clock,
+    coordinator: { enqueue: (intent) => Boolean(intents.push(intent)) }, state: {}, orders: { listBuyCycle: async () => ({ attempts, consumedUsd: "10" }) }, transaction: async (fn) => fn({}), rest: { clockSkewMs: 0, clockFresh: () => true }, readyGate: new ReadyGate(), clock,
   });
   planner.currentDay = "2026-08-14"; planner.daily.set("BTC-USDT:2026-08-14", { status: "READY", dailyLimitPrice: "100" }); planner.ledger = [{ account_id: "a", inst_id: "BTC-USDT", side: "BUY", fill_size: "0.1", disposed_size: "0" }];
   assert.equal((await planner.observe({ type: "ticker", instId: "BTC-USDT" })).reason, "STRATEGY_POSITION_EXISTS");
   attempts = [{ state: "SETTLED", generation: 0, decision_market_key: "old", frozen_target_usd: "295" }]; market.updateTicker({ instId: "BTC-USDT", ts: current + 1, last: "95.1", askPx: "95.1", bidPx: "95" });
   assert.equal((await planner.observe({ type: "ticker", instId: "BTC-USDT" })).reason, "BUY_QUEUED"); assert.equal(intents.length, 1);
+});
+
+test("P5 planner blocks pending/stale candles and stale exchange clock, then self-heals on the expected candle", async () => {
+  const clock = { value: current, nowMs() { return this.value; } }; const market = new MarketProjection({ clock });
+  market.updateInstrument({ instId: "BTC-USDT", ts: 1, state: "live", tickSz: "0.1", lotSz: "0.001", minSz: "0.001", base: "BTC", version: "1" });
+  market.updateTicker({ instId: "BTC-USDT", ts: current, last: "95", askPx: "95", bidPx: "94.9" });
+  market.updateCandle({ instId: "BTC-USDT", ts: current - 360_000, high: "94", low: "90", confirm: true });
+  const account = new AccountCapitalSnapshot({ clock }); account.update({ ts: current, totalEq: "100", adjEq: "100" }); const intents = []; let clockIsFresh = true;
+  const planner = new BuySignalPlanner({ accountId: "a", instIds: ["BTC-USDT"], strategyConfig: { contentHash: "d".repeat(64), rows: { "BTC-USDT": { bestLimit: "100", holdHours: "24" } } }, market, account,
+    coordinator: { enqueue: (intent) => Boolean(intents.push(intent)) }, state: {}, orders: { listBuyCycle: async () => ({ attempts: [], consumedUsd: "0" }) }, transaction: async (fn) => fn({}), rest: { clockSkewMs: 0, clockFresh: () => clockIsFresh }, readyGate: new ReadyGate(), clock,
+  });
+  planner.currentDay = "2026-08-14"; planner.daily.set("BTC-USDT:2026-08-14", { status: "READY", dailyLimitPrice: "100" });
+  assert.equal((await planner.observe({ type: "ticker", instId: "BTC-USDT" })).reason, "CANDLE_PENDING");
+  clock.value += 31_000; market.updateTicker({ instId: "BTC-USDT", ts: clock.value, last: "95", askPx: "95", bidPx: "94.9" });
+  assert.equal((await planner.observe({ type: "ticker", instId: "BTC-USDT" })).reason, "CANDLE_STALE");
+  market.updateCandle({ instId: "BTC-USDT", ts: current - 180_000, high: "94", low: "90", confirm: true }); clockIsFresh = false;
+  assert.equal((await planner.observe({ type: "market-recheck", instId: "BTC-USDT" })).reason, "CLOCK_SYNC_STALE");
+  clockIsFresh = true;
+  assert.equal((await planner.observe({ type: "market-recheck", instId: "BTC-USDT" })).reason, "BUY_QUEUED"); assert.equal(intents.length, 1);
 });

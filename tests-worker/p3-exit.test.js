@@ -5,6 +5,7 @@ import { OrderCoordinator } from "../src/application/order-coordinator.js";
 import { SellService } from "../src/application/sell-service.js";
 import { InstrumentProtectionService } from "../src/application/instrument-protection-service.js";
 import { ReconciliationService } from "../src/application/reconciliation-service.js";
+import { expectedClosedCandleTs } from "../src/domain/rules.js";
 
 const config = { accountId: "p3", strategyTag: "P3", orderVersion: "v1", orderExpiryMs: 1_000, accountFreshMs: 10_000, quoteFreshMs: 10_000 };
 const clock = () => ({ nowMs: () => 1_000 });
@@ -55,9 +56,9 @@ test("P3 engine latches breach in the callback and persists only from its critic
   const events = sell.observeTicker("BTC-USDT"); assert.equal(events.length, 1); assert.equal(writes, 0, "WS-side observation does no DB work");
   engine.queue.enqueue(events[0]); await engine.consumeOne(); assert.equal(writes, 1); assert.equal(queued.length, 1);
   assert.equal(sell.observeTicker("BTC-USDT").length, 0, "latch survives a price bounce and duplicate tick");
-  market.updateCandle({ instId: "BTC-USDT", ts: 10, low: "95", confirm: true });
+  market.updateCandle({ instId: "BTC-USDT", ts: expectedClosedCandleTs(now.nowMs()), low: "95", confirm: true });
   assert.equal(sell.observeCandle("BTC-USDT").find((event) => event.type === "SELL_PROTECTION").protection, "94.715");
-  market.updateCandle({ instId: "BTC-USDT", ts: 10, low: "80", confirm: true });
+  market.updateCandle({ instId: "BTC-USDT", ts: expectedClosedCandleTs(now.nowMs()), low: "80", confirm: true });
   assert.equal(sell.observeCandle("BTC-USDT").find((event) => event.type === "SELL_PROTECTION").protection, "79.76", "the latest corrected 3m low is authoritative");
 });
 
@@ -66,11 +67,27 @@ test("P3 SELL uses a strict 3m breakdown: equality does not trigger", () => {
   market.updateInstrument({ instId: "BTC-USDT", ts: 1, state: "live", tickSz: "0.1", lotSz: "0.1", minSz: "0.1", base: "BTC" });
   const fill = { account_id: "a", inst_id: "BTC-USDT", base_ccy: "BTC", trade_id: "strict", side: "BUY", fill_size: "1", disposed_size: "0", sell_time: 1, sell_state: "WAITING", version: 1 };
   const sell = new SellService({ market, clock: now, coordinator: { enqueue: () => true }, state: {} });
-  sell.rebuild([fill]); market.updateCandle({ instId: "BTC-USDT", ts: 10, low: "100", confirm: true }); sell.observeCandle("BTC-USDT");
+  sell.rebuild([fill]); market.updateCandle({ instId: "BTC-USDT", ts: expectedClosedCandleTs(now.nowMs()), low: "100", confirm: true }); sell.observeCandle("BTC-USDT");
   market.updateTicker({ instId: "BTC-USDT", ts: 11, last: "99.7", bidPx: "99.7" });
   assert.equal(sell.observeTicker("BTC-USDT").length, 0);
   market.updateTicker({ instId: "BTC-USDT", ts: 12, last: "99.699", bidPx: "99.699" });
   assert.equal(sell.observeTicker("BTC-USDT").length, 1);
+});
+
+test("P3 stale candle preserves protection, warns when unarmed, and REST refresh re-enters candle evaluation", async () => {
+  const now = { value: 720_000, nowMs() { return this.value; } }; const market = new MarketProjection({ clock: now }); const events = []; let refreshes = 0;
+  market.updateInstrument({ instId: "BTC-USDT", ts: 1, state: "live", tickSz: "0.1", lotSz: "0.1", minSz: "0.1", base: "BTC" });
+  market.updateCandle({ instId: "BTC-USDT", ts: 180_000, low: "80", confirm: true });
+  const protectedFill = { account_id: "a", inst_id: "BTC-USDT", base_ccy: "BTC", trade_id: "protected", side: "BUY", fill_size: "1", disposed_size: "0", sell_time: 1, sell_state: "WAITING", version: 1, protection_price: "90" };
+  const unarmedFill = { ...protectedFill, trade_id: "unarmed", protection_price: null };
+  const sell = new SellService({ market, clock: now, coordinator: { enqueue: () => true }, telemetry: (event) => events.push(event), refreshCandle: async () => { refreshes += 1; market.updateCandle({ instId: "BTC-USDT", ts: 540_000, low: "95", confirm: true }); } });
+  sell.rebuild([protectedFill, unarmedFill]);
+  assert.deepEqual(sell.observeCandle("BTC-USDT"), []); await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(sell.fills.get(sell.key(protectedFill)).protection_price, "90"); assert.equal(refreshes, 1);
+  assert.ok(events.some((event) => event.reason === "SELL_CANDLE_STALE")); assert.ok(events.some((event) => event.reason === "SELL_PROTECTION_UNARMED"));
+  assert.equal(sell.observeCandle("BTC-USDT").filter((event) => event.type === "SELL_PROTECTION").length, 2, "refreshed candle arms every live fill");
+  now.value = 1_080_000; sell.reviewCandleFreshness(); await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(refreshes, 2, "periodic review detects a feed that stopped producing candle events");
 });
 
 test("P3 recovery retains PREPARED and UNKNOWN after every consistency source misses, and rebuilds durable watches", async () => {

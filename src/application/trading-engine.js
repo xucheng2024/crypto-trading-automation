@@ -75,7 +75,10 @@ export class TradingEngine {
   receiveTicker(row) {
     const started = this.clock.nowMs();
     const result = this.projection.updateTicker(row);
-    if (result.accepted) { this.queue.enqueue({ type: "ticker", instId: row.instId, enqueuedAt: this.clock.nowMs() }); for (const event of this.sellService?.observeTicker(row.instId) ?? []) this.queue.enqueue({ ...event, enqueuedAt: this.clock.nowMs() }); }
+    if (result.accepted) {
+      this.queue.enqueue({ type: "ticker", instId: row.instId, enqueuedAt: this.clock.nowMs() });
+      for (const event of this.sellService?.observeTicker(row.instId) ?? []) if (!this.queue.enqueue({ ...event, enqueuedAt: this.clock.nowMs() })) this.slo?.increment("queue_dropped_sell");
+    }
     // Ingress SLO boundary: normalized WS event through projection and into
     // the bounded consumer queue. Keep the old metric for dashboard continuity.
     this.slo?.record("event_enqueue", started); this.slo?.record("ws_projection_enqueue", started); this.slo?.observe("queue_depth", this.queue.size);
@@ -84,10 +87,13 @@ export class TradingEngine {
   }
   receiveCandle(row) {
     const result = this.projection.updateCandle(row);
-    if (result.accepted) { this.queue.enqueue({ type: "market-recheck", instId: row.instId, priority: "normal", enqueuedAt: this.clock.nowMs() }); for (const event of this.sellService?.observeCandle(row.instId) ?? []) this.queue.enqueue({ ...event, enqueuedAt: this.clock.nowMs() }); }
+    if (result.accepted) {
+      if (!this.queue.enqueue({ type: "market-recheck", instId: row.instId, priority: "normal", enqueuedAt: this.clock.nowMs() })) this.slo?.increment("queue_dropped_recheck");
+      for (const event of this.sellService?.observeCandle(row.instId) ?? []) if (!this.queue.enqueue({ ...event, enqueuedAt: this.clock.nowMs() })) this.slo?.increment("queue_dropped_sell");
+    }
     return result;
   }
-  receiveOrder(row) { return this.queue.enqueue({ type: "ORDER_UPDATE", priority: "critical", order: row, enqueuedAt: this.clock.nowMs() }); }
+  receiveOrder(row) { const accepted = this.queue.enqueue({ type: "ORDER_UPDATE", priority: "critical", order: row, enqueuedAt: this.clock.nowMs() }); if (!accepted) this.slo?.increment("queue_dropped_order"); return accepted; }
   rebuildExitWatches(fills) { this.sellService?.rebuild(fills); }
   async consumeOne() {
     const event = this.queue.take(); if (!event) return null;

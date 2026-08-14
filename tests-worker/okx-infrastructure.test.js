@@ -12,11 +12,12 @@ test("P1 REST transport signs, syncs server time, uses expTime, retries only GET
   const delays = []; const calls = [];
   const client = new OkxRestClient({ credentials, clock: { nowMs: () => now }, sleep: async (ms) => delays.push(ms), fetcher: async (url, init) => {
     calls.push({ url, init });
-    if (url.endsWith("/time")) return ok([{ ts: "6000" }]);
+    if (url.endsWith("/time")) { now = 1_100; return ok([{ ts: "6000" }]); }
     if (calls.filter((call) => call.url.includes("system/status")).length === 1) return new Response("slow", { status: 429, headers: { "retry-after": "2" } });
     return ok([{ sCode: "0", clOrdId: "A", ordId: "1" }]);
   } });
   await client.syncServerTime();
+  assert.equal(client.clockSkewMs, 4_950); assert.equal(client.clockSyncedAt, 1_100); assert.equal(client.clockFresh(10), true);
   await client.systemStatus();
   const result = await client.submitBatchOrders([{ clOrdId: "A", instId: "BTC-USDT" }], 99_999);
   assert.deepEqual(result, [{ clOrdId: "A", status: "SUBMITTED", ordId: "1" }]);
@@ -26,6 +27,7 @@ test("P1 REST transport signs, syncs server time, uses expTime, retries only GET
   assert.ok(batch.headers["OK-ACCESS-SIGN"]);
   assert.match(batch.headers["OK-ACCESS-TIMESTAMP"], /^1970-01-01T00:00:06/);
   assert.match(calls[0].url, /^https:\/\/openapi\.okx\.com\//);
+  now = 1_111; assert.equal(client.clockFresh(10), false);
 });
 
 test("P1 mutation transport makes one send attempt then returns UNKNOWN, while batch items stay independent", async () => {
@@ -137,10 +139,10 @@ test("P1 WS freshness expires at idleMs and the idle timer actively reconnects",
 
 test("P1 Private WS retains backoff until login and every subscription succeeds; Business emits only confirmed candles", async () => {
   const sockets = []; const candles = []; const privateEvents = []; const timers = fakeTimers();
-  const privateClient = new OkxPrivateWsClient({ credentials, socketFactory: () => { const socket = new FakeSocket(); sockets.push(socket); return socket; }, timers, random: () => 0.5, onObservation: (event) => privateEvents.push(event) });
+  const privateClient = new OkxPrivateWsClient({ credentials, socketFactory: () => { const socket = new FakeSocket(); sockets.push(socket); return socket; }, clock: { nowMs: () => 10_000 }, clockSkewMs: () => 5_000, timers, random: () => 0.5, onObservation: (event) => privateEvents.push(event) });
   let signed; const signingClient = new OkxPrivateWsClient({ credentials: { sign: async (text) => { signed = text; return "signature"; } }, socketFactory: () => new FakeSocket() });
   assert.equal(await signingClient.loginSignature("123"), "signature"); assert.equal(signed, "123GET/users/self/verify");
-  privateClient.connect(); await privateClient.open(sockets[0]); assert.match(sockets[0].sent[0], /login/); sockets[0].emit("message", JSON.stringify({ event: "login", code: "60009" })); timers.runTimeouts(); assert.equal(sockets.length, 2); assert.deepEqual(timers.delays, [500]);
+  privateClient.connect(); await privateClient.open(sockets[0]); assert.equal(JSON.parse(sockets[0].sent[0]).args[0].timestamp, "15"); sockets[0].emit("message", JSON.stringify({ event: "login", code: "60009" })); timers.runTimeouts(); assert.equal(sockets.length, 2); assert.deepEqual(timers.delays, [500]);
   await privateClient.open(sockets[1]); sockets[1].emit("message", JSON.stringify({ event: "login", code: "60009" })); assert.deepEqual(timers.delays, [500, 1_000]);
   timers.runTimeouts(); await privateClient.open(sockets[2]); sockets[2].emit("message", JSON.stringify({ event: "login", code: "0" }));
   for (const arg of [{ channel: "account" }, { channel: "balance_and_position" }, { channel: "orders", instType: "ANY" }]) sockets[2].emit("message", JSON.stringify({ event: "subscribe", arg }));

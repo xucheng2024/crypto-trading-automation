@@ -1,5 +1,6 @@
 import { addDecimal, compareDecimal, multiplyDecimal, subtractDecimal } from "../decimal.js";
-import { BUY_ADMISSION_LEVERAGE, adjustedEquity, buySignal, dailyLimit, strategyDay } from "../domain/rules.js";
+import { BUY_ADMISSION_LEVERAGE, adjustedEquity, buySignal, candleFreshness, dailyLimit, strategyDay } from "../domain/rules.js";
+import { CLOCK_SYNC_STALE_AFTER_MS } from "../infrastructure/okx/rest-client.js";
 import { payloadHash } from "../domain/order.js";
 
 function field(row, snake, camel) { return row?.[snake] ?? row?.[camel]; }
@@ -22,6 +23,14 @@ export function selectDailyCandles(rows, currentDay) {
   if (!today || !yesterday) throw new Error(`DAILY_CANDLES_INCOMPLETE:${currentDay}`);
   const value = (item, index) => String(item.row[index] ?? "");
   return { todayCandleTs: today.ts, todayOpen: value(today, 1), yesterdayCandleTs: yesterday.ts, yesterdayOpen: value(yesterday, 1), yesterdayClose: value(yesterday, 4) };
+}
+
+export function normalizeConfirmed3mCandle(instId, rows) {
+  const row = (rows ?? []).filter((value) => String(value?.[8]) === "1").sort((a, b) => Number(b[0]) - Number(a[0]))[0];
+  if (!row) return null;
+  const [ts, open, high, low, close, volume, volumeCcy, volumeCcyQuote] = row;
+  if (!Number.isFinite(Number(ts))) return null;
+  return { instId, ts: Number(ts), open, high, low, close, volume, volumeCcy, volumeCcyQuote, confirm: true };
 }
 
 /** Converts market observations into durable, guarded BUY intents. */
@@ -60,10 +69,8 @@ export class BuySignalPlanner {
   async ensureThreeMinuteCandle(instId) {
     if (this.market.candle(instId)?.confirm) return this.market.candle(instId);
     const rows = await this.rest.candles(instId, { bar: "3m", limit: 3 });
-    const row = (rows ?? []).filter((value) => String(value?.[8]) === "1").sort((a, b) => Number(b[0]) - Number(a[0]))[0];
-    if (!row) throw new Error(`CANDLE3M_BASELINE_MISSING:${instId}`);
-    const [ts, open, high, low, close, volume, volumeCcy, volumeCcyQuote] = row;
-    const candle = { instId, ts: Number(ts), open, high, low, close, volume, volumeCcy, volumeCcyQuote, confirm: true };
+    const candle = normalizeConfirmed3mCandle(instId, rows);
+    if (!candle) throw new Error(`CANDLE3M_BASELINE_MISSING:${instId}`);
     this.market.updateCandle(candle); return candle;
   }
   async prime() {
@@ -126,13 +133,13 @@ export class BuySignalPlanner {
   }
   async _observe(event) {
     const instId = event?.instId; if (!instId || !this.instIds.includes(instId)) return { queued: false, reason: "IGNORED" };
-    const day = strategyDay(this.exchangeNowMs());
+    const exchangeNowMs = this.exchangeNowMs(); const day = strategyDay(exchangeNowMs);
     if (this.currentDay !== day) { this.readyGate.set("strategy", false); void this.prime().catch(() => {}); return { queued: false, reason: "STRATEGY_DAY_REFRESH" }; }
     if (event.type === "market-recheck" && this.hasOpenManagedBuy(instId)) {
       const low = this.market.candle(instId)?.low;
       if (low) await this.transaction((tx) => this.state.recordAdversePrice?.(tx, { accountId: this.accountId, instId, price: low }));
     }
-    const instrument = this.market.instrument(instId); const quote = this.market.freshQuote(instId, this.quoteFreshMs); const candle = this.market.candle(instId); const daily = this.daily.get(`${instId}:${day}`);
+    const instrument = this.market.instrument(instId); const quote = this.market.freshQuote(instId, this.quoteFreshMs); const candle = this.market.candle(instId); const daily = this.daily.get(`${instId}:${day}`); const candleState = candleFreshness({ candle, exchangeNowMs });
     const base = { type: "trading_decision", side: "BUY", strategyDay: day, quoteTs: quote?.ts, last: quote?.last, askPx: quote?.askPx, candleTs: candle?.ts, previousClosedHigh: candle?.high, dailyLimitPrice: daily?.dailyLimitPrice, configHash: this.strategyConfig.contentHash };
     let reason;
     if (!daily) reason = "DAILY_LIMIT_PENDING";
@@ -141,6 +148,9 @@ export class BuySignalPlanner {
     else if (this.protected.has(instId)) reason = "INSTRUMENT_PROTECTED";
     else if (!quote) reason = "QUOTE_STALE";
     else if (!candle?.confirm) reason = "CANDLE_MISSING";
+    else if (candleState.state === "PENDING") reason = "CANDLE_PENDING";
+    else if (candleState.state !== "FRESH") reason = "CANDLE_STALE";
+    else if (!this.rest.clockFresh(CLOCK_SYNC_STALE_AFTER_MS)) reason = "CLOCK_SYNC_STALE";
     else if (!this.account.value?.adjEq) reason = "ACCOUNT_SNAPSHOT_MISSING";
     if (reason) { this.emitDecision(instId, { ...base, reason }); return { queued: false, reason }; }
     const signal = buySignal({ last: quote.last, askPx: quote.askPx, limitPrice: daily.dailyLimitPrice, previousClosedHigh: candle.high });

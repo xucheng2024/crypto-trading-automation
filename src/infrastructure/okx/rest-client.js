@@ -1,4 +1,5 @@
 const encoder = new TextEncoder();
+export const CLOCK_SYNC_STALE_AFTER_MS = 600_000;
 
 export const OKX_PROFILES = Object.freeze({
   GLOBAL: Object.freeze({ restUrl: "https://openapi.okx.com", publicWsUrl: "wss://ws.okx.com:8443/ws/v5/public", privateWsUrl: "wss://ws.okx.com:8443/ws/v5/private", businessWsUrl: "wss://ws.okx.com:8443/ws/v5/business" }),
@@ -94,6 +95,7 @@ export class OkxRestClient {
     this.timeoutMs = timeoutMs;
     this.nextRequestAt = 0;
     this.clockSkewMs = 0;
+    this.clockSyncedAt = 0;
   }
 
   async sign(text) {
@@ -111,20 +113,28 @@ export class OkxRestClient {
   }
 
   async syncServerTime() {
-    const data = await this.read("/api/v5/public/time", {}, false);
+    await this.waitForSlot();
+    const before = this.clock.nowMs();
+    const data = assertOkxResponse(await this.request("GET", "/api/v5/public/time", { authenticated: false, retryReads: 0, skipWait: true }));
+    const after = this.clock.nowMs();
     const serverMs = Number(data[0]?.ts);
     if (!Number.isFinite(serverMs)) throw new Error("Invalid OKX server time");
-    this.clockSkewMs = serverMs - this.clock.nowMs();
+    this.clockSkewMs = serverMs - Math.round((before + after) / 2);
+    this.clockSyncedAt = after;
     return serverMs;
   }
 
-  async request(method, path, { params, body, authenticated = true, expTime, retryReads = method === "GET" ? 3 : 0 } = {}) {
+  clockFresh(maxAgeMs = CLOCK_SYNC_STALE_AFTER_MS) {
+    return this.clockSyncedAt > 0 && this.clock.nowMs() - this.clockSyncedAt <= maxAgeMs;
+  }
+
+  async request(method, path, { params, body, authenticated = true, expTime, retryReads = method === "GET" ? 3 : 0, skipWait = false } = {}) {
     const requestPath = `${path}${query(params)}`;
     const bodyText = body === undefined ? "" : JSON.stringify(body);
     let lastError;
     for (let attempt = 0; attempt <= retryReads; attempt += 1) {
       try {
-        await this.waitForSlot();
+        if (!skipWait || attempt > 0) await this.waitForSlot();
         const headers = { Accept: "application/json", "Content-Type": "application/json" };
         if (authenticated) {
           const timestamp = new Date(this.clock.nowMs() + this.clockSkewMs).toISOString();

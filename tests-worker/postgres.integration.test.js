@@ -17,6 +17,7 @@ import { InstrumentProtectionService } from "../src/application/instrument-prote
 import { P3_DELETE_TERMINAL_ATTEMPTS_SQL, P3_RETENTION_VERSION, retainTerminalAttempts, retainTerminalAttemptsAsMaintenance } from "../src/infrastructure/postgres/retention.js";
 import { importOfflineProtection } from "../src/infrastructure/postgres/offline-import.js";
 import { convertD1Export } from "../tools/convert-d1-export.mjs";
+import { expectedClosedCandleTs } from "../src/domain/rules.js";
 
 const run = promisify(execFile);
 
@@ -368,12 +369,13 @@ test("temporary PostgreSQL enforces P1-B invariants", { timeout: 60_000 }, async
       for (let index = 1; index <= 50; index += 1) {
         const instId = `C${String(index).padStart(2, "0")}-USDT`; const base = `C${String(index).padStart(2, "0")}`;
         market.updateInstrument({ instId, ts: 1, state: "live", tickSz: "0.1", lotSz: "0.001", minSz: "0.001", base, version: 1 });
-        market.updateTicker({ instId, ts: 2, last: "95", askPx: "95", bidPx: "94" }); market.updateCandle({ instId, ts: 1, open: "90", high: "90", low: "89", confirm: true });
+        market.updateTicker({ instId, ts: 2, last: "95", askPx: "95", bidPx: "94" }); market.updateCandle({ instId, ts: expectedClosedCandleTs(now.nowMs()), open: "90", high: "90", low: "89", confirm: true });
       }
       const batches = []; let batchNo = 0;
       const coordinator = new OrderCoordinator({ transaction: (fn) => tx(db.admin, fn), orders, state, market, account, readyGate: gate, ownerGuard: { isHeld: () => true }, mode: () => "FULL", clock: now,
         config: { accountId: "coord50", orderVersion: "P2", strategyTag: "STRAT", orderExpiryMs: 1_000, quoteFreshMs: 100, accountFreshMs: 100 },
         transport: {
+          clockFresh: () => true, clockSkewMs: 0,
           maxAvailSize: async (ids) => ids.split(",").map((instId) => ({ instId, availBuy: "5" })),
           submitBatchOrders: async (payload) => { batches.push(payload); batchNo += 1; return payload.map((item, index) => batchNo === 1 && index === 0 ? { clOrdId: item.clOrdId, status: "UNKNOWN", reason: "timeout" } : batchNo === 2 && index === 0 ? { clOrdId: item.clOrdId, status: "NOT_CREATED", reason: "rejected" } : { clOrdId: item.clOrdId, status: "SUBMITTED", ordId: `o-${item.clOrdId}` }); },
         },

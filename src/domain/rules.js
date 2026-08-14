@@ -3,6 +3,24 @@ import { compareDecimal, divideDecimal, multiplyDecimal, roundToStep } from "../
 export const BUY_ADMISSION_LEVERAGE = "2.95";
 export const MAX_STRATEGY_EFFECTIVE_LEVERAGE = "3";
 export const TRADE_FEE_RATE = "0.0005";
+export const CANDLE_INTERVAL_MS = 180_000;
+export const CANDLE_STALE_HARD_MS = 390_000;
+
+export function expectedClosedCandleTs(exchangeTimeMs) {
+  if (!Number.isFinite(exchangeTimeMs)) throw new Error("exchange time is required");
+  return Math.floor(exchangeTimeMs / CANDLE_INTERVAL_MS) * CANDLE_INTERVAL_MS - CANDLE_INTERVAL_MS;
+}
+
+export function candleFreshness({ candle, exchangeNowMs }) {
+  if (!candle?.confirm) return { state: "MISSING" };
+  const candleTs = Number(candle.ts);
+  if (!Number.isFinite(candleTs)) return { state: "STALE", age: NaN, expectedTs: expectedClosedCandleTs(exchangeNowMs) };
+  const expectedTs = expectedClosedCandleTs(exchangeNowMs);
+  const age = exchangeNowMs - candleTs;
+  if (age < 0 || candleTs > expectedTs || age >= CANDLE_STALE_HARD_MS) return { state: "STALE", age, expectedTs };
+  if (candleTs < expectedTs) return { state: "PENDING", age, expectedTs };
+  return { state: "FRESH", age, expectedTs };
+}
 
 export function strategyDay(exchangeTimeMs) {
   if (!Number.isFinite(exchangeTimeMs)) throw new Error("exchange time is required");

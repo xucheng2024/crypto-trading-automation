@@ -14,7 +14,7 @@ import { OkxPublicWsClient, OkxPrivateWsClient, OkxBusinessWsClient } from "../i
 import { VirtualSloMetrics } from "./slo-metrics.js";
 import { EngineRecurringWork } from "./engine-recurring-work.js";
 import { EngineWorkLoop } from "./engine-work-loop.js";
-import { BuySignalPlanner } from "./buy-signal-planner.js";
+import { BuySignalPlanner, normalizeConfirmed3mCandle } from "./buy-signal-planner.js";
 import { ManagedIdentityCredential } from "@azure/identity";
 
 const noop = () => {};
@@ -80,11 +80,15 @@ export async function composeProductionRuntime(env, injected = {}) {
   const executionRoutes = injected.executionRoutes ?? new Map();
   const quoteCurrencies = injected.quoteCurrencies ?? new Map();
   const slo = injected.slo ?? new VirtualSloMetrics(runtime.clock);
-  let buyPlanner;
+  let buyPlanner; let engine;
   const coordinator = injected.coordinator ?? new OrderCoordinator({ transaction, orders, state, transport: rest, ownerGuard, readyGate, market, account, mode: () => config.tradingMode, executionRoute: (instId) => executionRoutes.get(instId), tradeQuoteCurrency: (instId) => quoteCurrencies.get(instId), isBuyAllowed: (instId) => !buyPlanner?.protected?.has(instId), clock: runtime.clock, config: injected.orderConfig ?? { accountId: config.accountId, strategyTag: config.strategyTag, orderVersion: config.orderVersion, accountFreshMs: config.account_max_age_ms, quoteFreshMs: config.quote_max_age_ms, orderExpiryMs: config.order_expiry_ms }, telemetry, slo,
     onBuySettled: async () => { if (!buyPlanner) return; const ledger = await buyPlanner.reloadLedger(); sellService.rebuild(ledger); },
   });
-  const sellService = injected.sellService ?? new SellService({ state, transaction, coordinator, market, clock: runtime.clock, telemetry });
+  const refreshCandle = async (instId) => {
+    const candle = normalizeConfirmed3mCandle(instId, await rest.candles(instId, { bar: "3m", limit: 3 }));
+    if (candle) engine.receiveCandle(candle);
+  };
+  const sellService = injected.sellService ?? new SellService({ state, transaction, coordinator, market, clock: runtime.clock, exchangeNowMs: () => runtime.clock.nowMs() + Number(rest.clockSkewMs ?? 0), refreshCandle, telemetry });
   const delist = injected.delist ?? new DelistOrchestrator({ transaction, state, orders, coordinator, accountId: config.accountId, market, telemetry }).bind();
   const protection = injected.protection ?? new InstrumentProtectionService({ state, transaction, telemetry, onProtect: (p) => buyPlanner?.protected?.add(p.instId), onExit: (p) => delist.drive(p.instId) });
   const holdHoursByInst = Object.fromEntries(Object.entries(config.strategyConfig.rows).map(([instId, row]) => [instId, row.holdHours]));
@@ -98,7 +102,7 @@ export async function composeProductionRuntime(env, injected = {}) {
       return result;
     },
   });
-  const engine = injected.engine ?? new TradingEngine({ projection: market, account, readyGate, clock: runtime.clock, coordinator, sellService, onMarketEvent: (event) => buyPlanner.observe?.(event), onOrderEvent: (order) => reconciliation.observeOrder?.(order), onWatchdog: injected.onWatchdog ?? telemetry, slo });
+  engine = injected.engine ?? new TradingEngine({ projection: market, account, readyGate, clock: runtime.clock, coordinator, sellService, onMarketEvent: (event) => buyPlanner.observe?.(event), onOrderEvent: (order) => reconciliation.observeOrder?.(order), onWatchdog: injected.onWatchdog ?? telemetry, slo });
   const workLoop = injected.workLoop ?? new EngineWorkLoop({ engine, coordinator, timers: injected.timers ?? globalThis, telemetry });
   const socketFactory = injected.socketFactory ?? ((url) => { if (typeof WebSocket !== "function") throw new Error("WEBSOCKET_FACTORY_UNAVAILABLE"); return new WebSocket(url); });
   if (!injected.ws && !instIds.length) throw new Error("OKX_INSTRUMENTS_REQUIRED");
@@ -117,7 +121,7 @@ export async function composeProductionRuntime(env, injected = {}) {
   };
   const observePrivate = (row) => { if (row.type === "account" && account.update(row)) readyGate.set("account", true); else if (row.type === "orders") engine.receiveOrder(row); };
   const observeBusiness = (row) => { if (row.type === "candle3m") engine.receiveCandle(row); };
-  const ws = injected.ws ?? { public: new OkxPublicWsClient({ instIds, socketFactory, profile, clock: runtime.clock, onObservation: observePublic, onState: (s) => readyGate.set("public", s.fresh) }), private: new OkxPrivateWsClient({ socketFactory, credentials, profile, clock: runtime.clock, onObservation: observePrivate, onState: (s) => readyGate.set("private", s.fresh) }), business: new OkxBusinessWsClient({ instIds, socketFactory, profile, clock: runtime.clock, onObservation: observeBusiness, onState: (s) => readyGate.set("business", s.fresh) }) };
+  const ws = injected.ws ?? { public: new OkxPublicWsClient({ instIds, socketFactory, profile, clock: runtime.clock, onObservation: observePublic, onState: (s) => readyGate.set("public", s.fresh) }), private: new OkxPrivateWsClient({ socketFactory, credentials, profile, clock: runtime.clock, clockSkewMs: () => rest.clockSkewMs, onObservation: observePrivate, onState: (s) => readyGate.set("private", s.fresh) }), business: new OkxBusinessWsClient({ instIds, socketFactory, profile, clock: runtime.clock, onObservation: observeBusiness, onState: (s) => readyGate.set("business", s.fresh) }) };
   const migrationCheck = injected.migrationCheck ?? (async () => {
     const result = await pool.query(`SELECT to_regclass('public.order_attempts') AS attempts, to_regclass('public.filled_orders') AS fills,
       to_regclass('public.sync_watermarks') AS watermarks,
@@ -134,8 +138,13 @@ export async function composeProductionRuntime(env, injected = {}) {
     return reconciliation.reconcileAll({ accountId: config.accountId, attempts, watermarks });
   };
   const baseline = injected.baseline ?? (() => runRestBaseline({ rest, instIds, market, account, readyGate, clock: runtime.clock, executionRoutes, quoteCurrencies }));
+  let clockSyncPromise = null;
+  const clockSync = () => {
+    if (!clockSyncPromise) clockSyncPromise = Promise.resolve(rest.syncServerTime()).finally(() => { clockSyncPromise = null; });
+    return clockSyncPromise;
+  };
   const recurring = injected.recurring ?? new EngineRecurringWork({ timers: injected.timers ?? globalThis, telemetry,
-    announcementMs: injected.announcementMs ?? 60_000, reconcileMs: injected.reconcileMs ?? 300_000, routeMs: injected.routeMs ?? 3_600_000, weeklyMs: injected.weeklyMs ?? 7 * 86_400_000,
+    announcementMs: injected.announcementMs ?? 60_000, reconcileMs: injected.reconcileMs ?? 300_000, routeMs: injected.routeMs ?? 3_600_000, weeklyMs: injected.weeklyMs ?? 7 * 86_400_000, clockSyncMs: injected.clockSyncMs ?? 300_000, candleReviewMs: injected.candleReviewMs ?? 15_000,
     announcements: () => protection.scanAnnouncements((page) => rest.announcements(page), instIds.map((instId) => market.instrument(instId)).filter(Boolean)),
     reconcile, refreshRoutes: async () => {
       try {
@@ -143,7 +152,7 @@ export async function composeProductionRuntime(env, injected = {}) {
         try { Promise.resolve(telemetry({ type: "execution_routes", reason: "ROUTES_REFRESHED", ...counts })).catch(() => {}); } catch {}
         return counts;
       } catch (error) { readyGate.set("account", false); throw error; }
-    }, weeklyReconcile: injected.weeklyReconcile ?? reconcile,
+    }, weeklyReconcile: injected.weeklyReconcile ?? reconcile, clockSync, reviewCandles: () => sellService.reviewCandleFreshness(),
     reportMetrics: () => { const snapshot = engine.snapshot(); telemetry({ type: "metric_snapshot", reason: "RUNTIME_METRICS", ...slo.snapshot({ reset: true }), ready: snapshot.ready.ready ? 1 : 0, queue_depth_current: snapshot.queue, pending_buy_current: coordinator.pending?.BUY?.size ?? 0, active_buy_current: snapshot.activeBuy }); },
   });
   return { runtime, keyVault, credentials, pool, ownerClient, ownerGuard, orders, state, transaction, market, account, readyGate, coordinator, reconciliation, buyPlanner, sellService, protection, delist, rest, ws, engine, workLoop, slo, recurring, executionRoutes, quoteCurrencies, offline: false,

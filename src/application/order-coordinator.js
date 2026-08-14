@@ -1,5 +1,6 @@
 import { compareDecimal, divideDecimal, multiplyDecimal, parseDecimal, formatDecimal, roundToStep, subtractDecimal } from "../decimal.js";
-import { BUY_ADMISSION_LEVERAGE, TRADE_FEE_RATE, adjustedEquity, assessLeverage, buySignal } from "../domain/rules.js";
+import { BUY_ADMISSION_LEVERAGE, TRADE_FEE_RATE, adjustedEquity, assessLeverage, buySignal, candleFreshness } from "../domain/rules.js";
+import { CLOCK_SYNC_STALE_AFTER_MS } from "../infrastructure/okx/rest-client.js";
 import { createClOrdId, payloadHash } from "../domain/order.js";
 
 const PRIORITY = { DELIST: 3, SELL: 2, BUY: 1 };
@@ -301,8 +302,10 @@ export class OrderCoordinator {
     if (this.mode() !== "FULL") return { allowed: false, reason: "MODE" };
     if (!this.ownerGuard.isHeld()) return { allowed: false, reason: "OWNER" };
     if (!this.readyGate.ready || !this.account.fresh(this.config.accountFreshMs)) return { allowed: false, reason: "NOT_READY" };
+    if (!this.transport.clockFresh(CLOCK_SYNC_STALE_AFTER_MS)) return { allowed: false, reason: "CLOCK_SYNC_STALE" };
     const quote = this.market.freshQuote(intent.instId, this.config.quoteFreshMs); const candle = this.market.candle(intent.instId); const instrument = this.market.instrument(intent.instId);
     if (!quote || !candle || !instrument || instrument.state !== "live" || intent.protected || intent.enabled === false || intent.dailyReady === false || !this.isBuyAllowed(intent.instId)) return { allowed: false, reason: "MARKET" };
+    if (candleFreshness({ candle, exchangeNowMs: this.clock.nowMs() + Number(this.transport.clockSkewMs ?? 0) }).state !== "FRESH") return { allowed: false, reason: "MARKET" };
     const risk = assessLeverage({ committedExposure: intent.managedExposure ?? "0", ...this.account.value });
     if (risk.hardStopped) return { allowed: false, reason: "HARD_STOP" };
     const signal = buySignal({ last: quote.last, askPx: quote.askPx, limitPrice: roundToStep(intent.dailyLimitPrice, instrument.tickSz, "down"), previousClosedHigh: candle.high });

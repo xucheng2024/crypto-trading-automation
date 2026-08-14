@@ -1,5 +1,5 @@
 import { compareDecimal, multiplyDecimal, roundToStep, subtractDecimal } from "../decimal.js";
-import { sellBreakdownPrice } from "../domain/rules.js";
+import { candleFreshness, sellBreakdownPrice } from "../domain/rules.js";
 
 const field = (row, snake, camel) => row[snake] ?? row[camel];
 
@@ -9,9 +9,9 @@ const field = (row, snake, camel) => row[snake] ?? row[camel];
  * consume* runs later and is the only part that reads/writes durable state.
  */
 export class SellService {
-  constructor({ state, transaction = async (fn) => fn(null), coordinator, market, clock = { nowMs: () => Date.now() }, telemetry = () => {}, loadFill = async (_tx, key) => this.fills.get(key) }) {
-    Object.assign(this, { state, transaction, coordinator, market, clock, telemetry, loadFill });
-    this.fills = new Map(); this.byInst = new Map(); this.latches = new Set();
+  constructor({ state, transaction = async (fn) => fn(null), coordinator, market, clock = { nowMs: () => Date.now() }, exchangeNowMs = () => clock.nowMs(), refreshCandle = async () => {}, telemetry = () => {}, loadFill = async (_tx, key) => this.fills.get(key) }) {
+    Object.assign(this, { state, transaction, coordinator, market, clock, exchangeNowMs, refreshCandle, telemetry, loadFill });
+    this.fills = new Map(); this.byInst = new Map(); this.latches = new Set(); this.candleRefreshes = new Set();
   }
   key(fill) { return `${field(fill, "account_id", "accountId")}:${field(fill, "inst_id", "instId")}:${field(fill, "trade_id", "tradeId")}`; }
   _emit(event) { try { Promise.resolve(this.telemetry(event)).catch(() => {}); } catch { /* best effort */ } }
@@ -25,7 +25,16 @@ export class SellService {
   }
   observeCandle(instId) {
     const candle = this.market.candle(instId); const instrument = this.market.instrument(instId);
-    if (!candle || !candle.confirm || !instrument) return [];
+    if (!instrument) return [];
+    const freshness = candleFreshness({ candle, exchangeNowMs: this.exchangeNowMs() });
+    if (freshness.state !== "FRESH") {
+      const reason = freshness.state === "PENDING" ? "SELL_CANDLE_PENDING" : freshness.state === "MISSING" ? "SELL_CANDLE_MISSING" : "SELL_CANDLE_STALE";
+      const fills = [...(this.byInst.get(instId) ?? [])].map((key) => this.fills.get(key)).filter(Boolean);
+      this._emit({ type: "sell_protection", reason, instId, candleTs: candle?.ts, expectedTs: freshness.expectedTs, age: freshness.age });
+      for (const fill of fills) if (!fill.protection_price) this._emit({ type: "sell_protection", reason: "SELL_PROTECTION_UNARMED", instId, sourceBuyTradeId: field(fill, "trade_id", "tradeId") });
+      this._refreshCandle(instId);
+      return [];
+    }
     const events = [];
     for (const key of this.byInst.get(instId) ?? []) {
       const fill = this.fills.get(key); if (!fill || Number(field(fill, "sell_time", "sellTime")) > this.clock.nowMs()) continue;
@@ -37,6 +46,28 @@ export class SellService {
       }
     }
     return [...events, ...this.observeTicker(instId)];
+  }
+  reviewCandleFreshness() {
+    for (const instId of this.byInst.keys()) {
+      const freshness = candleFreshness({ candle: this.market.candle(instId), exchangeNowMs: this.exchangeNowMs() });
+      if (freshness.state === "FRESH") continue;
+      const reason = freshness.state === "PENDING" ? "SELL_CANDLE_PENDING" : freshness.state === "MISSING" ? "SELL_CANDLE_MISSING" : "SELL_CANDLE_STALE";
+      this._emit({ type: "sell_protection", reason, instId, candleTs: this.market.candle(instId)?.ts, expectedTs: freshness.expectedTs, age: freshness.age });
+      for (const key of this.byInst.get(instId) ?? []) {
+        const fill = this.fills.get(key);
+        if (fill && !fill.protection_price) this._emit({ type: "sell_protection", reason: "SELL_PROTECTION_UNARMED", instId, sourceBuyTradeId: field(fill, "trade_id", "tradeId") });
+      }
+      this._refreshCandle(instId);
+    }
+  }
+  _refreshCandle(instId) {
+    if (this.candleRefreshes.has(instId)) return;
+    this.candleRefreshes.add(instId);
+    try {
+      Promise.resolve(this.refreshCandle(instId)).catch((error) => this._emit({ type: "sell_protection", reason: "SELL_CANDLE_REFRESH_FAILED", instId, error: error?.message })).finally(() => this.candleRefreshes.delete(instId));
+    } catch (error) {
+      this.candleRefreshes.delete(instId); this._emit({ type: "sell_protection", reason: "SELL_CANDLE_REFRESH_FAILED", instId, error: error?.message });
+    }
   }
   observeTicker(instId) {
     const quote = this.market.freshQuote(instId, this.market.quoteFreshMs ?? 30_000); if (!quote) return [];
