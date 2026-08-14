@@ -4,6 +4,11 @@ A comprehensive automated crypto trading system with OKX exchange integration, f
 
 The production runtime is Azure Container Apps and PostgreSQL in Azure East Asia (Hong Kong). It is deployed with `TRADING_MODE=OFF`; enabling FULL requires separate authorization.
 
+All changes must pass the local-first test and immutable-digest deployment gate
+in [`docs/runbooks/P4_AZURE_CANDIDATE.md`](docs/runbooks/P4_AZURE_CANDIDATE.md).
+Azure must not be used as the first test environment, and a successful `OFF`
+deployment never authorizes enabling `FULL`.
+
 The former Cloudflare Worker, D1 database, Worker secrets, and GitHub reconciliation workflow were permanently decommissioned on 2026-08-14. Cloudflare implementation files remain only as migration/audit history and have no production deployment configuration.
 
 The Azure/OKX WebSocket design is documented in [`AZURE_WS_TRADING_DESIGN.md`](AZURE_WS_TRADING_DESIGN.md).

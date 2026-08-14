@@ -1,6 +1,39 @@
-# P4 Azure deployment candidate runbook
+# Azure deployment and release runbook
 
-This runbook is preparation only. The local candidate is complete, while P4 is **blocked on external verification** until separately authorized Azure validate/what-if and real OKX read-only preflight pass. It must not be used to enter P5, stop legacy services, revoke keys, clear orders, or enable `FULL`. PostgreSQL uses Entra-only authentication; bootstrap runtime roles with the separately reviewed SQL rehearsal, never a password environment variable.
+This file began as the P4 candidate runbook and is now the authoritative Azure
+release gate. Production is deployed in Azure with `TRADING_MODE=OFF`. Nothing
+in this runbook authorizes `FULL` or any OKX mutation; changing to `FULL`
+requires a separate, explicit operator authorization. PostgreSQL uses Entra-only
+authentication; bootstrap runtime roles with the separately reviewed SQL
+rehearsal, never a password environment variable.
+
+## Mandatory change and deployment gate
+
+Do not use Azure as the first test environment. For every code change:
+
+1. Add or update a focused regression test for the changed behavior and run its
+   test file locally.
+2. Run `npm test` locally. This includes the temporary real-PostgreSQL lifecycle,
+   restart, concurrency, reservation, Spot/Margin ordering and recovery tests.
+   Any failure blocks image build and deployment.
+3. For OKX REST, authentication or WebSocket changes, run the applicable real
+   public, business and private connection checks locally. These checks are
+   read-only: subscriptions and the hard-coded GET allowlist are permitted;
+   order placement, cancellation, borrowing and every other mutation are not.
+4. For migrations, container or IaC changes, also run the relevant
+   `npm run migrate:rehearsal`, `npm run test:container`, `npm run test:iac`,
+   Bicep build, Azure validate and what-if checks before deployment.
+5. Review `git diff --check` and the exact diff. Preserve unrelated and untracked
+   operator files. Commit and push the tested source before building an image.
+6. Build once from that commit, push to ACR, and deploy only the immutable
+   `repository@sha256:<digest>`. Never deploy a mutable tag.
+
+If a cloud deployment exposes a defect, keep the service `OFF`, reproduce the
+defect locally, add a regression test, run the gates above, and then build one
+new digest. Do not repeatedly patch and probe production when the behavior can
+be tested locally. Only Azure-specific control-plane, managed-identity, network,
+Key Vault and Container Apps lifecycle behavior is deferred to post-deployment
+verification.
 
 ## Preconditions
 
@@ -60,9 +93,34 @@ Supply converter output verbatim as `strategyConfigJson`, the enabled pairs as `
 
 Verify liveness, global READY and RECOVERING from redacted telemetry. READY must remain false until owner lock, recovery, public/private/business WS baselines, account and instruments are fresh. A temporary WS outage is an alert/reconnect condition, not a liveness-kill loop.
 
-## P5 gate (not authorized here)
+The Engine uses a PostgreSQL session advisory lock and must have only one owner.
+For an image-only release, create the new `OFF` revision, deactivate every old
+or automatically reactivated fallback revision, and verify that only the final
+revision remains active. Azure may temporarily reactivate an older fallback
+while a new revision is unready; listing only the latest revision is therefore
+insufficient. If the new process attempted startup while the old owner still
+held the lock, let it restart or restart only the final revision after all old
+replicas have stopped.
 
-Before a separately authorized P5: inventory legacy mutation schedulers, then manually verify old scheduler/API-key/pending-algo cleanup; use ownership filters only. `FULL` needs new explicit authorization. Observe the first order and ledger state. Never scan positions, pending algo, bills or unrelated shared-account assets.
+Every deployment must finish with all of the following evidence:
+
+- the deployed image exactly matches the recorded immutable digest and tested
+  commit;
+- `TRADING_MODE=OFF` unless a separate explicit authorization says otherwise;
+- the configured instrument count and strategy hash match the reviewed inputs;
+- exactly one revision is active with one ready replica and Azure health is
+  `Healthy`;
+- `/health/live` succeeds and `/health/ready` returns HTTP 200; owner, database,
+  public/private/business WebSockets, account and instruments are all ready;
+- the real OKX GET-only preflight succeeds without exposing credentials or
+  sending a mutation.
+
+A successful deployment does not imply authorization to enable trading. Leave
+the service `OFF` and report the evidence before any proposed mode change.
+
+## FULL gate (not authorized here)
+
+Before separately authorized `FULL`: inventory legacy mutation schedulers, then manually verify old scheduler/API-key/pending-algo cleanup; use ownership filters only. `FULL` needs new explicit authorization. Observe the first order and ledger state. Never scan positions, pending algo, bills or unrelated shared-account assets.
 
 ## Incident and rollback
 
