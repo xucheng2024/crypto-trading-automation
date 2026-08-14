@@ -7,8 +7,17 @@ param prefix string = 'trading'
 param tags object = {}
 @allowed(['Consumption', 'Dedicated'])
 param workloadProfileType string = 'Consumption'
-param postgresSku string = 'Standard_D2ds_v4'
-param monthlyBudgetUsd int = 250
+@allowed(['Standard_B1ms', 'Standard_B2s', 'Standard_B2ms', 'Standard_D2ds_v4'])
+param postgresSku string = 'Standard_B1ms'
+@allowed(['Burstable', 'GeneralPurpose'])
+param postgresTier string = 'Burstable'
+@allowed(['Disabled', 'SameZone', 'ZoneRedundant'])
+param postgresHaMode string = 'Disabled'
+@minValue(32)
+param postgresStorageGb int = 32
+@allowed(['Basic', 'Standard', 'Premium'])
+param acrSku string = 'Basic'
+param monthlyBudgetUsd int = 150
 param budgetStartDate string
 param budgetContactEmails array
 param budgetThresholdPercent int = 80
@@ -52,7 +61,7 @@ module observability 'modules/observability.bicep' = {
 }
 module registry 'modules/registry.bicep' = {
   name: 'registry'
-  params: { location: location, name: '${toLower(replace(prefix, '-', ''))}acr', tags: tags }
+  params: { location: location, name: '${toLower(replace(prefix, '-', ''))}acr', skuName: acrSku, tags: tags }
 }
 module vault 'modules/keyvault.bicep' = { name: 'vault', params: { location: location, name: names.kv, tags: tags } }
 module postgres 'modules/postgres.bicep' = {
@@ -61,6 +70,9 @@ module postgres 'modules/postgres.bicep' = {
     location: location
     name: names.pg
     skuName: postgresSku
+    skuTier: postgresTier
+    highAvailabilityMode: postgresHaMode
+    storageSizeGb: postgresStorageGb
     allowedNatIp: network.outputs.publicIp
     entraAdministratorObjectId: entraAdministratorObjectId
     entraAdministratorPrincipalName: entraAdministratorPrincipalName

@@ -49,6 +49,7 @@ resource engine 'Microsoft.App/containerApps@2024-03-01' = {
         {
           name: 'trading-engine'
           image: image
+          resources: { cpu: json('0.25'), memory: '0.5Gi' }
           env: [
             { name: 'TRADING_MODE', value: 'OFF' }
             { name: 'KEY_VAULT_URI', value: keyVaultUri }
@@ -86,6 +87,7 @@ resource maintenance 'Microsoft.App/jobs@2024-03-01' = {
         {
           name: 'maintenance'
           image: image
+          resources: { cpu: json('0.25'), memory: '0.5Gi' }
           command: ['node', 'scripts/run-maintenance.mjs']
           env: [
             { name: 'TRADING_MODE', value: 'OFF' }

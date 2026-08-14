@@ -1,0 +1,929 @@
+{
+  "schema_version": 1,
+  "instrument_protection": [
+    {
+      "inst_id": "ACE-USDT",
+      "base_ccy": "ACE",
+      "state": "BLACKLISTED",
+      "reason": "Manual blacklist"
+    },
+    {
+      "inst_id": "AGLD-USDT",
+      "base_ccy": "AGLD",
+      "state": "BLACKLISTED",
+      "reason": "Manual blacklist"
+    },
+    {
+      "inst_id": "ALPHA-USDT",
+      "base_ccy": "ALPHA",
+      "state": "BLACKLISTED",
+      "reason": "Delisted due to OKX announcement: OKX to delist SLERF, ALPHA, BADGER, OAS, MLN and AIDOGE spot trading pairs"
+    },
+    {
+      "inst_id": "BTT-USDT",
+      "base_ccy": "BTT",
+      "state": "BLACKLISTED",
+      "reason": "BitTorrent Token - delisted from OKX"
+    },
+    {
+      "inst_id": "CAT-USDT",
+      "base_ccy": "CAT",
+      "state": "BLACKLISTED",
+      "reason": "Manual blacklist"
+    },
+    {
+      "inst_id": "DAO-USDT",
+      "base_ccy": "DAO",
+      "state": "BLACKLISTED",
+      "reason": "Delisted due to OKX announcement: OKX to delist ULTI, GEAR, VRA, DAO, CXT, RDNT and ELON spot trading pairs"
+    },
+    {
+      "inst_id": "DEP-USDT",
+      "base_ccy": "DEP",
+      "state": "BLACKLISTED",
+      "reason": "Delisted due to OKX announcement: OKX to delist BAL, PERP, FLM, DEP, NC and LOOKS spot trading pairs"
+    },
+    {
+      "inst_id": "DORA-USDT",
+      "base_ccy": "DORA",
+      "state": "BLACKLISTED",
+      "reason": "Manual blacklist"
+    },
+    {
+      "inst_id": "ELON-USDT",
+      "base_ccy": "ELON",
+      "state": "BLACKLISTED",
+      "reason": "Delisted due to OKX announcement: OKX to delist ULTI, GEAR, VRA, DAO, CXT, RDNT and ELON spot trading pairs"
+    },
+    {
+      "inst_id": "ERN-USDT",
+      "base_ccy": "ERN",
+      "state": "BLACKLISTED",
+      "reason": "Ethernity Chain - delisted from OKX"
+    },
+    {
+      "inst_id": "GEAR-USDT",
+      "base_ccy": "GEAR",
+      "state": "BLACKLISTED",
+      "reason": "Delisted due to OKX announcement: OKX to delist ULTI, GEAR, VRA, DAO, CXT, RDNT and ELON spot trading pairs"
+    },
+    {
+      "inst_id": "GLMR-USDT",
+      "base_ccy": "GLMR",
+      "state": "BLACKLISTED",
+      "reason": "Moonbeam - delisted from OKX"
+    },
+    {
+      "inst_id": "GODS-USDT",
+      "base_ccy": "GODS",
+      "state": "BLACKLISTED",
+      "reason": "Delisted due to OKX announcement: OKX to delist GODS, PRCL and DUCK spot trading pairs"
+    },
+    {
+      "inst_id": "JST-USDT",
+      "base_ccy": "JST",
+      "state": "BLACKLISTED",
+      "reason": "Just Token - delisted from OKX"
+    },
+    {
+      "inst_id": "JTO-USDT",
+      "base_ccy": "JTO",
+      "state": "BLACKLISTED",
+      "reason": "legacy blacklist"
+    },
+    {
+      "inst_id": "LUNC-USDT",
+      "base_ccy": "LUNC",
+      "state": "BLACKLISTED",
+      "reason": "Delisted due to OKX announcement: OKX to delist FORTH, RUNECOIN, POLYDOGE, SC, USTC and LUNC spot trading pairs"
+    },
+    {
+      "inst_id": "MLN-USDT",
+      "base_ccy": "MLN",
+      "state": "BLACKLISTED",
+      "reason": "Delisted due to OKX announcement: OKX to delist SLERF, ALPHA, BADGER, OAS, MLN and AIDOGE spot trading pairs"
+    },
+    {
+      "inst_id": "MOVR-USDT",
+      "base_ccy": "MOVR",
+      "state": "BLACKLISTED",
+      "reason": "Moonriver - delisted from OKX"
+    },
+    {
+      "inst_id": "PENGU-USDT",
+      "base_ccy": "PENGU",
+      "state": "BLACKLISTED",
+      "reason": "Manual blacklist"
+    },
+    {
+      "inst_id": "PSTAKE-USDT",
+      "base_ccy": "PSTAKE",
+      "state": "BLACKLISTED",
+      "reason": "Delisted due to OKX announcement: OKX to delist ACA, CLV, FOXY, PSTAKE and RACA spot trading pairs"
+    },
+    {
+      "inst_id": "RDNT-USDT",
+      "base_ccy": "RDNT",
+      "state": "BLACKLISTED",
+      "reason": "Delisted due to OKX announcement: OKX to delist ULTI, GEAR, VRA, DAO, CXT, RDNT and ELON spot trading pairs"
+    },
+    {
+      "inst_id": "RSS3-USDT",
+      "base_ccy": "RSS3",
+      "state": "BLACKLISTED",
+      "reason": "Delisted due to OKX announcement: OKX to delist RSS3, MEMEFI, GHST, RIO and SWEAT spot trading pairs"
+    },
+    {
+      "inst_id": "SAND-USDT",
+      "base_ccy": "SAND",
+      "state": "BLACKLISTED",
+      "reason": "legacy blacklist"
+    },
+    {
+      "inst_id": "USTC-USDT",
+      "base_ccy": "USTC",
+      "state": "BLACKLISTED",
+      "reason": "Delisted due to OKX announcement: OKX to delist FORTH, RUNECOIN, POLYDOGE, SC, USTC and LUNC spot trading pairs"
+    },
+    {
+      "inst_id": "VRA-USDT",
+      "base_ccy": "VRA",
+      "state": "BLACKLISTED",
+      "reason": "Delisted due to OKX announcement: OKX to delist ULTI, GEAR, VRA, DAO, CXT, RDNT and ELON spot trading pairs"
+    },
+    {
+      "inst_id": "WBTC-USDT",
+      "base_ccy": "WBTC",
+      "state": "BLACKLISTED",
+      "reason": "Wrapped Bitcoin - potential delisting risk"
+    }
+  ],
+  "config": [
+    {
+      "inst_id": "1INCH-USDT",
+      "best_limit": "71",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "AAVE-USDT",
+      "best_limit": "74",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "ACE-USDT",
+      "best_limit": "83",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "ACH-USDT",
+      "best_limit": "82",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "ADA-USDT",
+      "best_limit": "72",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "AEVO-USDT",
+      "best_limit": "84",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "AGLD-USDT",
+      "best_limit": "68",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "ALGO-USDT",
+      "best_limit": "75",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "APE-USDT",
+      "best_limit": "75",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "API3-USDT",
+      "best_limit": "76",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "APT-USDT",
+      "best_limit": "81",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "ARB-USDT",
+      "best_limit": "82",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "ATOM-USDT",
+      "best_limit": "70",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "AVAX-USDT",
+      "best_limit": "71",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "AXS-USDT",
+      "best_limit": "78",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "BABYDOGE-USDT",
+      "best_limit": "70",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "BANANA-USDT",
+      "best_limit": "84",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "BAND-USDT",
+      "best_limit": "71",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "BAT-USDT",
+      "best_limit": "74",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "BCH-USDT",
+      "best_limit": "76",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "BETH-USDT",
+      "best_limit": "81",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "BIGTIME-USDT",
+      "best_limit": "73",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "BIO-USDT",
+      "best_limit": "82",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "BLUR-USDT",
+      "best_limit": "79",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "BNB-USDT",
+      "best_limit": "89",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "BNT-USDT",
+      "best_limit": "73",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "BONK-USDT",
+      "best_limit": "85",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "BTC-USDT",
+      "best_limit": "90",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "CAT-USDT",
+      "best_limit": "82",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "CATI-USDT",
+      "best_limit": "82",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "CELO-USDT",
+      "best_limit": "75",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "CELR-USDT",
+      "best_limit": "71",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "CFG-USDT",
+      "best_limit": "85",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "CFX-USDT",
+      "best_limit": "71",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "CHZ-USDT",
+      "best_limit": "73",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "COMP-USDT",
+      "best_limit": "76",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "CRO-USDT",
+      "best_limit": "75",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "CTC-USDT",
+      "best_limit": "70",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "CVX-USDT",
+      "best_limit": "76",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "DEGEN-USDT",
+      "best_limit": "80",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "DGB-USDT",
+      "best_limit": "69",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "DOGE-USDT",
+      "best_limit": "69",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "DOGS-USDT",
+      "best_limit": "83",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "DORA-USDT",
+      "best_limit": "81",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "DOT-USDT",
+      "best_limit": "75",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "DYDX-USDT",
+      "best_limit": "69",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "EGLD-USDT",
+      "best_limit": "74",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "EIGEN-USDT",
+      "best_limit": "83",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "ELF-USDT",
+      "best_limit": "80",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "ENJ-USDT",
+      "best_limit": "80",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "ETC-USDT",
+      "best_limit": "70",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "ETH-USDT",
+      "best_limit": "76",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "FET-USDT",
+      "best_limit": "82",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "FIL-USDT",
+      "best_limit": "68",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "FLOKI-USDT",
+      "best_limit": "77",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "FLOW-USDT",
+      "best_limit": "77",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "FLR-USDT",
+      "best_limit": "85",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "G-USDT",
+      "best_limit": "87",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "GALA-USDT",
+      "best_limit": "73",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "GLM-USDT",
+      "best_limit": "75",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "GMT-USDT",
+      "best_limit": "75",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "GMX-USDT",
+      "best_limit": "77",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "GOAT-USDT",
+      "best_limit": "81",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "GODS-USDT",
+      "best_limit": "67",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "GRT-USDT",
+      "best_limit": "82",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "ICP-USDT",
+      "best_limit": "75",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "ICX-USDT",
+      "best_limit": "64",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "ID-USDT",
+      "best_limit": "81",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "ILV-USDT",
+      "best_limit": "79",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "IMX-USDT",
+      "best_limit": "78",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "INJ-USDT",
+      "best_limit": "80",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "IOTA-USDT",
+      "best_limit": "71",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "JOE-USDT",
+      "best_limit": "75",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "JUP-USDT",
+      "best_limit": "83",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "KAIA-USDT",
+      "best_limit": "89",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "KNC-USDT",
+      "best_limit": "70",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "KSM-USDT",
+      "best_limit": "71",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "LAT-USDT",
+      "best_limit": "71",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "LDO-USDT",
+      "best_limit": "83",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "LEO-USDT",
+      "best_limit": "85",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "LINK-USDT",
+      "best_limit": "67",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "LPT-USDT",
+      "best_limit": "74",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "LRC-USDT",
+      "best_limit": "69",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "LSK-USDT",
+      "best_limit": "69",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "LTC-USDT",
+      "best_limit": "74",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "LUNA-USDT",
+      "best_limit": "71",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "MAGIC-USDT",
+      "best_limit": "72",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "MANA-USDT",
+      "best_limit": "70",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "ME-USDT",
+      "best_limit": "85",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "MEME-USDT",
+      "best_limit": "79",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "MENGO-USDT",
+      "best_limit": "78",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "MERL-USDT",
+      "best_limit": "78",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "METIS-USDT",
+      "best_limit": "75",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "MEW-USDT",
+      "best_limit": "83",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "MOODENG-USDT",
+      "best_limit": "83",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "MORPHO-USDT",
+      "best_limit": "90",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "NEAR-USDT",
+      "best_limit": "73",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "NEIRO-USDT",
+      "best_limit": "80",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "NEO-USDT",
+      "best_limit": "70",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "NMR-USDT",
+      "best_limit": "82",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "NOT-USDT",
+      "best_limit": "82",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "OKB-USDT",
+      "best_limit": "75",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "OMI-USDT",
+      "best_limit": "89",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "ONDO-USDT",
+      "best_limit": "85",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "ONE-USDT",
+      "best_limit": "75",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "ONT-USDT",
+      "best_limit": "68",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "ORBS-USDT",
+      "best_limit": "67",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "ORDI-USDT",
+      "best_limit": "74",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "PENDLE-USDT",
+      "best_limit": "85",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "PENGU-USDT",
+      "best_limit": "85",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "PEOPLE-USDT",
+      "best_limit": "64",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "PEPE-USDT",
+      "best_limit": "75",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "PIXEL-USDT",
+      "best_limit": "85",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "POL-USDT",
+      "best_limit": "86",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "PYTH-USDT",
+      "best_limit": "84",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "QTUM-USDT",
+      "best_limit": "68",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "RON-USDT",
+      "best_limit": "77",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "RPL-USDT",
+      "best_limit": "87",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "RSR-USDT",
+      "best_limit": "73",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "RVN-USDT",
+      "best_limit": "71",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "S-USDT",
+      "best_limit": "85",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "SAFE-USDT",
+      "best_limit": "84",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "SAND-USDT",
+      "best_limit": "71",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "SHIB-USDT",
+      "best_limit": "69",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "SKL-USDT",
+      "best_limit": "72",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "SNX-USDT",
+      "best_limit": "77",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "SOL-USDT",
+      "best_limit": "70",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "SONIC-USDT",
+      "best_limit": "86",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "SSV-USDT",
+      "best_limit": "86",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "STETH-USDT",
+      "best_limit": "88",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "SUI-USDT",
+      "best_limit": "80",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "SUSHI-USDT",
+      "best_limit": "63",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "SWFTC-USDT",
+      "best_limit": "72",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "T-USDT",
+      "best_limit": "81",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "TIA-USDT",
+      "best_limit": "81",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "TRB-USDT",
+      "best_limit": "64",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "TRX-USDT",
+      "best_limit": "74",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "TURBO-USDT",
+      "best_limit": "72",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "UMA-USDT",
+      "best_limit": "72",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "UNI-USDT",
+      "best_limit": "75",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "VELO-USDT",
+      "best_limit": "71",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "VELODROME-USDT",
+      "best_limit": "79",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "WAXP-USDT",
+      "best_limit": "79",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "WLD-USDT",
+      "best_limit": "78",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "WOO-USDT",
+      "best_limit": "87",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "XLM-USDT",
+      "best_limit": "69",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "XRP-USDT",
+      "best_limit": "66",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "YFI-USDT",
+      "best_limit": "77",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "YGG-USDT",
+      "best_limit": "71",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "ZBCN-USDT",
+      "best_limit": "87",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "ZETA-USDT",
+      "best_limit": "81",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "ZIL-USDT",
+      "best_limit": "69",
+      "hold_hours": "24"
+    },
+    {
+      "inst_id": "ZRX-USDT",
+      "best_limit": "75",
+      "hold_hours": "24"
+    }
+  ],
+  "content_hash": "cacb9fcac8928a2230374fc0cee0228c12f1cef2f9b9a6d14e5d42b5ad390a8c"
+}

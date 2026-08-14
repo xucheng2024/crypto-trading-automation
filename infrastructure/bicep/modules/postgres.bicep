@@ -1,6 +1,12 @@
 param location string
 param name string
 param skuName string
+@allowed(['Burstable', 'GeneralPurpose'])
+param skuTier string
+@allowed(['Disabled', 'SameZone', 'ZoneRedundant'])
+param highAvailabilityMode string
+@minValue(32)
+param storageSizeGb int
 param allowedNatIp string
 param tags object
 param entraAdministratorObjectId string
@@ -12,13 +18,13 @@ param databaseName string
 resource server 'Microsoft.DBforPostgreSQL/flexibleServers@2024-08-01' = {
   name: name
   location: location
-  sku: { name: skuName, tier: 'GeneralPurpose' }
+  sku: { name: skuName, tier: skuTier }
   properties: {
     version: '16'
     authConfig: { activeDirectoryAuth: 'Enabled', passwordAuth: 'Disabled', tenantId: tenantId }
-    storage: { storageSizeGB: 128, autoGrow: 'Enabled' }
+    storage: { storageSizeGB: storageSizeGb, autoGrow: 'Enabled' }
     backup: { backupRetentionDays: 14, geoRedundantBackup: 'Disabled' }
-    highAvailability: { mode: 'ZoneRedundant' }
+    highAvailability: { mode: highAvailabilityMode }
     network: { publicNetworkAccess: 'Enabled' }
   }
   tags: tags
