@@ -38,6 +38,16 @@ jobs:
           sudo apt-get update
           sudo apt-get install --yes postgresql
           pg_config --bindir >> "$GITHUB_PATH"
+      - name: Verify PostgreSQL can start as the runner user
+        shell: bash
+        run: |
+          set -euo pipefail
+          data_dir="$(mktemp -d)"
+          log_file="$data_dir/postgres.log"
+          cleanup() { pg_ctl -D "$data_dir" -m immediate -w stop >/dev/null 2>&1 || true; cat "$log_file" 2>/dev/null || true; rm -rf "$data_dir"; }
+          trap cleanup EXIT
+          initdb -D "$data_dir" --no-locale -E UTF8 -A trust
+          pg_ctl -D "$data_dir" -l "$log_file" -o '-p 55432 -h 127.0.0.1' -w start
       - run: npm ci
       - run: npm test
       - run: npm run test:iac
