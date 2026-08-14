@@ -1,5 +1,5 @@
 {
-  "name": "crypto-trading-cloudflare",
+  "name": "crypto-remote-trading-engine",
   "private": true,
   "type": "module",
   "scripts": {
@@ -15,9 +15,6 @@
     "test:p4-slo": "node --test tests-worker/p4-slo.test.js",
     "test:iac": "node scripts/check-iac.mjs",
     "test:container": "node scripts/check-container.mjs"
-  },
-  "devDependencies": {
-    "wrangler": "4.118.0"
   },
   "dependencies": {
     "@azure/identity": "^4.13.1",

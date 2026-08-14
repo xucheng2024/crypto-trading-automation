@@ -3,7 +3,7 @@ import { composeProductionRuntime } from "../../application/production-compositi
 import { createApplicationInsightsTelemetry } from "../../infrastructure/azure/application-insights-telemetry.js";
 import http from "node:http";
 
-// Composition root only. Legacy Worker/D1 modules must never be imported here.
+// Production composition root. Exchange mutations remain behind the sole Coordinator.
 export async function startTradingEngine(env = process.env, dependencies = {}) {
   const telemetry = dependencies.telemetry ?? createApplicationInsightsTelemetry({
     connectionString: env.APPLICATIONINSIGHTS_CONNECTION_STRING,

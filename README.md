@@ -1,527 +1,70 @@
-# Crypto Trading Automation System
+# Crypto Remote Trading Engine
 
-A comprehensive automated crypto trading system with OKX exchange integration, featuring algorithmic trading strategies, delisting protection, automated order management, and exchange-aware decimal rounding.
+Production trading runtime for OKX, implemented in Node.js and deployed to Azure Container Apps with PostgreSQL.
 
-The production runtime is Azure Container Apps and PostgreSQL in Azure East Asia (Hong Kong). It is deployed with `TRADING_MODE=OFF`; enabling FULL requires separate authorization.
+The current deployment is intentionally configured with `TRADING_MODE=OFF`. Enabling `FULL` requires separate authorization and completion of the release gate in [`docs/runbooks/P4_AZURE_CANDIDATE.md`](docs/runbooks/P4_AZURE_CANDIDATE.md).
 
-All changes must pass the local-first test and immutable-digest deployment gate
-in [`docs/runbooks/P4_AZURE_CANDIDATE.md`](docs/runbooks/P4_AZURE_CANDIDATE.md).
-Azure must not be used as the first test environment, and a successful `OFF`
-deployment never authorizes enabling `FULL`.
+## Current architecture
 
-The former Cloudflare Worker, D1 database, Worker secrets, and GitHub reconciliation workflow were permanently decommissioned on 2026-08-14. Cloudflare implementation files remain only as migration/audit history and have no production deployment configuration.
+```text
+OKX WebSocket
+  -> in-memory market/account projections
+  -> bounded engine work loop
+  -> BUY/SELL/DELIST planning
+  -> PostgreSQL reservation and deterministic clOrdId
+  -> OKX REST batch orders
+  -> reconciliation and durable settlement
+```
 
-The Azure/OKX WebSocket design is documented in [`AZURE_WS_TRADING_DESIGN.md`](AZURE_WS_TRADING_DESIGN.md).
+The runtime does not create OKX algo-trigger orders. Buy signals are evaluated from live ticker and confirmed candle observations, then admitted and submitted through the single order coordinator.
 
-## 🚀 Quick Start
+## Runtime components
+
+- `src/entrypoints/azure/trading-engine.js` — production engine entrypoint.
+- `src/application/` — signal planning, order coordination, reconciliation, protection and work loops.
+- `src/infrastructure/okx/` — OKX REST and WebSocket clients.
+- `src/infrastructure/postgres/` — persistence, ownership and reservation repositories.
+- `src/entrypoints/azure/maintenance-job.js` — credential-free PostgreSQL maintenance job.
+- `infrastructure/bicep/` — Azure Container Apps, PostgreSQL, Key Vault, networking and monitoring.
+
+Historical migration decisions and evidence remain under `docs/design/` and `docs/audit/`. Offline D1-to-PostgreSQL conversion assets are retained only for reproducible migration evidence; they are not runtime dependencies.
+
+## Local verification
+
+Requirements: Node.js 22 and npm.
 
 ```bash
-# Install Python dependencies (includes python-okx==0.4.0)
-pip install -r requirements.txt
-
-# Setup environment variables (locally you can use .env, CI uses GitHub Secrets)
-cp .env.example .env.local
-# Fill in your OKX API credentials and DATABASE_URL
-
-# Test the system
-python create_algo_triggers.py
-python monitor_delist.py
-```
-
-## 🏗️ Legacy Cloud Architecture (Archived)
-
-### Former Cloud Deployment (Decommissioned) ⭐
-- **Cloudflare Workers Cron** - Runs monitoring, fill synchronization, cancellation of ordinary limits, and selling
-- **GitHub Actions** - Cancels daily buy triggers and recreates them from the shared D1 strategy state
-- **Durable Object coordinator** - Prevents overlapping scheduled or manual trading runs
-- **Cloudflare D1** - Persists fills, sell recovery state, configuration, blacklist, and run status
-- **Cloudflare Secrets** - Stores OKX credentials and the manual-run bearer token
-- **Safe cutover switch** - `TRADING_ENABLED=false` is the production default until credentials and state are ready
-- **Idempotent orders** - Stable client order IDs recover uncertain submissions without blind retries
-
-### Core Trading System ⭐
-- **`monitor_delist.py`** - Intelligent delisting protection with automated response (277 lines)
-- **`create_algo_triggers.py`** - Automated trigger order creation with high-precision Decimal arithmetic
-- **`cancel_pending_triggers.py`** - Automated trigger order cancellation (all directions)
-- **`cancel_pending_limits.py`** - Automated limit order management
-- **`fetch_filled_orders.py`** - Automated filled order tracking with sell_time calculation
-- **`auto_sell_orders.py`** - Automated market sell orders based on sell_time
-
-### Modular Components 🆕
-- **`config_manager.py`** - Configuration file management and backup (184 lines)
-- **`crypto_matcher.py`** - Smart cryptocurrency matching and detection (119 lines)
-- **`okx_client.py`** - Universal OKX API client for all scripts (210 lines) ⭐
-- **`protection_manager.py`** - Automated protection operations orchestration (232 lines)
-
-### Database & Utilities
-- **`lib/database.py`** - SQLite database integration
-- **`src/`** - Cloudflare-native scheduler, OKX client, D1 access, and trading tasks
-- **`backups/`** - Automatic configuration backups
-
-## 🤖 Automated Trading System ⭐
-
-### Core Automation Features
-1. **Intelligent Delisting Protection** - 24/7 monitoring with automated response system
-2. **Trigger Order Management** - Automated creation and cancellation of trigger orders with multiple trigger points
-3. **Limit Order Management** - Smart cancellation of pending limit orders
-4. **Filled Order Tracking** - Real-time monitoring of completed orders with sell_time calculation (ts + 24 hours)
-5. **Auto Sell Orders** - Automated market sell orders when sell_time is reached
-6. **Modular Architecture** - Clean, maintainable, and extensible component design
-
-### Recent System Improvements ✅
-- **🔄 Major Refactoring** - Modular architecture with 5 specialized components (683 → 277 lines for main script)
-- **🛡️ Enhanced Protection** - Intelligent delisting detection with automatic order cancellation and balance liquidation
-- **⚙️ Configuration Management** - Automated backup and cleanup of trading configurations
-- **🔧 Universal OKX Client** - Single OKX API client shared across all scripts, eliminating code duplication
-- **📊 Better Maintainability** - 59% code reduction in main script, improved testability and debugging
-- **🗄️ D1 Cutover** - Trading state and strategy configuration persist in Cloudflare D1
-- **⏰ Precise Scheduling** - Replaced GitHub Actions cron with Cloudflare Workers for minute-level accuracy
-- **📦 SDK Update** - Switched to `python-okx==0.4.0` with new submodule imports (`okx.Trade`, `okx.Funding`, etc.)
-- **🗄️ DB Safety** - Fail-closed startup and integrity checks for the persistent SQLite database
-- **🧪 CI Compatibility** - `cancel_pending_triggers.py` runs without `.env` in Actions (uses Secrets)
-- **🕛 Workflow Control** - Nightly cancel/create steps also runnable via manual workflow dispatch
-- **🕐 Timezone Fix** - Fixed UTC/local time issues in `fetch_filled_orders.py` and `auto_sell_orders.py`
-- **⚡ Cron Optimization** - Staggered 7-minute schedule to eliminate double execution at minute 0
-- **🔧 Multi-Fill Order Fix** - Fixed `accFillSz` handling for orders with multiple fills (2025-09-02)
-- **📊 Smart Update Strategy** - Added intelligent order update detection and data discrepancy resolution
-- **🛡️ Data Integrity** - Enhanced database update logic to preserve critical status fields during updates
-- **🎯 TradeId-Centric Processing** - Complete refactor to use `tradeId` as primary key for individual transactions (2025-09-03)
-- **🔄 API Interface Optimization** - Switched from `get_orders_history` to `get_fills` for granular trade details
-- **📈 Incremental Data Fetching** - Smart watermarking using last `tradeId` timestamp for efficient data retrieval
-- **🔒 Enhanced Deduplication** - `tradeId`-based unique constraints prevent duplicate processing of same transaction
-- **⚡ Partial Fill Support** - Each transaction (tradeId) processed individually, supporting complex order scenarios
-- **🛠️ Database Schema Evolution** - `tradeId` as business primary key, `ordId` as audit trail, `sold_status` as VARCHAR
-- **🔧 Method Signature Optimization** - Removed unused parameters and simplified API calls
-- **⏰ 24-Hour Rolling Window** - Changed monitor from daily to 24-hour rolling window for better fault tolerance (2025-09-03)
-- **🎯 Enhanced Crypto Matching** - Improved regex with negative lookahead/lookbehind to prevent false matches (2025-09-03)
-- **🔄 Alias Support** - Added trading pair format support (BTC-USDT, BTC/USDT, BTCUSDT) for comprehensive matching (2025-09-03)
-- **🛡️ False Positive Prevention** - Prevents BTC matching WBTC, ETH matching ETHW, AR matching ARB (2025-09-03)
-- **🕐 Singapore Timezone Sync** - All cron schedules aligned with Singapore time (UTC+8) to match OKX exchange trading hours (2025-09-13)
-
-### Cloudflare Workers Cron Schedule ⭐
-```yaml
-# Every 5 minutes (staggered to avoid overlap) - Monitoring, fill synchronization, and trigger protection
-- cron: '1,6,11,16,21,26,31,36,41,46,51,56 * * * *'
-
-# Every 15 minutes - Auto sell orders
-- cron: '0,15,30,45 * * * *'
-
-# Daily buy-trigger cancellation/recreation is in
-# .github/workflows/reconcile-buy-triggers.yml.
-```
-
-### Execution Strategy
-- **5-Minute Tasks (Staggered)**: `monitor_delist.py` + `cancel_pending_limits.py` + `fetch_filled_orders.py`
-- **15-Minute Tasks**: `auto_sell_orders.py`
-- **Daily GitHub Action**: cancel buy triggers at 23:55 SGT; rebuild them from D1 at 00:05 SGT. Manual dispatch uses the same cancel-then-rebuild flow.
-
-### GitHub Action secrets
-
-Set these repository secrets before enabling the workflow: `OKX_API_KEY`, `OKX_SECRET_KEY`, `OKX_PASSPHRASE`, `OKX_ORDER_SIZE`, `OKX_TESTNET`, `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_D1_DATABASE_ID`, and `CLOUDFLARE_D1_API_TOKEN`. The Cloudflare token should be restricted to D1 read/write access for only this account/database. The action never receives Worker secrets or the manual-run token.
-
-The Worker manual endpoint intentionally does not accept daily trigger cancellation or creation; use **Actions → Reconcile buy triggers → Run workflow** for a manual rebuild.
-
-### Automation Scripts
-
-#### `monitor_delist.py` 🆕
-- **Purpose**: Intelligent delisting protection with automated response
-- **Architecture**: Modular design with specialized components
-- **Features**: 
-  - **24-Hour Rolling Window**: Monitors past 24 hours instead of daily for better fault tolerance
-  - **Smart Detection**: Only monitors cryptocurrencies from your database configuration
-  - **Enhanced Matching**: Improved regex prevents false matches (BTC vs WBTC, ETH vs ETHW)
-  - **Trading Pair Support**: Recognizes BTC-USDT, BTC/USDT, BTCUSDT formats
-  - **Automated Protection**: 3-step response (cancel orders → sell balances → update config)
-  - **Database Integration**: Automatically removes delisted cryptos from database configuration
-  - **Balance Liquidation**: Market sell any holdings of affected cryptocurrencies
-  - **Trigger Reconstruction**: Recreates algo triggers with updated configuration
-  - **Comprehensive Logging**: Detailed audit trail of all protection actions
-
-#### `create_algo_triggers.py` ⭐
-- **Purpose**: Create automated trigger orders for trading strategies
-- **Features**:
-  - **Multiple Trigger Points**: Creates 2 trigger orders per crypto pair (99.9%, 100.1% of base price)
-  - **High-Precision Arithmetic**: Uses Python Decimal type for accurate price calculations
-  - **Dynamic Precision**: Automatically determines price precision based on coin value
-  - **Grid-based Strategy**: Configurable parameters via `limits.json`
-  - **Smart Order Placement**: Intelligent order placement logic with retry mechanisms
-  - **Database Integration**: Order tracking and management
-
-#### `cancel_pending_triggers.py` ⭐
-- **Purpose**: Cancel expired or unnecessary buy trigger orders
-- **Features**:
-  - **Buy Orders Only**: Cancels only buy trigger orders, preserves sell orders
-  - **Automatic Cleanup**: Removes old buy trigger orders efficiently
-  - **Smart Cancellation**: Order status verification before cancellation
-  - **Comprehensive Logging**: Detailed logging and monitoring
-  - **Rate Limiting**: Respects OKX API limits (5 requests/2 seconds)
-
-#### `cancel_pending_limits.py`
-- **Purpose**: Manage pending limit orders
-- **Features**:
-  - Side-specific order cancellation (buy/sell)
-  - Configurable cancellation intervals
-  - Order status checking
-  - Efficient order management
-
-  - **Error Handling**: Robust error handling with retry mechanisms
-
-#### `fetch_filled_orders.py` ⭐
-- **Purpose**: Track completed orders and calculate sell times with tradeId-centric processing
-- **Features**:
-  - **TradeId-Centric Processing**: Uses `tradeId` as primary key for individual transactions
-  - **API Interface Optimization**: Switched from `get_orders_history` to `get_fills` for granular trade details
-  - **Incremental Data Fetching**: Smart watermarking using last `tradeId` timestamp for efficient retrieval
-  - **Enhanced Deduplication**: `tradeId`-based unique constraints prevent duplicate processing
-  - **Partial Fill Support**: Each transaction processed individually, supporting complex order scenarios
-  - **Sell Time Calculation**: Automatically calculates sell_time as ts + 24 hours (UTC-based)
-  - **Timezone Consistency**: All time calculations use UTC to match OKX API timestamps
-  - **Real-time Monitoring**: Continuous order status monitoring with incremental updates
-- **Database Storage**: SQLite database with optimized schema for trade tracking
-  - **Buy-only Storage**: Client-side filtering for side='buy' trades
-  - **Smart Update Strategy**: Uses ON CONFLICT (tradeId) DO UPDATE to handle updates correctly
-  - **Data Integrity**: Preserves sell_time and sold_status during updates
-
-#### `auto_sell_orders.py` ⭐
-- **Purpose**: Automatically execute market sell orders based on sell_time with tradeId-centric processing
-- **Features**:
-  - **TradeId-Centric Processing**: Processes individual transactions (tradeId) instead of entire orders
-  - **Individual Transaction Selling**: Each tradeId sold separately with its specific fillSz
-  - **Enhanced Status Management**: Supports NULL/PROCESSING/SOLD states with VARCHAR field type
-  - **Processing Lock**: Marks trades as PROCESSING before sell to prevent overlaps
-  - **UTC Time Comparison**: Uses UTC timestamps to match sell_time calculation consistency
-  - **Time-based Selling**: Executes sells when sell_time < current_time (UTC-based)
-  - **Audio Notifications**: 10-second continuous beep sound for successful sells
-  - **Duplicate Prevention**: Tracks sold_status to avoid re-processing same tradeId
-  - **Strict Selection**: Only processes rows where sold_status IS NULL; sell_time cast to Integer
-  - **Detailed Logging**: Includes tradeId and ordId in logs for complete auditability
-  - **Market Order Execution**: Uses market orders for immediate execution
-  - **Timezone Display**: Shows sell times with "UTC" label for clarity
-  - **Precise Quantity Control**: Uses fillSz for exact transaction quantity (not accumulated)
-  - **Partial Fill Support**: Correctly handles orders with multiple partial fills as separate transactions
-
-### New Modular Components 🆕
-
-#### `config_manager.py`
-- **Purpose**: Database configuration management and backup operations
-- **Features**:
-- **Database Integration**: Reads and manages configuration from SQLite
-  - **Smart Loading**: Extracts base cryptocurrencies from trading pairs (BTC from BTC-USDT)
-  - **Automatic Backup**: Creates timestamped JSON backups before modifications
-  - **Safe Cleanup**: Removes delisted cryptocurrencies from database configuration
-  - **Error Handling**: Validates database structure and handles connection issues
-
-#### `crypto_matcher.py`
-- **Purpose**: Intelligent cryptocurrency detection in announcements with enhanced matching
-- **Features**:
-  - **Spot Trading Filter**: Only processes spot trading related announcements
-  - **Enhanced Regex Matching**: Uses negative lookahead/lookbehind to prevent false matches
-  - **Trading Pair Alias Support**: Recognizes BTC-USDT, BTC/USDT, BTCUSDT formats
-  - **False Positive Prevention**: Prevents BTC matching WBTC, ETH matching ETHW, AR matching ARB
-  - **Case Insensitive**: Robust text matching regardless of case
-  - **Database Integration**: Loads configured cryptocurrencies from database
-  - **Validation**: Ensures only configured cryptocurrencies trigger actions
-
-#### `okx_client.py` ⭐
-- **Purpose**: Universal OKX API client shared across all trading scripts
-- **Features**:
-  - **Multi-API Support**: Funding, Trade, and Market APIs in one client
-  - **Universal Interface**: `get_funding_api()`, `get_trade_api()`, `get_market_api()`
-  - **Smart Availability**: `is_available()` for authenticated APIs, `is_market_available()` for public data
-  - **Unified Error Handling**: Consistent error management across all scripts
-  - **Environment Integration**: Automatic credential loading from environment variables
-  - **Code Deduplication**: Eliminates 50+ lines of repeated API initialization across 6 scripts
-
-#### `protection_manager.py`
-- **Purpose**: Orchestrates complete protection workflow
-- **Features**:
-  - **3-Step Protection**: Cancel orders → Check/Sell balances → Update configuration
-  - **Script Execution**: Safely executes cancellation scripts with error handling
-  - **Balance Management**: Checks account balances and executes market sells
-  - **Workflow Orchestration**: Coordinates all protection operations with detailed logging
-
-### Configuration Files
-- **`limits.json`** - Trading limits and trigger price coefficients for 29 crypto pairs
-- **`.env`** - Environment variables including the SQLite `DATABASE_URL`
-- **`backups/limits_*.json`** - Automatic configuration backups with timestamps
-
-### Log Files
-- **Worker Logs** - Runtime logs are available through Cloudflare Workers observability
-- **`logs/`** - Local log files (if running locally)
-- **`*.log`** - Various operation logs
-
-## 🔧 Environment Variables
-
-```env
-# Persistent SQLite database (production path)
-DATABASE_URL=sqlite:////home/ubuntu/.local/share/crypto-trading/trading.sqlite3
-
-# OKX Production API (required for private endpoints)
-OKX_API_KEY=your_api_key
-OKX_SECRET_KEY=your_secret_key
-OKX_PASSPHRASE=your_passphrase
-
-# OKX Trading Environment (false for live, true for demo)
-OKX_TESTNET=false
-```
-
-## 🤖 Trading Strategy
-
-### Core Functions
-1. **Automated Monitoring** - 24/7 system monitoring and management via Cloudflare Cron Triggers
-2. **Smart Order Management** - Intelligent order creation and cancellation
-3. **High-Precision Trading** - Decimal arithmetic for accurate price calculations
-4. **Time-based Execution** - Automated selling based on calculated sell times
-5. **Risk Management** - Configurable limits and coefficients per crypto pair
-
-### Trading Strategy Details ⭐
-- **Trigger Order Strategy**: Creates 3 trigger points per crypto pair to maximize execution probability
-- **Price Precision**: Uses Decimal type with 28-digit precision for accurate calculations
-- **Sell Time Management**: Automatically calculates and tracks sell times (ts + 30 hours)
-- **Risk Management**: Configurable limits and coefficients per crypto pair
-- **Market Adaptation**: Dynamic precision adjustment based on coin value
-
-### TradeId-Centric Processing Architecture 🆕
-- **Individual Transaction Processing**: Each `tradeId` represents a unique transaction, processed independently
-- **Partial Fill Support**: One order can have multiple `tradeId`s (partial fills), each sold separately
-- **Enhanced Deduplication**: `tradeId`-based unique constraints prevent duplicate processing
-- **Precise Quantity Control**: Uses `fillSz` (single transaction size) instead of `accFillSz` (accumulated size)
-- **Database Schema Optimization**: `tradeId` as business primary key, `ordId` as audit trail
-- **Status Management**: VARCHAR `sold_status` supports NULL/PROCESSING/SOLD states
-- **API Interface**: Switched from `get_orders_history` to `get_fills` for granular trade details
-- **Incremental Fetching**: Smart watermarking using last `tradeId` timestamp for efficiency
-
-#### Example: Partial Fill Scenario
-```
-Order: BTC-USDT Buy 1.0 BTC
-├── tradeId: trade_001 (fillSz: 0.5 BTC) → Sold separately
-├── tradeId: trade_002 (fillSz: 0.3 BTC) → Sold separately  
-└── tradeId: trade_003 (fillSz: 0.2 BTC) → Sold separately
-```
-Each transaction is processed individually with its own `sell_time` and `sold_status`.
-
-## 📢 Announcements Features
-
-### Supported Announcement Types
-- **`announcements-delistings`** - Token/coin delistings
-- **`announcements-latest-announcements`** - General updates
-- **`announcements-trading-updates`** - Trading rule changes
-- **`announcements-web3`** - Web3 ecosystem updates
-- **`announcements-new-listings`** - New token listings
-
-### Authentication & Security
-- **Private Endpoint Access** - Full OKX API authentication
-- **HMAC-SHA256 Signatures** - Secure request signing
-- **ISO 8601 Timestamps** - Precise time synchronization
-- **Rate Limiting** - Respects OKX API limits (5 requests/2 seconds)
-
-## 🚀 Deployment
-
-### Cloud Deployment (Recommended) ⭐
-```bash
-npm install
-wrangler login
-wrangler d1 migrations apply crypto-trading-prod --remote
-wrangler secret put OKX_API_KEY
-wrangler secret put OKX_SECRET_KEY
-wrangler secret put OKX_PASSPHRASE
-wrangler secret put MANUAL_TRIGGER_TOKEN
+npm ci
 npm test
-npm run deploy
+npm run test:p4
+npm run test:p4-replay
+npm run test:p4-slo
+npm run test:iac
+npm run test:container
 ```
 
-### Local Development
-```bash
-# Test automation scripts locally
-python monitor_delist.py
-python create_algo_triggers.py
-python fetch_filled_orders.py
-python auto_sell_orders.py
-```
-
-### Database Setup
-```bash
-# Initialize the configured database
-python lib/database.py
-
-# Test database connection
-python -c "from lib.database import Database; db = Database(); print('Connected:', db.connect())"
-```
-
-## 🔒 Security Features
-
-- OKX API authentication with HMAC-SHA256 signatures
-- Environment variable protection via GitHub Secrets
-- Private endpoint authentication for sensitive data
-- Input validation and comprehensive error handling
-- Secure timestamp generation and signature verification
-- Automated system monitoring and recovery
-
-## 🛠️ Development
+PostgreSQL integration tests require their documented local database prerequisites:
 
 ```bash
-# Install dependencies
-pip install -r requirements.txt
-
-# Test automation scripts
-python monitor_delist.py
-python create_algo_triggers.py
-python fetch_filled_orders.py
-python auto_sell_orders.py
-
-# Initialize database
-python lib/database.py
+npm run test:postgres
 ```
 
-## 📊 Modern Project Structure
+## Local startup
 
-```
-crypto_remote/
-├── src/                     # Cloudflare Worker runtime
-├── migrations/              # Versioned D1 schema
-├── tests-worker/            # Worker safety tests
-│   └── workflows/
-│       └── trading.yml      # Automated trading workflow (triggered by Cloudflare Workers)
-├── lib/                     # Utility libraries
-│   └── database.py         # SQLite database integration
-├── backups/                # Automatic configuration backups
-│   └── limits_*.json      # Timestamped configuration backups
-├── logs/                   # Detailed operation logs
-│   └── *.log              # Daily monitoring and operation logs
-├── requirements.txt         # Python dependencies
-├── limits.json             # Trading limits for 29 crypto pairs
-├── .env                    # Environment variables (local)
-├── wrangler.toml           # Cloudflare Worker configuration
-├── cloudflare-worker.js    # Cloudflare Worker cron scheduler
-│
-├── # Core Trading System
-├── monitor_delist.py       # Main delisting protection (277 lines) ⭐
-├── create_algo_triggers.py # Automated trigger order creation ⭐
-├── cancel_pending_triggers.py # Automated trigger order cancellation ⭐
-├── cancel_pending_limits.py # Automated limit order management
-├── fetch_filled_orders.py  # Automated filled order tracking ⭐
-├── auto_sell_orders.py     # Automated market sell orders ⭐
-│
-├── # Modular Components
-├── config_manager.py       # Configuration management (184 lines)
-├── crypto_matcher.py       # Smart crypto detection (119 lines)
-├── okx_client.py           # Universal OKX API client (210 lines) ⭐
-├── protection_manager.py   # Protection workflow (232 lines)
-│
-├── # Documentation
-├── ALGO_TRIGGER_README.md  # Detailed algo trigger documentation
-├── MONITOR_README.md       # Detailed monitoring documentation
-├── CLOUDFLARE_SETUP.md     # Cloudflare Worker deployment guide
-└── SETUP.md                # Setup and configuration guide
-```
+The engine defaults to `OFF` when `TRADING_MODE` is absent. Real composition also requires Azure Key Vault and PostgreSQL configuration.
 
-## 🚀 Production Deployment Status ✅
-
-### Cloudflare Worker Deployment
-- **✅ Worker Name**: `crypto-trading-cloudflare-prod`
-- **✅ Access URL**: `https://crypto-trading-cloudflare-prod.eatfreshapple.workers.dev/`
-- **✅ KV Namespace**: `DEDUP_KV` (ID configured via environment variable)
-- **✅ Environment Variables**: All secrets properly configured
-- **✅ Cron Scheduling**: 4 different time intervals active
-- **✅ Deduplication**: KV-based minute-level deduplication working
-- **✅ GitHub Integration**: Repository dispatch triggers working
-
-### Security Status 🔒
-- **✅ No Hardcoded Secrets**: All sensitive data via environment variables
-- **✅ GitHub Repository**: Safe for public access
-- **✅ API Keys**: Securely stored in Cloudflare Secrets
-- **✅ Database Credentials**: Environment variable protected
-- **✅ KV Namespace ID**: Environment variable protected
-
-## 🎯 System Status ✅
-
-### Current Performance
-- **Modular Architecture**: 59% code reduction in main script (683 → 277 lines)
-- **Protection System**: Intelligent delisting detection with automated response
-- **Trigger Order Creation**: 29/29 crypto pairs successful (100%)
-- **API Environment**: Correctly configured for live trading with proper market sell parameters
-- **Price Precision**: High-precision Decimal arithmetic working perfectly
-- **Configuration Management**: Automatic backup and cleanup functionality
-- **Error Resolution**: All previous API issues resolved with enhanced error handling
-- **Cloud Persistence**: D1 stores fills, recovery state, configuration, and protection state
-- **Precise Scheduling**: Cloudflare Workers provide minute-level accuracy (99.9% uptime)
-- **TradeId-Centric Processing**: Complete refactor to individual transaction processing (2025-09-03)
-- **Enhanced Deduplication**: tradeId-based unique constraints prevent duplicate processing
-- **Partial Fill Support**: Each transaction processed individually with precise quantity control
-- **Database Schema Optimization**: tradeId as business primary key, enhanced status management
-- **API Interface Optimization**: Switched to get_fills for granular trade details
-- **Incremental Data Fetching**: Smart watermarking for efficient data retrieval
-- **24-Hour Rolling Window**: Monitor changed from daily to rolling window for better fault tolerance
-- **Enhanced Crypto Matching**: Improved regex prevents false matches with comprehensive alias support
-- **🔒 Security Hardening**: All sensitive data moved to environment variables, no hardcoded secrets
-- **✅ Production Deployment**: Successfully deployed to Cloudflare Workers with KV deduplication
-
-### Architecture Benefits
-- **Maintainability**: Clean separation of concerns across 5 specialized modules
-- **Code Reusability**: Universal OKX client eliminates duplication across 6 scripts
-- **Testability**: Individual components can be tested independently
-- **Extensibility**: Easy to add new protection features or API integrations
-- **Reliability**: Robust error handling and logging throughout all modules
-- **Performance**: Optimized API calls and efficient resource management
-- **Low Overhead**: D1 storage with a Durable Object coordinator serializes trading runs
-- **Scheduling Precision**: Cloudflare Cron runs tasks without a GitHub Actions relay
-
-### Supported Crypto Pairs
-All 29 pairs in `limits.json` are fully supported:
-- **Major Coins**: BTC-USDT, ETH-USDT, BNB-USDT, XRP-USDT
-- **High-Precision Coins**: PEPE-USDT, SHIB-USDT (9 decimal places)
-- **All Other Pairs**: CRO-USDT, WBTC-USDT, LEO-USDT, and 20 more
-
-## 🚀 Quick Usage Guide
-
-### Testing the Modular System
 ```bash
-# Test individual components
-python -c "from config_manager import ConfigManager; cm = ConfigManager(); print(cm.load_configured_cryptos())"
-python -c "from crypto_matcher import CryptoMatcher; cm = CryptoMatcher(); print(cm.is_spot_related('OKX to delist BTC spot trading'))"
-python -c "from okx_client import OKXClient; oc = OKXClient(); print('OKX client initialized successfully')"
-
-# Test the complete system
-python monitor_delist.py
+npm run trading-engine
 ```
 
-### Module Integration Example
-```python
-from config_manager import ConfigManager
-from crypto_matcher import CryptoMatcher
-from protection_manager import ProtectionManager
-from okx_client import OKXClient
+Do not use local startup as authorization to enable trading. Deployment and mode changes must follow the Azure candidate runbook.
 
-# Initialize components
-config_mgr = ConfigManager()
-crypto_matcher = CryptoMatcher()
-protection_mgr = ProtectionManager()
-okx_client = OKXClient()
+## Trading modes
 
-# Universal OKX API access
-if okx_client.is_available():
-    trade_api = okx_client.get_trade_api()
-    funding_api = okx_client.get_funding_api()
-    print("✅ Authenticated APIs ready")
+- `OFF` — no new exchange mutations.
+- `EXIT_ONLY` — permits guarded SELL/DELIST operations but no BUY.
+- `FULL` — permits guarded BUY/SELL/DELIST operations after ownership, recovery, readiness and risk checks pass.
 
-if okx_client.is_market_available():
-    market_api = okx_client.get_market_api()
-    print("✅ Public data API ready")
+## Deployment
 
-# Load configuration
-cryptos = config_mgr.load_configured_cryptos()
-print(f"Monitoring {len(cryptos)} cryptocurrencies")
-
-# Check for affected cryptos in announcement
-announcement = "OKX to delist BTC, ETH spot trading pairs"
-affected = crypto_matcher.find_affected_cryptos(announcement, cryptos)
-if affected:
-    protection_mgr.execute_full_protection_flow(affected)
-```
-
-## 📝 License
-
-This project is for educational and personal use. Please ensure compliance with OKX API terms and local trading regulations.
-
----
-**System Architecture**: Cloudflare-only • **Runtime**: Workers + Durable Objects • **Database**: D1 • **Scheduling**: Cron Triggers • **TradeId-Centric**: Individual fill processing with idempotent recovery • **🔒 Security**: Cloudflare Secrets, no hardcoded credentials • **✅ Production**: Deployed to crypto-trading-cloudflare-prod.eatfreshapple.workers.dev
+Deploy immutable image digests only. Review the architecture in [`AZURE_WS_TRADING_DESIGN.md`](AZURE_WS_TRADING_DESIGN.md) and follow [`docs/runbooks/P4_AZURE_CANDIDATE.md`](docs/runbooks/P4_AZURE_CANDIDATE.md). The repository's Bicep configuration pins `TRADING_MODE=OFF`; changing it is outside the normal deployment workflow.

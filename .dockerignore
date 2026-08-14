@@ -7,12 +7,5 @@ tests
 tests-worker
 *.pem
 *.key
-7day_limit.json
 limits_d1.json
-src/db.js
-src/index.js
-src/okx.js
-src/tasks.js
 migrations
-*.sqlite
-*.db

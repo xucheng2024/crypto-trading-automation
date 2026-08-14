@@ -10,6 +10,6 @@ for (const required of [
   "HEALTHCHECK",
   "ENTRYPOINT",
 ]) if (!dockerfile.includes(required)) throw new Error(`Dockerfile missing ${required}`);
-for (const forbidden of [".env", "7day_limit.json", "limits_d1.json", "src/db.js", ".git"]) if (!ignore.includes(forbidden)) throw new Error(`.dockerignore missing ${forbidden}`);
-if (dockerfile.includes("src/db.js") || dockerfile.includes("submitBatchOrders")) throw new Error("production image includes prohibited runtime path");
+for (const forbidden of [".env", "limits_d1.json", ".git"]) if (!ignore.includes(forbidden)) throw new Error(`.dockerignore missing ${forbidden}`);
+if (dockerfile.includes("submitBatchOrders")) throw new Error("production image bypasses the application mutation boundary");
 console.log("container static checks passed; no image pushed");
