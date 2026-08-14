@@ -23,4 +23,6 @@ resource ai 'Microsoft.Insights/components@2020-02-02' = {
 output customerId string = law.properties.customerId
 output workspaceId string = law.id
 @secure()
+output connectionString string = ai.properties.ConnectionString
+@secure()
 output sharedKey string = law.listKeys().primarySharedKey

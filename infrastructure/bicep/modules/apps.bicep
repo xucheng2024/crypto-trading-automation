@@ -6,6 +6,8 @@ param registryServer string
 param logAnalyticsCustomerId string
 @secure()
 param logAnalyticsSharedKey string
+@secure()
+param applicationInsightsConnectionString string
 param workloadProfileType string
 param acrId string
 param keyVaultId string
@@ -59,6 +61,8 @@ resource engine 'Microsoft.App/containerApps@2024-03-01' = {
             { name: 'MANAGED_FILL_START_MS', value: managedFillStartMs }
             { name: 'STRATEGY_CONFIG_JSON', value: strategyConfigJson }
             { name: 'PORT', value: '8080' }
+            { name: 'APPLICATIONINSIGHTS_CONNECTION_STRING', value: applicationInsightsConnectionString }
+            { name: 'DEPLOYMENT_ENVIRONMENT', value: 'p5' }
           ]
           probes: [
             { type: 'Liveness', httpGet: { path: '/health/live', port: 8080 }, initialDelaySeconds: 10 }
@@ -93,6 +97,8 @@ resource maintenance 'Microsoft.App/jobs@2024-03-01' = {
             { name: 'TRADING_MODE', value: 'OFF' }
             { name: 'POSTGRES_URL', value: maintenancePostgresUrl }
             { name: 'MAINTENANCE_ADAPTER_MODULE', value: 'file:///app/src/entrypoints/azure/maintenance-adapter.js' }
+            { name: 'APPLICATIONINSIGHTS_CONNECTION_STRING', value: applicationInsightsConnectionString }
+            { name: 'DEPLOYMENT_ENVIRONMENT', value: 'p5' }
           ]
         }
       ]

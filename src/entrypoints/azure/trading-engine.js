@@ -1,12 +1,19 @@
 import { createAzureRuntime } from "../../azure/runtime.js";
 import { composeProductionRuntime } from "../../application/production-composition.js";
+import { createApplicationInsightsTelemetry } from "../../infrastructure/azure/application-insights-telemetry.js";
 import http from "node:http";
 
 // Composition root only. Legacy Worker/D1 modules must never be imported here.
 export async function startTradingEngine(env = process.env, dependencies = {}) {
+  const telemetry = dependencies.telemetry ?? createApplicationInsightsTelemetry({
+    connectionString: env.APPLICATIONINSIGHTS_CONNECTION_STRING,
+    serviceName: "trading-engine",
+    environment: env.DEPLOYMENT_ENVIRONMENT ?? "p5",
+    tradingMode: String(env.TRADING_MODE ?? "OFF").toUpperCase(),
+  });
   // `lifecycle` remains a narrow test seam.  The normal command constructs
   // its own production graph instead of requiring an externally injected one.
-  const composed = dependencies.lifecycle ? { runtime: createAzureRuntime(env, dependencies), ...(dependencies.composed ?? {}) } : await composeProductionRuntime(env, dependencies);
+  const composed = dependencies.lifecycle ? { runtime: createAzureRuntime(env, dependencies), ...(dependencies.composed ?? {}) } : await composeProductionRuntime(env, { ...dependencies, telemetry });
   const runtime = composed.runtime; const lifecycle = dependencies.lifecycle ?? composed; let healthServer = null;
   let stopping = false;
   const shutdown = async (signal = "SIGTERM") => {
@@ -24,6 +31,8 @@ export async function startTradingEngine(env = process.env, dependencies = {}) {
     await lifecycle.closeHealthServer?.();
     if (healthServer) await new Promise((resolve) => healthServer.close(resolve));
     await lifecycle.stop?.();
+    await telemetry.flush?.();
+    await telemetry.shutdown?.();
   };
   process.once("SIGTERM", () => void shutdown("SIGTERM"));
   process.once("SIGINT", () => void shutdown("SIGINT"));
@@ -37,7 +46,7 @@ export async function startTradingEngine(env = process.env, dependencies = {}) {
     // and OFF still prevents every mutation path.
     if (runtime.config.tradingMode !== "OFF" || error?.message !== "OKX_BASELINE_ACCOUNT_PROFILE") throw error;
     offSafeDegraded = error.message;
-    (dependencies.telemetry ?? ((event) => console.error(JSON.stringify(event))))({ event: "OFF_SAFE_DEGRADED", reason: offSafeDegraded });
+    telemetry({ event: "OFF_SAFE_DEGRADED", reason: offSafeDegraded });
   }
   const engine = { runtime, composed, shutdown, startupDegraded: offSafeDegraded, liveness: () => true, readiness: () => Boolean(offSafeDegraded) || (composed.readyGate?.ready ?? runtime.recoveryState.isReady()) };
   if (dependencies.health?.enabled) healthServer = createHealthServer(engine, dependencies.health);

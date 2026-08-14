@@ -146,12 +146,15 @@ resource jobFailure 'Microsoft.Insights/metricAlerts@2018-03-01' = {
       allOf: [
         {
           name: 'JobsFailed'
-          metricName: 'JobsFailed'
+          metricName: 'Executions'
           metricNamespace: 'Microsoft.App/jobs'
           operator: 'GreaterThan'
           threshold: 0
           timeAggregation: 'Total'
           criterionType: 'StaticThresholdCriterion'
+          dimensions: [
+            { name: 'state', operator: 'Include', values: ['Failed'] }
+          ]
         }
       ]
     }
@@ -171,7 +174,7 @@ resource natFailure 'Microsoft.Insights/scheduledQueryRules@2023-12-01' = {
     criteria: {
       allOf: [
         {
-          query: 'AzureDiagnostics | where ResourceId =~ "${natId}" | where msg_s has_any ("SNAT", "port exhaustion", "failed")'
+          query: 'AzureActivity | where ResourceId =~ "${natId}" | where ActivityStatusValue !~ "Success"'
           timeAggregation: 'Count'
           operator: 'GreaterThan'
           threshold: 0

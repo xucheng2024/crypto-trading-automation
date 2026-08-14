@@ -13,6 +13,7 @@ import { resolve } from "node:path";
 import { AzureKeyVaultSecretPort } from "../src/infrastructure/azure/keyvault-port.js";
 import { composeProductionRuntime, runRestBaseline } from "../src/application/production-composition.js";
 import { EntraPostgresPool, AZURE_POSTGRES_SCOPE } from "../src/infrastructure/postgres/entra-pool.js";
+import { createApplicationInsightsTelemetry, isImportantTelemetry } from "../src/infrastructure/azure/application-insights-telemetry.js";
 import { EngineRecurringWork } from "../src/application/engine-recurring-work.js";
 import { EngineWorkLoop } from "../src/application/engine-work-loop.js";
 
@@ -96,6 +97,19 @@ test("P4 OFF remains operational for the explicitly known account-profile prereq
   assert.equal(engine.liveness(), true); assert.equal(engine.readiness(), true);
   assert.deepEqual(telemetry, [{ event: "OFF_SAFE_DEGRADED", reason: "OKX_BASELINE_ACCOUNT_PROFILE" }]);
   await assert.rejects(startTradingEngine({ TRADING_MODE: "FULL" }, { lifecycle }), /OKX_BASELINE_ACCOUNT_PROFILE/);
+});
+
+test("P5 telemetry sends only important structured traces and strips secrets", async () => {
+  const traces = []; let flushed = 0; let stopped = 0;
+  const client = { config: {}, commonProperties: {}, trackTrace: (trace) => traces.push(trace), flush: async () => { flushed += 1; }, shutdown: async () => { stopped += 1; } };
+  const telemetry = createApplicationInsightsTelemetry({ client, serviceName: "engine", tradingMode: "OFF" });
+  telemetry({ type: "ticker", instId: "BTC-USDT" });
+  telemetry({ type: "reconcile_attempt", reason: "UNKNOWN_ORDER", instId: "BTC-USDT", apiKey: "forbidden", token: "forbidden" });
+  assert.equal(isImportantTelemetry({ type: "ticker" }), false); assert.equal(traces.length, 1);
+  assert.match(traces[0].message, /UNKNOWN_ORDER/); assert.equal(traces[0].properties.instId, "BTC-USDT");
+  assert.equal(traces[0].properties.apiKey, undefined); assert.equal(traces[0].properties.token, undefined);
+  assert.deepEqual(client.commonProperties, { service: "engine", environment: "p5", tradingMode: "OFF" });
+  await telemetry.flush(); await telemetry.shutdown(); assert.equal(flushed, 1); assert.equal(stopped, 1);
 });
 
 test("P4 maintenance composition replays safely with fake management ports", async () => {

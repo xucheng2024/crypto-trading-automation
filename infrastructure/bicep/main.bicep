@@ -96,6 +96,7 @@ module apps 'modules/apps.bicep' = {
     registryServer: registry.outputs.loginServer
     logAnalyticsCustomerId: observability.outputs.customerId
     logAnalyticsSharedKey: observability.outputs.sharedKey
+    applicationInsightsConnectionString: observability.outputs.connectionString
     workloadProfileType: workloadProfileType
     acrId: registry.outputs.id
     keyVaultId: vault.outputs.id
