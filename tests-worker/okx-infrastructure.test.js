@@ -40,14 +40,19 @@ test("P1 mutation transport makes one send attempt then returns UNKNOWN, while b
   ]);
 });
 
-test("P1 account profile cross-checks SPOT and MARGIN, and fill ownership requires tag/prefix or ledger", () => {
+test("P1 account profile prefers MARGIN, falls back to SPOT cash, and classifies both fill modes", () => {
   const commonInstrument = { instId: "BTC-USDT", state: "live", tradeQuoteCcyList: "USDT,USDC" };
-  assert.equal(validateAccountProfile({ config: [{ acctLv: "3", autoLoan: "true" }], enabledInstIds: ["BTC-USDT"], spotInstruments: [commonInstrument] }).ready, false);
+  const cash = validateAccountProfile({ config: [{ acctLv: "3", autoLoan: "true" }], enabledInstIds: ["BTC-USDT"], spotInstruments: [commonInstrument] });
+  assert.equal(cash.ready, true); assert.equal(cash.executionModes.get("BTC-USDT"), "cash"); assert.equal(cash.quoteCurrency.get("BTC-USDT"), null);
   const ready = validateAccountProfile({ config: [{ acctLv: "3", autoLoan: "true" }], enabledInstIds: ["BTC-USDT"], spotInstruments: [commonInstrument], marginInstruments: [commonInstrument] });
-  assert.equal(ready.ready, true); assert.equal(ready.quoteCurrency.get("BTC-USDT"), "USDT");
+  assert.equal(ready.ready, true); assert.equal(ready.executionModes.get("BTC-USDT"), "cross"); assert.equal(ready.quoteCurrency.get("BTC-USDT"), "USDT");
+  const unsupportedMarginQuote = validateAccountProfile({ config: [{ acctLv: "3", autoLoan: "true" }], enabledInstIds: ["BTC-USDT"], spotInstruments: [commonInstrument], marginInstruments: [{ ...commonInstrument, tradeQuoteCcyList: "USDC" }] });
+  assert.equal(unsupportedMarginQuote.executionModes.get("BTC-USDT"), "cash");
+  const unavailable = validateAccountProfile({ config: [{ acctLv: "3", autoLoan: "true" }], enabledInstIds: ["BTC-USDT"], allowUnavailable: true });
+  assert.equal(unavailable.ready, true); assert.deepEqual(unavailable.unavailable, ["BTC-USDT"]); assert.equal(unavailable.executionModes.size, 0);
   assert.equal(validateAccountProfile({ config: [{ acctLv: "3", autoLoan: "false" }] }).ready, false);
   const fill = { instType: "SPOT", instId: "BTC-USDT", side: "buy", tradeId: "t", fillTime: "20", fillSz: "1" };
-  assert.equal(classifyCrossFill(fill, { tdMode: "cash" }, { managedAfter: 10, enabledInstIds: ["BTC-USDT"] }), null);
+  assert.equal(classifyCrossFill(fill, { tdMode: "cash" }, { managedAfter: 10, enabledInstIds: ["BTC-USDT"] }).executionMode, "cash");
   assert.equal(classifyCrossFill(fill, undefined, { managedAfter: 10, enabledInstIds: ["BTC-USDT"] }), null);
   const ownership = { managedAfter: 10, enabledInstIds: ["BTC-USDT"], systemClOrdIdPrefix: "P1", strategyTag: "STRAT", attemptClOrdIds: ["LEDGER1"] };
   assert.equal(classifyCrossFill(fill, { tdMode: "cross", clOrdId: "P1EXTERNAL", tag: "OTHER" }, ownership).source, "ACCOUNT");

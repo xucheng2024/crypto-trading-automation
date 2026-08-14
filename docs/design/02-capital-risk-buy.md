@@ -56,7 +56,7 @@ remaining_leverage_capacity
 
 adjusted_net_equity_usd 直接取 OKX `totalEq` 与 `adjEq` 的较小可信值；二者差异超过配置容差时先恢复快照并 BUY HALT，不能选择更乐观的一方。
 
-`managed_fill_remaining_exposure_usd` 统计管理起点之后配置交易对的所有 cross SPOT/MARGIN BUY fills，其 remaining 为 `fill_size-disposed_size`，按新鲜 `bidPx` 保守估值，包括尘埃。SYSTEM/ACCOUNT SELL 都增加同一个 `disposed_size`。切换前余额和 FUTURES/SWAP/OPTION fills 不进入本策略 exposure；固定 `acctLv=3` 的首版不接受 `cash`/isolated fill。
+`managed_fill_remaining_exposure_usd` 统计管理起点之后配置交易对的所有 cross/cash SPOT/MARGIN BUY fills，其 remaining 为 `fill_size-disposed_size`，按新鲜 `bidPx` 保守估值，包括尘埃。SYSTEM/ACCOUNT SELL 都增加同一个 `disposed_size`。切换前余额和 FUTURES/SWAP/OPTION fills 不进入本策略 exposure；不接受 isolated fill。
 
 `system_unfilled_or_reserved_buy_exposure_usd` 只统计本系统尚未转成 managed fill 的 BUY 未成交/reservation。BUY fill 到账时，同量 reservation 转入 managed fill exposure，任何时刻同一数量只计一次。
 
@@ -137,7 +137,7 @@ Ticker 规则：
 
 1. 校验 AccountCapitalSnapshot 和 instrument version，把不含数量的 BUY 意图放入内存优先级队列；排队阶段不请求或缓存 max-avail。
 2. Order Coordinator 按 `(generation, eligible_since, instId)` 立即选当前最多 5 个不同 instId；不等待凑批。这个只读准备阶段不占不可抢占的 mutation submit slot，并逐项重新校验 READY、quote、account risk freshness、instrument/protection 和业务状态。
-3. 对仍合格项只调用一次 `GET /api/v5/account/max-avail-size?instId=<最多5个逗号分隔instId>&tdMode=cross`；Multi-currency cross MARGIN 不传 `ccy`。每项响应的 `availBuy` 是 quote currency（本策略为 USDT），先与计划资金和剩余杠杆空间取最小值，再除以 `1.0005 * execution_limit_price` 得到 base `sz`；不能把 `availBuy` 直接当 base 数量。
+3. 对仍合格项按 `execution_mode` 分组，并行调用最多一次 cross 和一次 cash `GET /api/v5/account/max-avail-size`；Multi-currency cross MARGIN 不传 `ccy`。每项响应的 `availBuy` 是 quote currency（本策略为 USDT），先与计划资金和剩余杠杆空间取最小值，再除以 `1.0005 * execution_limit_price` 得到 base `sz`；不能把 `availBuy` 直接当 base 数量。
 4. max-avail 返回后才申请 mutation submit slot；若此时出现 DELIST/SELL，BUY 释放申请并回队列，不能挡住退出。取得 slot 后在同一短事务内取得 account-scoped transaction advisory lock，重新汇总 active BUY reservations，并按上述确定顺序逐项扣减剩余杠杆容量、创建最多 5 个唯一 BUY `PREPARED` attempt。容量不足的后续项不创建 attempt，保持 RISK_HALTED 等待账户状态变化。每个 attempt 写入 exposure reservation、本轮 `strategy_day`、generation、首次 generation 冻结的目标资金、`decision_quote_ts`、规范化 quote payload hash、`decision_candle_ts/candle_hash`、instrument version/execution_limit_price、hold_hours/config hash 和本次准入使用的 equity/exposure/version 摘要。后续 generation 继承同一冻结目标。
 5. 事务结束后重新校验 TRADING_MODE=FULL、owner lock、READY、当前最新的新鲜 quote/account risk 和 instrument/protection；quote version 变新本身不导致失败，只要 last/askPx/5m 条件仍成立即可立即提交。若已不安全或 instrument/config 被移除，将 PREPARED 置为 NOT_CREATED 并原子释放 reservation。
 

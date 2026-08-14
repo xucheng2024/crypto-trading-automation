@@ -23,15 +23,28 @@ function serviceAvailable(rows, nowMs) {
   return !(rows ?? []).some((row) => String(row.state ?? "").toLowerCase() === "ongoing" || (Number(row.begin) <= nowMs && nowMs <= Number(row.end)));
 }
 
-export async function runRestBaseline({ rest, instIds, market, account, readyGate, clock }) {
+function replaceMap(target, source) { target.clear(); for (const [key, value] of source) target.set(key, value); }
+
+export async function refreshExecutionRoutes({ rest, instIds, executionModes, quoteCurrencies }) {
+  const [accountConfig, spotRows, marginRows] = await Promise.all([rest.accountConfig(), rest.accountInstruments("SPOT"), rest.accountInstruments("MARGIN")]);
+  const profile = validateAccountProfile({ config: accountConfig, spotInstruments: spotRows, marginInstruments: marginRows, enabledInstIds: instIds, allowUnavailable: true });
+  if (!profile.ready) throw new Error(`OKX_ROUTE_${profile.reason}${profile.instId ? `:${profile.instId}` : ""}`);
+  replaceMap(executionModes, profile.executionModes); replaceMap(quoteCurrencies, profile.quoteCurrency);
+  return { cross: [...executionModes.values()].filter((mode) => mode === "cross").length, cash: [...executionModes.values()].filter((mode) => mode === "cash").length, unavailable: profile.unavailable.length };
+}
+
+export async function runRestBaseline({ rest, instIds, market, account, readyGate, clock, executionModes = new Map(), quoteCurrencies = new Map() }) {
   await rest.syncServerTime();
   const status = await rest.systemStatus();
   if (!serviceAvailable(status, clock.nowMs())) throw new Error("OKX_SERVICE_UNAVAILABLE");
-  const [publicRows, tickers, accountConfig, spotRows, marginRows, leverage, balances] = await Promise.all([
-    rest.publicInstruments("SPOT"), rest.tickers("SPOT"), rest.accountConfig(), rest.accountInstruments("SPOT"), rest.accountInstruments("MARGIN"), rest.leverageInfo(instIds[0]), rest.balance(),
+  const [publicRows, tickers, accountConfig, spotRows, marginRows, balances] = await Promise.all([
+    rest.publicInstruments("SPOT"), rest.tickers("SPOT"), rest.accountConfig(), rest.accountInstruments("SPOT"), rest.accountInstruments("MARGIN"), rest.balance(),
   ]);
   const profile = validateAccountProfile({ config: accountConfig, spotInstruments: spotRows, marginInstruments: marginRows, enabledInstIds: instIds });
   if (!profile.ready) throw new Error(`OKX_BASELINE_${profile.reason}${profile.instId ? `:${profile.instId}` : ""}`);
+  replaceMap(executionModes, profile.executionModes); replaceMap(quoteCurrencies, profile.quoteCurrency);
+  const firstCross = instIds.find((instId) => executionModes.get(instId) === "cross");
+  const leverage = firstCross ? await rest.leverageInfo(firstCross) : [];
   const byId = new Map(publicRows.map((row) => [row.instId, row]));
   for (const instId of instIds) {
     const row = byId.get(instId);
@@ -39,10 +52,10 @@ export async function runRestBaseline({ rest, instIds, market, account, readyGat
     market.updateInstrument({ instId, ts: Number(row.uTime ?? row.listTime ?? 0), state: row.state ?? "live", tickSz: row.tickSz, lotSz: row.lotSz, minSz: row.minSz, expTime: row.expTime, base: row.baseCcy ?? instId.split("-")[0], quote: row.quoteCcy ?? instId.split("-")[1], version: row.uTime ?? row.listTime ?? "1" });
   }
   for (const row of tickers) if (instIds.includes(row.instId)) market.updateTicker({ instId: row.instId, ts: Number(row.ts), last: row.last, askPx: row.askPx, bidPx: row.bidPx });
-  if (!Array.isArray(leverage)) throw new Error("OKX_BASELINE_LEVERAGE");
+  if (firstCross && !Array.isArray(leverage)) throw new Error("OKX_BASELINE_LEVERAGE");
   if (!account.update(balances[0] ?? {})) throw new Error("OKX_BASELINE_ACCOUNT");
   readyGate.set("account", true); readyGate.set("instruments", true);
-  return { quoteCurrency: profile.quoteCurrency, status, leverage };
+  return { quoteCurrency: profile.quoteCurrency, executionModes: profile.executionModes, status, leverage };
 }
 
 // Sole production composition root.  Every external concern is injectable for
@@ -63,8 +76,10 @@ export async function composeProductionRuntime(env, injected = {}) {
   const orders = injected.orders ?? new OrderRepository(); const state = injected.state ?? new TradingStateRepository();
   const transaction = injected.transaction ?? asTransaction(pool); const profile = OKX_PROFILES[config.entityProfile]; const rest = injected.rest ?? new OkxRestClient({ credentials, profile, clock: runtime.clock, timeoutMs: config.http_timeout_ms });
   const instIds = injected.instIds ?? config.instrumentIds;
+  const executionModes = injected.executionModes ?? new Map();
+  const quoteCurrencies = injected.quoteCurrencies ?? new Map();
   const slo = injected.slo ?? new VirtualSloMetrics(runtime.clock);
-  const coordinator = injected.coordinator ?? new OrderCoordinator({ transaction, orders, state, transport: rest, ownerGuard, readyGate, market, account, mode: () => config.tradingMode, clock: runtime.clock, config: injected.orderConfig ?? { accountId: config.accountId, strategyTag: config.strategyTag, orderVersion: config.orderVersion, accountFreshMs: config.account_max_age_ms, quoteFreshMs: config.quote_max_age_ms, orderExpiryMs: config.order_expiry_ms }, telemetry, slo });
+  const coordinator = injected.coordinator ?? new OrderCoordinator({ transaction, orders, state, transport: rest, ownerGuard, readyGate, market, account, mode: () => config.tradingMode, executionMode: (instId) => executionModes.get(instId), tradeQuoteCurrency: (instId) => quoteCurrencies.get(instId), clock: runtime.clock, config: injected.orderConfig ?? { accountId: config.accountId, strategyTag: config.strategyTag, orderVersion: config.orderVersion, accountFreshMs: config.account_max_age_ms, quoteFreshMs: config.quote_max_age_ms, orderExpiryMs: config.order_expiry_ms }, telemetry, slo });
   const sellService = injected.sellService ?? new SellService({ state, transaction, coordinator, market, clock: runtime.clock, telemetry });
   const delist = injected.delist ?? new DelistOrchestrator({ transaction, state, orders, coordinator, accountId: config.accountId, market, telemetry }).bind();
   const protection = injected.protection ?? new InstrumentProtectionService({ state, transaction, telemetry, onExit: (p) => delist.drive(p.instId) });
@@ -92,20 +107,29 @@ export async function composeProductionRuntime(env, injected = {}) {
   const observeBusiness = (row) => { if (row.type === "candle5m") engine.receiveCandle(row); };
   const ws = injected.ws ?? { public: new OkxPublicWsClient({ instIds, socketFactory, profile, clock: runtime.clock, onObservation: observePublic, onState: (s) => { readyGate.set("public", s.fresh); if (!s.fresh) { instrumentBaseline.clear(); readyGate.set("instruments", false); } } }), private: new OkxPrivateWsClient({ socketFactory, credentials, profile, clock: runtime.clock, onObservation: observePrivate, onState: (s) => readyGate.set("private", s.fresh) }), business: new OkxBusinessWsClient({ instIds, socketFactory, profile, clock: runtime.clock, onObservation: observeBusiness, onState: (s) => readyGate.set("business", s.fresh) }) };
   const migrationCheck = injected.migrationCheck ?? (async () => {
-    const result = await pool.query("SELECT to_regclass('public.order_attempts') AS attempts, to_regclass('public.filled_orders') AS fills, to_regclass('public.sync_watermarks') AS watermarks");
-    if (!result.rows?.[0] || Object.values(result.rows[0]).some((value) => value === null)) throw new Error("POSTGRES_MIGRATIONS_MISSING");
+    const result = await pool.query(`SELECT to_regclass('public.order_attempts') AS attempts, to_regclass('public.filled_orders') AS fills,
+      to_regclass('public.sync_watermarks') AS watermarks,
+      EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='order_attempts' AND column_name='execution_mode') AS attempt_mode,
+      EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='filled_orders' AND column_name='execution_mode') AS fill_mode`);
+    if (!result.rows?.[0] || Object.values(result.rows[0]).some((value) => value === null || value === false)) throw new Error("POSTGRES_MIGRATIONS_MISSING");
   });
   const reconcile = async () => {
     const [attempts, watermarks] = await transaction((tx) => Promise.all([orders.listNonTerminal(tx, config.accountId), orders.listWatermarks(tx, config.accountId)]));
     return reconciliation.reconcileAll({ accountId: config.accountId, attempts, watermarks });
   };
-  const baseline = injected.baseline ?? (() => runRestBaseline({ rest, instIds, market, account, readyGate, clock: runtime.clock }));
+  const baseline = injected.baseline ?? (() => runRestBaseline({ rest, instIds, market, account, readyGate, clock: runtime.clock, executionModes, quoteCurrencies }));
   const recurring = injected.recurring ?? new EngineRecurringWork({ timers: injected.timers ?? globalThis, telemetry,
-    announcementMs: injected.announcementMs ?? 60_000, reconcileMs: injected.reconcileMs ?? 300_000, weeklyMs: injected.weeklyMs ?? 7 * 86_400_000,
+    announcementMs: injected.announcementMs ?? 60_000, reconcileMs: injected.reconcileMs ?? 300_000, routeMs: injected.routeMs ?? 3_600_000, weeklyMs: injected.weeklyMs ?? 7 * 86_400_000,
     announcements: () => protection.scanAnnouncements((page) => rest.announcements(page), instIds.map((instId) => market.instrument(instId)).filter(Boolean)),
-    reconcile, weeklyReconcile: injected.weeklyReconcile ?? reconcile,
+    reconcile, refreshRoutes: async () => {
+      try {
+        const counts = await refreshExecutionRoutes({ rest, instIds, executionModes, quoteCurrencies }); readyGate.set("account", true);
+        try { Promise.resolve(telemetry({ type: "execution_routes", reason: "ROUTES_REFRESHED", ...counts })).catch(() => {}); } catch {}
+        return counts;
+      } catch (error) { readyGate.set("account", false); throw error; }
+    }, weeklyReconcile: injected.weeklyReconcile ?? reconcile,
   });
-  return { runtime, keyVault, credentials, pool, ownerClient, ownerGuard, orders, state, transaction, market, account, readyGate, coordinator, reconciliation, sellService, protection, delist, rest, ws, engine, workLoop, slo, recurring, offline: false,
+  return { runtime, keyVault, credentials, pool, ownerClient, ownerGuard, orders, state, transaction, market, account, readyGate, coordinator, reconciliation, sellService, protection, delist, rest, ws, engine, workLoop, slo, recurring, executionModes, quoteCurrencies, offline: false,
     async start() { // fixed startup order: config -> secrets -> DB -> migration -> owner -> recovery -> REST baseline -> WS -> timers
       readyGate.set("database", false); await migrationCheck(); readyGate.set("database", true); if (!await ownerGuard.acquire()) throw new Error("OWNER_UNAVAILABLE");
       try { await reconciliation.recover({ accountId: config.accountId }); await baseline(); for (const client of Object.values(ws)) client.connect?.(); engine.startWatchdog(); workLoop.start?.(); recurring.start?.(); }

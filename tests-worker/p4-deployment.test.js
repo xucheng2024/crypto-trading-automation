@@ -11,7 +11,7 @@ import { promisify } from "node:util";
 import { pathToFileURL } from "node:url";
 import { resolve } from "node:path";
 import { AzureKeyVaultSecretPort } from "../src/infrastructure/azure/keyvault-port.js";
-import { composeProductionRuntime, runRestBaseline } from "../src/application/production-composition.js";
+import { composeProductionRuntime, refreshExecutionRoutes, runRestBaseline } from "../src/application/production-composition.js";
 import { EntraPostgresPool, AZURE_POSTGRES_SCOPE } from "../src/infrastructure/postgres/entra-pool.js";
 import { createApplicationInsightsTelemetry, isImportantTelemetry } from "../src/infrastructure/azure/application-insights-telemetry.js";
 import { EngineRecurringWork } from "../src/application/engine-recurring-work.js";
@@ -32,10 +32,18 @@ test("P4 runtime validates safety timing and defaults OFF", () => {
 
 test("P4 REST baseline validates server, account, leverage and configured instruments", async () => {
   const ready = new Map(); const instruments = new Map(); let capital;
-  const rest = { syncServerTime: async () => {}, systemStatus: async () => [], publicInstruments: async () => [{ instId: "BTC-USDT", state: "live", tickSz: "0.1", lotSz: "0.001", minSz: "0.001", baseCcy: "BTC", quoteCcy: "USDT", uTime: "1" }], tickers: async () => [{ instId: "BTC-USDT", ts: "2", last: "100", askPx: "101", bidPx: "99" }], accountConfig: async () => [{ acctLv: "3", autoLoan: "true" }], accountInstruments: async (type) => [{ instId: "BTC-USDT", state: "live", tradeQuoteCcyList: type === "MARGIN" ? "USDT" : "" }], leverageInfo: async () => [{ instId: "BTC-USDT", lever: "3" }], balance: async () => [{ totalEq: "100", adjEq: "99", uTime: "2" }] };
-  const result = await runRestBaseline({ rest, instIds: ["BTC-USDT"], market: { updateInstrument: (row) => instruments.set(row.instId, row), updateTicker: () => {} }, account: { update: (row) => Boolean(capital = row) }, readyGate: { set: (name, value) => ready.set(name, value) }, clock: { nowMs: () => 3 } });
-  assert.equal(result.quoteCurrency.get("BTC-USDT"), "USDT"); assert.equal(instruments.get("BTC-USDT").base, "BTC"); assert.equal(capital.totalEq, "100"); assert.equal(ready.get("account"), true); assert.equal(ready.get("instruments"), true);
+  const rows = ["BTC-USDT", "SPOT-USDT"].map((instId) => ({ instId, state: "live", tickSz: "0.1", lotSz: "0.001", minSz: "0.001", baseCcy: instId.split("-")[0], quoteCcy: "USDT", uTime: "1" }));
+  const rest = { syncServerTime: async () => {}, systemStatus: async () => [], publicInstruments: async () => rows, tickers: async () => rows.map((row) => ({ instId: row.instId, ts: "2", last: "100", askPx: "101", bidPx: "99" })), accountConfig: async () => [{ acctLv: "3", autoLoan: "true" }], accountInstruments: async (type) => type === "MARGIN" ? [{ instId: "BTC-USDT", state: "live", tradeQuoteCcyList: "USDT" }] : rows, leverageInfo: async () => [{ instId: "BTC-USDT", lever: "3" }], balance: async () => [{ totalEq: "100", adjEq: "99", uTime: "2" }] };
+  const result = await runRestBaseline({ rest, instIds: ["BTC-USDT", "SPOT-USDT"], market: { updateInstrument: (row) => instruments.set(row.instId, row), updateTicker: () => {} }, account: { update: (row) => Boolean(capital = row) }, readyGate: { set: (name, value) => ready.set(name, value) }, clock: { nowMs: () => 3 } });
+  assert.equal(result.quoteCurrency.get("BTC-USDT"), "USDT"); assert.equal(result.executionModes.get("BTC-USDT"), "cross"); assert.equal(result.executionModes.get("SPOT-USDT"), "cash"); assert.equal(instruments.get("BTC-USDT").base, "BTC"); assert.equal(capital.totalEq, "100"); assert.equal(ready.get("account"), true); assert.equal(ready.get("instruments"), true);
   await assert.rejects(runRestBaseline({ rest: { ...rest, systemStatus: async () => [{ state: "ongoing" }] }, instIds: ["BTC-USDT"], market: {}, account: {}, readyGate: {}, clock: { nowMs: () => 3 } }), /OKX_SERVICE_UNAVAILABLE/);
+});
+
+test("P5 route refresh atomically changes only future routing and removes unavailable instruments", async () => {
+  const executionModes = new Map([["OLD-USDT", "cross"]]); const quoteCurrencies = new Map([["OLD-USDT", "USDT"]]);
+  const rest = { accountConfig: async () => [{ acctLv: "3", autoLoan: true }], accountInstruments: async (type) => type === "SPOT" ? [{ instId: "BTC-USDT", state: "live" }] : [] };
+  const counts = await refreshExecutionRoutes({ rest, instIds: ["BTC-USDT", "GONE-USDT"], executionModes, quoteCurrencies });
+  assert.deepEqual(counts, { cross: 0, cash: 1, unavailable: 1 }); assert.deepEqual([...executionModes], [["BTC-USDT", "cash"]]); assert.equal(quoteCurrencies.has("OLD-USDT"), false);
 });
 
 test("P4 preflight requires authorization, supplies required GET params and rejects mutations", async () => {
@@ -233,8 +241,8 @@ test("P4 default WS composition refuses an empty instrument baseline", async () 
 test("P4 Engine recurring work serializes announcement/reconcile timers and stops cleanly", async () => {
   const intervals = new Map(); let next = 0; const timers = { setInterval(fn, delay) { const id = ++next; intervals.set(id, { fn, delay }); return id; }, clearInterval(id) { intervals.delete(id); } };
   const events = []; let release; const blocked = new Promise((resolve) => { release = resolve; });
-  const work = new EngineRecurringWork({ timers, telemetry: (event) => events.push(event), announcementMs: 11, reconcileMs: 13, weeklyMs: 17, announcements: async () => blocked });
-  work.start(); assert.deepEqual([...intervals.values()].map((row) => row.delay).sort((a, b) => a - b), [11, 13, 17]);
+  const work = new EngineRecurringWork({ timers, telemetry: (event) => events.push(event), announcementMs: 11, reconcileMs: 13, routeMs: 15, weeklyMs: 17, announcements: async () => blocked });
+  work.start(); assert.deepEqual([...intervals.values()].map((row) => row.delay).sort((a, b) => a - b), [11, 13, 15, 17]);
   const first = work.run('ANNOUNCEMENT', work.announcements); assert.deepEqual(await work.run('RECONCILE', async () => { throw new Error('must not run'); }), { skipped: true, reason: 'RECURRING_WORK_BUSY' });
   release(); assert.deepEqual(await first, { ok: true }); assert.deepEqual(await work.run('WEEKLY_RECONCILE', async () => { throw new Error('offline'); }), { ok: false });
   assert.equal(events[0].reason, 'WEEKLY_RECONCILE_FAILED'); work.stop(); assert.equal(intervals.size, 0);

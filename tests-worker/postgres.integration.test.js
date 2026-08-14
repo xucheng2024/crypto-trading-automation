@@ -68,7 +68,7 @@ async function startPostgres() {
     await run("pg_ctl", ["-D", dir, "-l", logPath, "-o", `-p ${port} -h 127.0.0.1`, "-w", "start"]);
     started = true;
     let admin = await connect();
-    const migrations = ["0001_p1_core.sql", "0002_p3_exit.sql", "0003_p4_import.sql"];
+    const migrations = ["0001_p1_core.sql", "0002_p3_exit.sql", "0003_p4_import.sql", "0004_hybrid_execution.sql"];
     for (const migration of migrations) {
       const sql = await readFile(new URL(`../migrations/postgres/${migration}`, import.meta.url), "utf8");
       await admin.query(sql); await admin.query(sql);
@@ -102,7 +102,7 @@ async function tx(client, fn) {
   }
 }
 
-function buy(id, { accountId = "a", instId = "BTC-USDT", baseCcy = "BTC", generation = 0, exposure = "10" } = {}) {
+function buy(id, { accountId = "a", instId = "BTC-USDT", baseCcy = "BTC", generation = 0, exposure = "10", executionMode = "cross" } = {}) {
   return {
     accountId, intent: "BUY", instId, baseCcy, clOrdId: id, payloadHash: `hash-${id}`,
     strategyDay: "2026-08-14", generation, plannedSize: "0.1", reservedExposureUsd: exposure,
@@ -110,7 +110,7 @@ function buy(id, { accountId = "a", instId = "BTC-USDT", baseCcy = "BTC", genera
     decisionCandleTs: 1, decisionCandleHash: "candle-hash", decisionMarketKey: `market-${id}`,
     executionLimitPrice: "100", instrumentVersion: "instrument-v1", holdHours: "24",
     strategyConfigHash: "config-v1", admissionEquity: "100", admissionExposure: "0",
-    accountSnapshotVersion: "account-v1",
+    accountSnapshotVersion: "account-v1", executionMode,
   };
 }
 
@@ -137,7 +137,12 @@ test("temporary PostgreSQL enforces P1-B invariants", { timeout: 60_000 }, async
       const columns = await db.admin.query("SELECT column_name FROM information_schema.columns WHERE table_name IN ('filled_orders','order_attempts')");
       const columnNames = new Set(columns.rows.map((row) => row.column_name));
       for (const forbidden of ["active_attempt_id", "remaining_size", "sell_generation", "breach_latched", "exit_mode", "confirmed_sold_size", "external_disposed_size", "fee", "fee_ccy", "interest", "debt"]) assert.equal(columnNames.has(forbidden), false);
-      for (const required of ["reservation_state", "decision_market_key", "failure_fingerprint", "account_snapshot_version"]) assert.equal(columnNames.has(required), true);
+      for (const required of ["reservation_state", "decision_market_key", "failure_fingerprint", "account_snapshot_version", "execution_mode"]) assert.equal(columnNames.has(required), true);
+      await tx(db.admin, (client) => orders.reserveBuy(client, buy("cash-mode", { accountId: "mode", executionMode: "cash" }), admission("100")));
+      await tx(db.admin, (client) => state.insertFill(client, { accountId: "mode", instId: "BTC-USDT", baseCcy: "BTC", tradeId: "cash-fill", source: "SYSTEM", side: "BUY", fillSize: "1", fillTime: 1, holdHours: "24", strategyConfigHash: "cfg", sellTime: 2, sellState: "WAITING", executionMode: "cash" }));
+      assert.equal((await db.admin.query("SELECT execution_mode FROM order_attempts WHERE cl_ord_id='cash-mode'")).rows[0].execution_mode, "cash");
+      assert.equal((await db.admin.query("SELECT execution_mode FROM filled_orders WHERE trade_id='cash-fill'")).rows[0].execution_mode, "cash");
+      await assert.rejects(db.admin.query("UPDATE filled_orders SET execution_mode='isolated' WHERE trade_id='cash-fill'"), (error) => error.code === "23514");
     });
 
     await t.test("two real transactions cannot reuse account exposure", async () => {

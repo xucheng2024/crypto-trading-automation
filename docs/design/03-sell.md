@@ -2,7 +2,7 @@
 
 ## 一条 BUY fill 就是一条卖出任务
 
-每个 managed BUY fill 都按 `instId + tradeId` 幂等保存并直接承载自己的卖出状态。managed BUY 包括本系统 BUY，以及管理起点之后配置交易对上的 ACCOUNT cross SPOT/MARGIN BUY fill；固定 `acctLv=3` 的首版不纳管 `cash`/isolated fill：
+每个 managed BUY fill 都按 `instId + tradeId` 幂等保存并直接承载自己的卖出状态与 `execution_mode`。managed BUY 包括本系统 BUY，以及管理起点之后配置交易对上的 ACCOUNT cross/cash SPOT/MARGIN BUY fill；不纳管 isolated fill：
 
 ~~~text
 sell_time = fill_ts + hold_hours * 3,600,000 ms
@@ -93,14 +93,14 @@ planned_size = roundToStep(
 )
 ~~~
 
-所有 managed BUY 均按固定 Multi-currency cross profile 退出：
+所有 managed BUY 均按其持久化执行模式退出；cross 使用 `reduceOnly=true`，cash 不发送 `reduceOnly`：
 
 ~~~text
 instId=<fill instrument>
 side=sell
 ordType=market
-tdMode=cross
-reduceOnly=true
+tdMode=<fill.execution_mode: cross|cash>
+reduceOnly=<仅 cross 为 true；cash 省略>
 sz=<planned base currency quantity>
 clOrdId=<版本前缀 + 稳定哈希，不超过 32 位字母数字>
 tag=<固定 STRATEGY_TAG>
@@ -154,14 +154,14 @@ DELIST 与普通 SELL 共用同一 base 资产的非终态订单约束：
 ## 必测不变量
 
 - 三条 BUY tradeId 产生三条独立 sell tasks，不创建 managed_position/group/items。
-- 管理起点之后配置交易对的外部 cross BUY fill 会创建 managed SELL_WATCH；切换前 BUY、cash/isolated BUY、永续和单纯余额变化不会创建任务。
+- 管理起点之后配置交易对的外部 cross/cash BUY fill 会创建 managed SELL_WATCH；切换前 BUY、isolated BUY、永续和单纯余额变化不会创建任务。
 - 所有 managed BUY 最终均以 `tdMode=cross, reduceOnly=true` 卖出；`reduceOnly` 不替代 managed remaining 和 reservation 数量保护。
 - 每条 fill 精确使用入账时冻结的 `fill_ts + hold_hours`；配置更新不改变旧 fill。
 - 每次 ticker 更新检查该 instId 所有到期 SELL_WATCH fills；重复/倒序事件不重复触发。
 - 命中后锁存；价格反弹、提交失败或 partial 都不会回到价格等待。
 - 所有 mutation HTTP 请求严格串行；同一 `(accountId, baseCcy)` 的 UNKNOWN/非终态退出还会阻止该 base 创建替代订单。
 - 单 fill 小于 minSz/0.1 USDT 时进入 `DUST_PENDING`，不与其他 fills 聚合；恢复可交易后直接继续退出而不重新等待价格。
-- market sell 使用 base `sz`，固定发送 `tdMode=cross, reduceOnly=true`，不发送 `tgtCcy/slippagePct`。
+- market sell 使用 base `sz`，沿用持久化 `execution_mode`；cross 发送 `reduceOnly=true`，cash 省略，不发送 `tgtCcy/slippagePct`。
 - partial/UNKNOWN/重启不会重复卖出同一数量。
 - ACCOUNT SELL 的 WS/REST 重复事件和重启回看不会重复扣减；所有 ACCOUNT SELL 先 PENDING，等待连续 watermarks 和活动系统退出 attempt 终态后再按顺序分配。测试不得把这解释为能够阻止两个已提交订单在 OKX 同时成交。
 - 退市优先领取不会与普通 SELL 重叠，也不会卖出 managed remaining 之外的余额。

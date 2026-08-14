@@ -1,4 +1,4 @@
-import { classifyCrossFill } from "../infrastructure/okx/rest-client.js";
+import { classifyManagedFill } from "../infrastructure/okx/rest-client.js";
 
 // Observability must never become part of the reconciliation correctness path.
 // Ports are intentionally fire-and-forget: both a synchronous throw and a
@@ -94,7 +94,7 @@ export class ReconciliationService {
     return { clOrdId, outcome: found ? "FOUND_BY_CONSISTENCY" : "RETAIN_UNKNOWN" };
   }
   async ingestFill(tx, fill, order) {
-    const managed = classifyCrossFill(fill, order, this.ownership);
+    const managed = classifyManagedFill(fill, order, this.ownership);
     if (!managed) return false;
     if (managed.source === "ACCOUNT" && order?.clOrdId && typeof this.orders.findByClOrdId === "function" && await this.orders.findByClOrdId(tx, order.clOrdId)) managed.source = "SYSTEM";
     const isBuy = managed.side === "buy";
@@ -104,6 +104,7 @@ export class ReconciliationService {
     const inserted = await this.state.insertFill(tx, {
       accountId: this.ownership.accountId, instId: managed.instId, baseCcy, tradeId: managed.tradeId, billId: managed.billId,
       source: managed.source, side: isBuy ? "BUY" : "SELL", fillSize: managed.sz, fillTime: managed.fillTime,
+      executionMode: managed.executionMode,
       ...(isBuy ? { holdHours: this.ownership.holdHoursByInst?.[managed.instId], strategyConfigHash: this.ownership.configHash, sellTime: Number(managed.fillTime) + Number(this.ownership.holdHoursByInst?.[managed.instId] ?? 0) * 3_600_000, sellState: "WAITING" } : { allocationState: "PENDING" }),
     });
     if (managed.source === "ACCOUNT" && isBuy) this.onAccountBuy(managed.instId);

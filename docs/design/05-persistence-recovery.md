@@ -16,7 +16,7 @@
 PostgreSQL 运行时保留或新建：
 
 - daily_limit_cache；
-- filled_orders（统一保存管理起点之后配置交易对的 cross BUY/SELL fills，并保存 fillTime/billId；`source=SYSTEM|ACCOUNT`。managed BUY 保存 fill_size、disposed_size、hold_hours、strategy_config_hash、sell_time、protection_price、sell_state 和 version；ACCOUNT SELL 保存 `allocation_state=PENDING|APPLIED` 与 allocated_size。remaining/generation/breach latch/exit_mode 不持久化；固定 `acctLv=3` 首版统一 cross，不保存实际手续费或借款利息）；
+- filled_orders（统一保存管理起点之后配置交易对的 cross/cash BUY/SELL fills，并保存 fillTime/billId 与 `execution_mode`；`source=SYSTEM|ACCOUNT`。managed BUY 保存 fill_size、disposed_size、hold_hours、strategy_config_hash、sell_time、protection_price、sell_state 和 version；ACCOUNT SELL 保存 `allocation_state=PENDING|APPLIED` 与 allocated_size。remaining/generation/breach latch 不持久化，不保存实际手续费或借款利息）；
 - instrument_protection（仅在被保护时存在；保存 BLACKLISTED/EXITING/EXITED/DELIST_DUST 单状态、退市元数据、version 和错误）；
 
 新增：
@@ -114,11 +114,11 @@ Private orders WS 是低延迟主路径，但没有启动历史快照。正确�
 - 本系统订单的无 tradeId 终态按 ordId + state 去重；若它是本系统 SPOT/MARGIN BUY fill 来源，必须按 ordId 查询 REST fills 并取得真实 tradeId，不能直接据此创建 SELL task；
 - 不使用 MAX(ts)+1，避免同毫秒或迟到成交遗漏；
 - 本系统 fill 的成交顺序使用 `fillTime`，`ts` 仅作记录生成/接收审计；
-- 历史查询分别使用 SPOT/MARGIN `instType`。REST `fills/fills-history` 不返回 `tdMode`，所以断线回补时必须通过 `ordId` 联查 order details/history 确认 `tdMode=cross` 后才能纳管；不能从 fill 自身猜测模式。固定 `acctLv=3` 的首版不纳管 cash/isolated。
+- 历史查询分别使用 SPOT/MARGIN `instType`。REST `fills/fills-history` 不返回 `tdMode`，所以断线回补时必须通过 `ordId` 联查 order details/history，确认并持久化 `tdMode=cross|cash` 后才能纳管；不能从 fill 自身猜测模式。不纳管 isolated。
 
 VIP4 fills WS 不作为首版依赖。
 
-订单生命周期仍只管理匹配本系统 `clOrdId/tag` 或 attempt ledger 的订单。fill 入口只接受 `managed_fill_start_time` 之后配置交易对且确认 `tdMode=cross` 的 SPOT/MARGIN BUY/SELL；BUY 成为 managed BUY，SYSTEM SELL 按 attempt 更新指定 BUY。ACCOUNT SELL 一律先 PENDING，只有相关 SPOT 与 MARGIN fills 连续水位的较小值越过其 fillTime、所有更早 BUY 已入账且同 base 没有活动系统退出 attempt 时才一次性分配并终态；PENDING 阻止同 base 新建 SYSTEM SELL/DELIST。SYSTEM BUY fill 继承 attempt 的 strategy_day、hold_hours/config hash；迟到或跨日回补不能改绑到新轮次。ACCOUNT fills 不伪造 order attempt；cash/isolated、FUTURES/SWAP/OPTION fills 忽略。确认退市后活动订单仍按 `order_attempts` 查询。
+订单生命周期仍只管理匹配本系统 `clOrdId/tag` 或 attempt ledger 的订单。fill 入口只接受 `managed_fill_start_time` 之后配置交易对且确认 `tdMode=cross|cash` 的 SPOT/MARGIN BUY/SELL；BUY 成为 managed BUY，SYSTEM SELL 按 attempt 更新指定 BUY。ACCOUNT SELL 一律先 PENDING，只有相关 SPOT 与 MARGIN fills 连续水位的较小值越过其 fillTime、所有更早 BUY 已入账且同 base 没有活动系统退出 attempt 时才一次性分配并终态；PENDING 阻止同 base 新建 SYSTEM SELL/DELIST。SYSTEM BUY fill 继承 attempt 的 strategy_day、hold_hours/config hash；迟到或跨日回补不能改绑到新轮次。ACCOUNT fills 不伪造 order attempt；isolated、FUTURES/SWAP/OPTION fills 忽略。确认退市后活动订单仍按 `order_attempts` 查询。
 
 可售余额只作为本系统 SELL/DELIST remaining 的上限。少于 remaining 时缩单，等于零时保持可恢复并等待账户/fill 更新；只有真实 SELL fills 使 remaining 归零才收敛为 SOLD/EXITED。多于 ledger 时忽略；不做余额所有权归因。
 
@@ -130,7 +130,7 @@ VIP4 fills WS 不作为首版依赖。
 2. 建立三类 WS 并确认订阅。
 3. REST 获取 system status、instruments、account config、balance/risk，以及恢复本系统非终态 attempts 与 managed ledger 所需的 pending/history/重叠 fills；先按 fillTime/billId/tradeId 稳定排序并保存全部本系统及 ACCOUNT BUY/SELL fills，再推进无缺口的 fills sync watermark，不扫描 pending algo 或外部 positions。
 4. 对账 clOrdId、ordId、tradeId、attempt reservation、PENDING ACCOUNT SELL 和可售量；恢复系统非终态 attempt 后，只分配 watermark 已安全覆盖的 PENDING ACCOUNT SELL，再领取新的退出任务。未被连续 watermark 覆盖的 PENDING 继续阻止同 base 新退出并触发回补。
-5. 仅当匹配本系统 `clOrdId/tag` 的 OKX 订单在数据库中不存在时标记 ORPHANED；不匹配所有权的订单生命周期忽略，但管理起点之后配置交易对且确认 cross 的外部 SPOT/MARGIN BUY/SELL fills 仍按 ACCOUNT fill 纳管。
+5. 仅当匹配本系统 `clOrdId/tag` 的 OKX 订单在数据库中不存在时标记 ORPHANED；不匹配所有权的订单生命周期忽略，但管理起点之后配置交易对且确认 cross/cash 的外部 SPOT/MARGIN BUY/SELL fills 仍按 ACCOUNT fill 纳管。
 6. 数据库有而 OKX 无：查询 `orders-history`、`orders-history-archive` 和重叠 `fills/fills-history` 后决定终态。
 7. 恢复 PREPARED/SUBMITTED/UNKNOWN orders 和未完成逐 fill sell attempts；PREPARED 与 UNKNOWN 一样先查询。
 8. 恢复 candle5m 基线。

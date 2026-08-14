@@ -29,7 +29,7 @@ export class DelistOrchestrator {
       this._emit({ type: "protection", reason: "BALANCE_SHORTFALL", instId, sourceBuyTradeId: row.trade_id });
       return "EXITING";
     }
-    this.coordinator.enqueue({ intent: "DELIST", accountId: this.accountId, instId, baseCcy: row.base_ccy, sourceBuyTradeId: row.trade_id, remainingSize: row.remaining_size, fillVersion: row.version, generation: Number(row.next_generation), sellTime: Number(row.sell_time ?? 0), availableBase: confirmedAvailable, bidPx: quote?.bidPx ?? quote?.last });
+    this.coordinator.enqueue({ intent: "DELIST", accountId: this.accountId, instId, baseCcy: row.base_ccy, sourceBuyTradeId: row.trade_id, remainingSize: row.remaining_size, fillVersion: row.version, generation: Number(row.next_generation), sellTime: Number(row.sell_time ?? 0), availableBase: confirmedAvailable, bidPx: quote?.bidPx ?? quote?.last, executionMode: row.execution_mode ?? row.executionMode });
     this._emit({ type: "protection", reason: "DELIST_QUEUED", instId, sourceBuyTradeId: row.trade_id });
     return "EXITING";
   }

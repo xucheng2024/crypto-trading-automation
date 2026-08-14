@@ -43,30 +43,44 @@ export function classifyBatchResponse(result, clOrdIds) {
   });
 }
 
-export function validateAccountProfile({ config, spotInstruments = [], marginInstruments = [], enabledInstIds = [] }) {
+export function validateAccountProfile({ config, spotInstruments = [], marginInstruments = [], enabledInstIds = [], allowUnavailable = false }) {
   const configRow = Array.isArray(config) ? config[0] : config;
   if (!configRow || String(configRow.acctLv) !== "3" || String(configRow.autoLoan).toLowerCase() !== "true") return { ready: false, reason: "ACCOUNT_PROFILE" };
   const spot = new Map(spotInstruments.map((row) => [row.instId, row]));
   const margin = new Map(marginInstruments.map((row) => [row.instId, row]));
   const quoteCurrency = new Map();
+  const executionModes = new Map();
+  const unavailable = [];
   for (const instId of enabledInstIds) {
     const spotRow = spot.get(instId);
     const marginRow = margin.get(instId);
-    if (!spotRow || !marginRow || (spotRow.state && spotRow.state !== "live") || (marginRow.state && marginRow.state !== "live")) return { ready: false, reason: "ACCOUNT_INSTRUMENT", instId };
-    const currencies = String(marginRow.tradeQuoteCcyList || "").split(",").filter(Boolean);
-    if (currencies.length && !currencies.includes("USDT")) return { ready: false, reason: "USDT_NOT_ALLOWED", instId };
+    if (!spotRow || (spotRow.state && spotRow.state !== "live")) {
+      if (allowUnavailable) { unavailable.push(instId); continue; }
+      return { ready: false, reason: "ACCOUNT_INSTRUMENT", instId };
+    }
+    const currencies = String(marginRow?.tradeQuoteCcyList || "").split(",").filter(Boolean);
+    const marginUsable = marginRow && (!marginRow.state || marginRow.state === "live") && (!currencies.length || currencies.includes("USDT"));
+    if (!marginUsable) {
+      executionModes.set(instId, "cash");
+      quoteCurrency.set(instId, null);
+      continue;
+    }
+    executionModes.set(instId, "cross");
     quoteCurrency.set(instId, currencies.length ? "USDT" : null);
   }
-  return { ready: true, quoteCurrency };
+  return { ready: true, quoteCurrency, executionModes, unavailable };
 }
 
-export function classifyCrossFill(fill, order, { managedAfter, enabledInstIds, systemClOrdIdPrefix, strategyTag, attemptClOrdIds = [] }) {
+export function classifyManagedFill(fill, order, { managedAfter, enabledInstIds, systemClOrdIdPrefix, strategyTag, attemptClOrdIds = [] }) {
   if (!fill || !enabledInstIds?.includes(fill.instId) || !["SPOT", "MARGIN"].includes(fill.instType) || !["buy", "sell"].includes(fill.side)) return null;
-  if (Number(fill.fillTime) < Number(managedAfter) || order?.tdMode !== "cross") return null;
+  if (Number(fill.fillTime) < Number(managedAfter) || !["cross", "cash"].includes(order?.tdMode)) return null;
   const inLedger = Boolean(order?.clOrdId && (attemptClOrdIds instanceof Set ? attemptClOrdIds.has(order.clOrdId) : attemptClOrdIds.includes(order.clOrdId)));
   const ownedPrefixAndTag = Boolean(order?.clOrdId && systemClOrdIdPrefix && strategyTag && order.clOrdId.startsWith(systemClOrdIdPrefix) && order.tag === strategyTag);
-  return { source: inLedger || ownedPrefixAndTag ? "SYSTEM" : "ACCOUNT", instId: fill.instId, tradeId: fill.tradeId, side: fill.side, fillTime: fill.fillTime, billId: fill.billId, sz: fill.fillSz };
+  return { source: inLedger || ownedPrefixAndTag ? "SYSTEM" : "ACCOUNT", instId: fill.instId, tradeId: fill.tradeId, side: fill.side, fillTime: fill.fillTime, billId: fill.billId, sz: fill.fillSz, executionMode: order.tdMode };
 }
+
+// Compatibility export for callers compiled against the original cross-only name.
+export const classifyCrossFill = classifyManagedFill;
 
 export class OkxRestClient {
   constructor({ credentials = {}, profile = OKX_PROFILES.GLOBAL, fetcher = fetch, clock = { nowMs: () => Date.now() }, sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)), requestGapMs = 0, timeoutMs = 15_000 } = {}) {

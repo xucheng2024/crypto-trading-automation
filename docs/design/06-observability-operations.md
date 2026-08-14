@@ -59,7 +59,7 @@ ORDER_AUDIT_RETENTION_DAYS=365
 - 日志不记录 API key、passphrase、签名、Authorization 或完整账户响应。
 - 字段和错误正文截断。
 - 高频 raw risk snapshots 不保存；BUY attempt 只保存本次准入使用的 equity/exposure/version 精简摘要，风险拒绝进入结构化 telemetry。
-- 共享账户其他对象在输入边界过滤，不产生逐对象日志；管理起点之后配置交易对且确认 `tdMode=cross` 的 BUY/SELL fills 统一写入 fill ledger，只以 `source=SYSTEM|ACCOUNT` 区分并聚合记录数量和异常。本系统仍记录准入所用账户风险快照版本。
+- 共享账户其他对象在输入边界过滤，不产生逐对象日志；管理起点之后配置交易对且确认 `tdMode=cross|cash` 的 BUY/SELL fills 统一写入 fill ledger，并保存实际模式，只以 `source=SYSTEM|ACCOUNT` 区分并聚合记录数量和异常。本系统仍记录准入所用账户风险快照版本。
 - 初期不做表分区；当单表达到 5 GB、月增长超过 100 万行或 retention DELETE 明显影响交易时再分区。
 - maintenance Job 每日小批量执行 retention；非终态、UNKNOWN 和未完成退市永不按时间删除。owner 和 READY 是运行时派生状态，不参与 retention。
 
@@ -119,7 +119,7 @@ Milestone 3 要求同时满足服务采用和持续使用：至少 5 个独立 A
 
 - Trading Engine watchdog 持续检查 READY、WS、本系统 UNKNOWN orders、risk halt、sell backlog 和 owner lock。
 - Container Apps 的单个计划型 D+1 maintenance Job 仅运行真实需要的 retention 和 operations；所有子任务幂等且可补漏。
-- reconciliation timer 每周对账本系统 PostgreSQL attempts/fills，并回看管理起点之后配置交易对且确认 cross 的外部 SPOT/MARGIN BUY/SELL fills；balance 仅作为 SELL 可售上限和 BUY 账户风险输入。不查询 bills，不归因手续费、利息或强制还款；余额不足只让 SELL 按实际可售量收敛。
+- reconciliation timer 每周对账本系统 PostgreSQL attempts/fills，并回看管理起点之后配置交易对且确认 cross/cash 的外部 SPOT/MARGIN BUY/SELL fills；balance 仅作为 SELL 可售上限和 BUY 账户风险输入。不查询 bills，不归因手续费、利息或强制还款；余额不足只让 SELL 按实际可售量收敛。
 - Operations timer 每日检查 Key Vault secret expiry、NAT IP、数据库/日志容量和预算阈值；Milestone 进度由微软平台查看，不在应用内复制。
 - 所有失败进入 Azure Monitor 告警；人工只接收异常通知，不参与正常 owner 授予、READY 恢复或逐单处理。
 
