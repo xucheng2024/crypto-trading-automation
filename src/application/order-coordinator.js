@@ -103,7 +103,7 @@ export class OrderCoordinator {
           frozenTargetUsd: frozenTarget, decisionQuoteTs: quote.ts, decisionQuoteHash: await payloadHash(quote), decisionCandleTs: candle.ts, decisionCandleHash: await payloadHash(candle), decisionMarketKey: marketKey,
           executionLimitPrice: executionPrice, instrumentVersion: String(instrument.version ?? "1"), holdHours: intent.holdHours, strategyConfigHash: intent.configHash,
           admissionEquity: adjustedEquity(this.account.value), admissionExposure: intent.managedExposure ?? "0", accountSnapshotVersion: String(this.account.value.version), executionMode, executionRoute,
-          decisionTriggerPrice: quote.last, decisionReferencePrice: intent.breakoutPrice ?? candle.high, decisionReason: "BUY_BREAKOUT_CONFIRMED",
+          decisionTriggerPrice: quote.last, decisionReferencePrice: guard.signal.breakoutPrice, decisionReason: "BUY_BREAKOUT_CONFIRMED",
         };
         try {
           const reserve = await this.orders.reserveBuy(tx, attempt, { managedExposure: intent.managedExposure ?? "0", maxExposure: multiplyDecimal(BUY_ADMISSION_LEVERAGE, attempt.admissionEquity) });

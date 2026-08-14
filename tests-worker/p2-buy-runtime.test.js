@@ -5,6 +5,7 @@ import { AccountCapitalSnapshot, BoundedPriorityQueue, MarketProjection, ReadyGa
 import { OrderCoordinator } from "../src/application/order-coordinator.js";
 import { ReconciliationService } from "../src/application/reconciliation-service.js";
 import { VirtualSloMetrics } from "../src/application/slo-metrics.js";
+import { payloadHash } from "../src/domain/order.js";
 import { assessLeverage, dailyLimit, expectedClosedCandleTs } from "../src/domain/rules.js";
 
 const clock = (value = 0) => ({ value, nowMs() { return this.value; } });
@@ -82,6 +83,35 @@ test("P2 BUY final guard releases PREPARED reservation when owner, mode, READY, 
   });
   coordinator.enqueue({ intent: "BUY", instId: "BTC-USDT", generation: 0, eligibleSince: 1, strategyDay: "2026-08-14", dailyLimitPrice: "100", holdHours: "24", configHash: "cfg", managedExposure: "0" });
   assert.equal((await coordinator.drainOnce()).reason, "FINAL_GUARD"); assert.equal(sends, 0); assert.equal([...attempts.values()][0].reservationState, "RELEASED");
+});
+
+test("P2 BUY attempt uses the exact market snapshot admitted by its construction guard", async () => {
+  const now = clock(720_000); const account = new AccountCapitalSnapshot({ clock: now }); account.update({ ts: 1, totalEq: "150", adjEq: "150" });
+  const quoteA = { instId: "BTC-USDT", ts: 1, last: "95", askPx: "95", bidPx: "94" };
+  const quoteB = { instId: "BTC-USDT", ts: 2, last: "96", askPx: "96", bidPx: "95" };
+  const candleA = { instId: "BTC-USDT", ts: expectedClosedCandleTs(now.nowMs()), high: "90", low: "89", confirm: true };
+  const candleB = { instId: "BTC-USDT", ts: expectedClosedCandleTs(now.nowMs()), high: "91", low: "90", confirm: true };
+  const instrumentA = { instId: "BTC-USDT", state: "live", tickSz: "0.3", lotSz: "0.001", minSz: "0.001", base: "BTC", version: "A" };
+  const instrumentB = { ...instrumentA, tickSz: "0.2", version: "B" };
+  let quoteReads = 0; let candleReads = 0; let instrumentReads = 0; let tickerReads = 0; let attempt;
+  const market = {
+    freshQuote: () => quoteReads++ === 0 ? quoteA : quoteB,
+    ticker: () => { tickerReads += 1; return quoteB; },
+    candle: () => candleReads++ === 0 ? candleA : candleB,
+    instrument: () => instrumentReads++ === 0 ? instrumentA : instrumentB,
+  };
+  const coordinator = new OrderCoordinator({ transaction: async (fn) => fn({}), state: {}, market, account, readyGate: ready(), ownerGuard: { isHeld: () => true }, mode: () => "FULL", executionRoute: () => "margin", tradeQuoteCurrency: () => "USDT", clock: now, config,
+    orders: { reserveBuy: async (_tx, row) => { attempt = row; return { authorized: true }; }, markSubmitted: async () => {} },
+    transport: { ...clockReady, submitBatchOrders: async (rows) => rows.map((row) => ({ clOrdId: row.clOrdId, status: "SUBMITTED", ordId: "snapshot" })) },
+  });
+  const result = await coordinator.submitBuys([{ intent: "BUY", instId: "BTC-USDT", generation: 0, strategyDay: "2026-08-14", dailyLimitPrice: "100.1", breakoutPrice: "1", holdHours: "24", configHash: "cfg", managedExposure: "0", availBuy: "100" }]);
+  assert.equal(result.submitted, true);
+  assert.equal(tickerReads, 0, "attempt construction must not re-read the raw ticker");
+  assert.equal(attempt.decisionQuoteHash, await payloadHash(quoteA));
+  assert.equal(attempt.decisionCandleHash, await payloadHash(candleA));
+  assert.equal(attempt.executionLimitPrice, "99.9");
+  assert.equal(attempt.instrumentVersion, "A");
+  assert.equal(attempt.decisionReferencePrice, "90.27", "reference price comes from the guard's candle, not the queued intent");
 });
 
 test("P5 route refresh cannot change a BUY route between availability and submission", async () => {
