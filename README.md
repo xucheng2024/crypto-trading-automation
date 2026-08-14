@@ -2,9 +2,11 @@
 
 A comprehensive automated crypto trading system with OKX exchange integration, featuring algorithmic trading strategies, delisting protection, automated order management, and exchange-aware decimal rounding.
 
-Cloudflare Workers run all high-frequency trading protection. GitHub Actions performs the low-frequency daily buy-trigger cancellation and reconciliation, while D1 remains the shared strategy-state database.
+The production runtime is Azure Container Apps and PostgreSQL in Azure East Asia (Hong Kong). It is deployed with `TRADING_MODE=OFF`; enabling FULL requires separate authorization.
 
-The proposed Azure/OKX WebSocket migration targets Azure East Asia (Hong Kong), with a margin risk gate, `BUY_WATCH` candle tracking, limit IOC buying, and batched market selling documented in [`AZURE_WS_TRADING_DESIGN.md`](AZURE_WS_TRADING_DESIGN.md).
+The former Cloudflare Worker, D1 database, Worker secrets, and GitHub reconciliation workflow were permanently decommissioned on 2026-08-14. Cloudflare implementation files remain only as migration/audit history and have no production deployment configuration.
+
+The Azure/OKX WebSocket design is documented in [`AZURE_WS_TRADING_DESIGN.md`](AZURE_WS_TRADING_DESIGN.md).
 
 ## 🚀 Quick Start
 
@@ -21,9 +23,9 @@ python create_algo_triggers.py
 python monitor_delist.py
 ```
 
-## 🏗️ Modern Cloud Architecture
+## 🏗️ Legacy Cloud Architecture (Archived)
 
-### Cloud Deployment ⭐
+### Former Cloud Deployment (Decommissioned) ⭐
 - **Cloudflare Workers Cron** - Runs monitoring, fill synchronization, cancellation of ordinary limits, and selling
 - **GitHub Actions** - Cancels daily buy triggers and recreates them from the shared D1 strategy state
 - **Durable Object coordinator** - Prevents overlapping scheduled or manual trading runs

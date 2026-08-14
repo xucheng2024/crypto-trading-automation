@@ -5,8 +5,6 @@
   "scripts": {
     "test": "node --test tests-worker/*.test.js",
     "test:postgres": "node --test tests-worker/postgres.integration.test.js",
-    "check": "wrangler deploy --dry-run",
-    "deploy": "wrangler deploy",
     "trading-engine": "node src/entrypoints/azure/trading-engine.js",
     "maintenance": "node scripts/run-maintenance.mjs",
     "migrate:rehearsal": "node scripts/migration-rehearsal.mjs && node --test tests-worker/postgres.integration.test.js",
