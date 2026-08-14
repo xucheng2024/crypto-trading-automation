@@ -47,6 +47,16 @@ export function multiplyDecimal(left, right) {
   return formatDecimal(a.n * b.n, a.scale + b.scale);
 }
 
+export function addDecimal(left, right) {
+  const [a, b, scale] = align(parseDecimal(left), parseDecimal(right));
+  return formatDecimal(a + b, scale);
+}
+
+export function subtractDecimal(left, right) {
+  const [a, b, scale] = align(parseDecimal(left), parseDecimal(right));
+  return formatDecimal(a - b, scale);
+}
+
 export function divideDecimal(left, right, outputScale = 18) {
   const a = parseDecimal(left);
   const b = parseDecimal(right);

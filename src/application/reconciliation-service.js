@@ -1,31 +1,39 @@
 import { classifyCrossFill } from "../infrastructure/okx/rest-client.js";
 
+// Observability must never become part of the reconciliation correctness path.
+// Ports are intentionally fire-and-forget: both a synchronous throw and a
+// rejected promise are contained here.
+function emit(port, event) { try { Promise.resolve(port(event)).catch(() => {}); } catch { /* telemetry is best effort */ } }
+
 function keyOf(fill) { return `${fill.instId}:${fill.tradeId}`; }
 function fillKey(fill) { return [Number(fill.fillTime), /^\d+$/.test(String(fill.billId ?? "")) ? BigInt(fill.billId) : -1n, String(fill.tradeId)].map(String).join(":"); }
 function normalizePage(value) { return Array.isArray(value) ? { rows: value, cursor: null } : { rows: value?.data ?? value?.rows ?? [], cursor: value?.next ?? value?.cursor ?? null }; }
 
 /** Read-only reconciliation and ACCOUNT fill ingestion; it never invokes mutation transport. */
 export class ReconciliationService {
-  constructor({ orders, state, transport, ownerGuard, readyGate, clock = { nowMs: () => Date.now() }, sleep = async () => {}, safetyWaitMs, telemetry = () => {}, transaction = async (fn) => fn(null), ownership = {}, onAccountBuy = () => {} }) {
-    Object.assign(this, { orders, state, transport, ownerGuard, readyGate, clock, sleep, safetyWaitMs, telemetry, transaction, ownership, onAccountBuy });
+  constructor({ orders, state, transport, ownerGuard, readyGate, clock = { nowMs: () => Date.now() }, sleep = async () => {}, safetyWaitMs, telemetry = () => {}, transaction = async (fn) => fn(null), ownership = {}, onAccountBuy = () => {}, onRecovery = async () => {} }) {
+    Object.assign(this, { orders, state, transport, ownerGuard, readyGate, clock, sleep, safetyWaitMs, telemetry, transaction, ownership, onAccountBuy, onRecovery });
     if (!Number.isFinite(safetyWaitMs) || safetyWaitMs < 0) throw new TypeError("safetyWaitMs is required");
     // Session advisory locks disappear with their connection. READY must disappear in the
     // same turn; reacquisition always goes through recover() and its safety wait.
     this.ownerGuard.onLost?.(() => {
       this.readyGate.set("owner", false);
-      this.telemetry({ type: "owner_lost", reason: "SESSION_ADVISORY_LOCK_LOST" });
+      emit(this.telemetry, { type: "owner_lost", reason: "SESSION_ADVISORY_LOCK_LOST" });
     });
   }
   async recover({ accountId, scopes = ["public", "private", "business"], strategyDay } = {}) {
     this.readyGate.set("owner", false); for (const scope of scopes) this.readyGate.set(scope, false);
     if (!this.ownerGuard.isHeld()) return { ready: false, reason: "OWNER_NOT_HELD" };
     this.readyGate.set("owner", true); await this.sleep(this.safetyWaitMs);
-    const [protection, daily, ledger, attempts, buyAttempts, watermarks] = await Promise.all([
-      this.state.listProtection?.(accountId) ?? [], this.state.listDaily?.(accountId) ?? [], this.state.listManagedFills?.(accountId) ?? [],
-      this.orders.listNonTerminal?.(accountId) ?? [], this.orders.listTodayBuys?.(accountId, strategyDay) ?? [], this.orders.listWatermarks?.(accountId) ?? [],
-    ]);
+    const [protection, daily, ledger, attempts, buyAttempts, watermarks] = await this.transaction((tx) => Promise.all([
+      this.state.listProtection?.(tx, accountId) ?? [], this.state.listDaily?.(tx, accountId) ?? [], this.state.listManagedFills?.(tx, accountId) ?? [],
+      this.orders.listNonTerminal?.(tx, accountId) ?? [], this.orders.listTodayBuys?.(tx, accountId, strategyDay) ?? [], this.orders.listWatermarks?.(tx, accountId) ?? [],
+    ]));
     const recovered = await this.reconcileAll({ accountId, attempts, watermarks });
-    this.telemetry({ type: "recovery_loaded", protection: protection.length, daily: daily.length, fills: ledger.length, attempts: attempts.length, buyAttempts: buyAttempts.length, watermarks: watermarks.length, recovered: recovered.length });
+    // Consumers rebuild their in-memory watch/index strictly from this
+    // durable snapshot before READY can be restored by baseline completion.
+    await this.onRecovery({ protection, daily, ledger, attempts, buyAttempts, watermarks, recovered });
+    emit(this.telemetry, { type: "recovery_loaded", protection: protection.length, daily: daily.length, fills: ledger.length, attempts: attempts.length, buyAttempts: buyAttempts.length, watermarks: watermarks.length, recovered: recovered.length });
     return { ready: false, reason: "BASELINES_REQUIRED", attempts, buyAttempts, recovered };
   }
   async pages(read, initial = {}) {
@@ -64,8 +72,14 @@ export class ReconciliationService {
   }
   async reconcileAttempt(attempt) {
     const instId = attempt.inst_id ?? attempt.instId; const clOrdId = attempt.cl_ord_id ?? attempt.clOrdId;
-    const direct = await this.transport.order({ instId, clOrdId });
-    if (direct?.state && direct.state !== "NOT_FOUND") { this.telemetry({ type: "reconcile_attempt", clOrdId, outcome: "FOUND" }); return { clOrdId, outcome: "FOUND", direct }; }
+    let direct;
+    try { direct = await this.transport.order({ instId, clOrdId }); }
+    catch (error) {
+      // A failed lookup says nothing about whether the exchange accepted it.
+      emit(this.telemetry, { type: "reconcile_attempt", clOrdId, outcome: "RETAIN_UNKNOWN", reason: "ORDER_LOOKUP_FAILED", error: error?.message });
+      return { clOrdId, outcome: "RETAIN_UNKNOWN" };
+    }
+    if (direct?.state && direct.state !== "NOT_FOUND") { emit(this.telemetry, { type: "reconcile_attempt", clOrdId, outcome: "FOUND" }); return { clOrdId, outcome: "FOUND", direct }; }
     // A single NOT_FOUND is deliberately insufficient. Query every required consistency source and retain reservation.
     const methods = ["ordersPending", "ordersHistory", "ordersHistoryArchive", "fills", "fillsHistory"];
     const tasks = [];
@@ -76,21 +90,41 @@ export class ReconciliationService {
     }
     const reads = await Promise.all(tasks);
     const found = reads.flat().some((row) => row?.clOrdId === clOrdId || row?.ordId === attempt.ord_id);
-    this.telemetry({ type: "reconcile_attempt", clOrdId, outcome: found ? "FOUND_BY_CONSISTENCY" : "RETAIN_UNKNOWN" });
+    emit(this.telemetry, { type: "reconcile_attempt", clOrdId, outcome: found ? "FOUND_BY_CONSISTENCY" : "RETAIN_UNKNOWN" });
     return { clOrdId, outcome: found ? "FOUND_BY_CONSISTENCY" : "RETAIN_UNKNOWN" };
   }
   async ingestFill(tx, fill, order) {
     const managed = classifyCrossFill(fill, order, this.ownership);
     if (!managed) return false;
     const isBuy = managed.side === "buy";
-    await this.state.insertFill(tx, {
-      accountId: this.ownership.accountId, instId: managed.instId, baseCcy: managed.instId.split("-")[0], tradeId: managed.tradeId, billId: managed.billId,
+    const baseCcy = managed.instId.split("-")[0];
+    if (managed.source === "ACCOUNT" && !isBuy) await this.orders.lockExitBase?.(tx, this.ownership.accountId, baseCcy);
+    const inserted = await this.state.insertFill(tx, {
+      accountId: this.ownership.accountId, instId: managed.instId, baseCcy, tradeId: managed.tradeId, billId: managed.billId,
       source: managed.source, side: isBuy ? "BUY" : "SELL", fillSize: managed.sz, fillTime: managed.fillTime,
       ...(isBuy ? { holdHours: this.ownership.holdHoursByInst?.[managed.instId], strategyConfigHash: this.ownership.configHash, sellTime: Number(managed.fillTime) + Number(this.ownership.holdHoursByInst?.[managed.instId] ?? 0) * 3_600_000, sellState: "WAITING" } : { allocationState: "PENDING" }),
     });
     if (managed.source === "ACCOUNT" && isBuy) this.onAccountBuy(managed.instId);
-    this.telemetry({ type: "account_fill", source: managed.source, side: managed.side, instId: managed.instId });
+    // Before an HTTP send a PREPARED exit is purely local and can safely be
+    // released. SUBMITTED/UNKNOWN are never cancelled here: they must settle
+    // through exchange fills/history.
+    if (managed.source === "ACCOUNT" && !isBuy && inserted?.rowCount === 1) {
+      const released = await this.orders.releasePreparedExitsForBase?.(tx, this.ownership.accountId, baseCcy);
+      if (released?.rowCount) emit(this.telemetry, { type: "account_sell", reason: "PREPARED_EXIT_NOT_CREATED", baseCcy, count: released.rowCount });
+    }
+    emit(this.telemetry, { type: "account_fill", source: managed.source, side: managed.side, instId: managed.instId });
     return true;
+  }
+  async allocateSafeAccountSells({ accountId, baseCcy }) {
+    const watermarks = await this.transaction((tx) => this.orders.listWatermarks?.(tx, accountId) ?? []);
+    const fills = watermarks.filter((row) => row.endpoint === "fills" && row.healthy && ["SPOT", "MARGIN"].includes(row.inst_type ?? row.instType));
+    if (fills.length < 2) { emit(this.telemetry, { type: "account_sell", reason: "ACCOUNT_FILL_WATERMARK_STALE", baseCcy }); return 0; }
+    // Both feeds must have advanced.  Their *smaller* fence is the only safe
+    // point at which an external SELL can be allocated chronologically.
+    const watermark = Math.min(...fills.map((row) => Number(row.watermark)));
+    const result = await this.transaction((tx) => this.state.allocatePendingAccountSells(tx, { accountId, baseCcy, watermark }));
+    if (result?.reason) emit(this.telemetry, { type: "account_sell", reason: result.reason, baseCcy, tradeId: result.tradeId });
+    return result;
   }
   completeBaseline(scope, fresh = true) { this.readyGate.set(scope, fresh); return this.readyGate.ready; }
   connectionLost(scope) { this.readyGate.set(scope, false); }

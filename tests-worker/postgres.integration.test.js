@@ -12,6 +12,9 @@ import { OrderRepository, TradingStateRepository } from "../src/infrastructure/p
 import { ReconciliationService } from "../src/application/reconciliation-service.js";
 import { AccountCapitalSnapshot, MarketProjection, ReadyGate } from "../src/application/trading-engine.js";
 import { OrderCoordinator } from "../src/application/order-coordinator.js";
+import { DelistOrchestrator } from "../src/application/delist-orchestrator.js";
+import { InstrumentProtectionService } from "../src/application/instrument-protection-service.js";
+import { P3_DELETE_TERMINAL_ATTEMPTS_SQL, P3_RETENTION_VERSION, retainTerminalAttempts } from "../src/infrastructure/postgres/retention.js";
 
 const run = promisify(execFile);
 
@@ -63,9 +66,11 @@ async function startPostgres() {
     await run("pg_ctl", ["-D", dir, "-l", logPath, "-o", `-p ${port} -h 127.0.0.1`, "-w", "start"]);
     started = true;
     let admin = await connect();
-    const sql = await readFile(new URL("../migrations/postgres/0001_p1_core.sql", import.meta.url), "utf8");
-    await admin.query(sql);
-    await admin.query(sql);
+    const migrations = ["0001_p1_core.sql", "0002_p3_exit.sql"];
+    for (const migration of migrations) {
+      const sql = await readFile(new URL(`../migrations/postgres/${migration}`, import.meta.url), "utf8");
+      await admin.query(sql); await admin.query(sql);
+    }
     async function restart() {
       for (const client of [...clients]) {
         try { await close(client); } catch { /* cluster is intentionally stopping */ }
@@ -161,8 +166,9 @@ test("temporary PostgreSQL enforces P1-B invariants", { timeout: 60_000 }, async
       await db.admin.query("UPDATE order_attempts SET state='SETTLED',reservation_state='RELEASED' WHERE cl_ord_id='active-buy'");
       await assert.rejects(tx(db.admin, (client) => orders.reserveBuy(client, buy("same-generation", { accountId: "unique" }), admission("100"))), (error) => error.code === "23505");
 
+      await tx(db.admin, (client) => state.insertFill(client, { accountId: "exit", instId: "BTC-USDT", baseCcy: "BTC", tradeId: "trade1", source: "SYSTEM", side: "BUY", fillSize: "2", fillTime: 1, holdHours: "24", strategyConfigHash: "cfg", sellTime: 2, sellState: "WAITING" }));
       await tx(db.admin, (client) => orders.reserveExit(client, exitAttempt("sell-one", { accountId: "exit" })));
-      await assert.rejects(tx(db.admin, (client) => orders.reserveExit(client, exitAttempt("delist-overlap", { accountId: "exit", intent: "DELIST", source: "trade2" }))), (error) => error.code === "23505");
+      await assert.rejects(tx(db.admin, (client) => orders.reserveExit(client, exitAttempt("delist-overlap", { accountId: "exit", intent: "DELIST", source: "trade1" }))), (error) => error.code === "23505");
 
       const fill = { accountId: "a", instId: "BTC-USDT", baseCcy: "BTC", tradeId: "t1", source: "SYSTEM", side: "BUY", fillSize: "2", fillTime: 1, holdHours: "24", strategyConfigHash: "cfg", sellTime: 2, sellState: "WAITING" };
       assert.equal((await tx(db.admin, (client) => state.insertFill(client, fill))).rowCount, 1);
@@ -352,6 +358,218 @@ test("temporary PostgreSQL enforces P1-B invariants", { timeout: 60_000 }, async
       const unknown = (await db.admin.query("SELECT * FROM order_attempts WHERE account_id='coord50' AND state='UNKNOWN'")).rows[0];
       await coordinator.settleBuy({ attempt: unknown, fills: [{ tradeId: "coord50-partial", fillSz: "0.01", fillTime: "30" }], exchangeState: "canceled", accFillSz: "0.01" });
       assert.deepEqual((await db.admin.query("SELECT state,reservation_state FROM order_attempts WHERE id=$1", [unknown.id])).rows[0], { state: "SETTLED", reservation_state: "CONVERTED" });
+    });
+
+    await t.test("P3 account SELL allocation uses bigint bill keys and SYSTEM SELL replay is idempotent", async () => {
+      const accountId = "p3-ledger"; const baseCcy = "BTC"; const instId = "BTC-USDT";
+      const buy = (tradeId, billId, size) => state.insertFill(db.admin, { accountId, instId, baseCcy, tradeId, billId, source: "ACCOUNT", side: "BUY", fillSize: size, fillTime: 100, holdHours: "24", strategyConfigHash: "cfg", sellTime: 101, sellState: "WAITING" });
+      await buy("p3-buy-1", "9223372036854775807123", "1"); await buy("p3-buy-2", "9223372036854775807124", "1");
+      await state.insertFill(db.admin, { accountId, instId, baseCcy, tradeId: "p3-sell-1", billId: "9223372036854775807125", source: "ACCOUNT", side: "SELL", fillSize: "1.5", fillTime: 100, allocationState: "PENDING" });
+      const allocation = await tx(db.admin, (client) => state.allocatePendingAccountSells(client, { accountId, baseCcy, watermark: 100 }));
+      assert.deepEqual(allocation, { allocated: 1 });
+      assert.deepEqual((await db.admin.query("SELECT trade_id,disposed_size,sell_state FROM filled_orders WHERE account_id=$1 AND side='BUY' ORDER BY bill_id::numeric", [accountId])).rows, [{ trade_id: "p3-buy-1", disposed_size: "1", sell_state: "SOLD" }, { trade_id: "p3-buy-2", disposed_size: "0.5", sell_state: "SELL_TRIGGERED" }]);
+      await state.insertFill(db.admin, { accountId, instId, baseCcy, tradeId: "p3-invalid", source: "ACCOUNT", side: "SELL", fillSize: "0.1", fillTime: 101, allocationState: "PENDING" });
+      assert.deepEqual(await tx(db.admin, (client) => state.allocatePendingAccountSells(client, { accountId, baseCcy, watermark: 101 })), { allocated: 0, reason: "INVALID_BILL_ID" });
+      assert.equal((await db.admin.query("SELECT allocation_state FROM filled_orders WHERE trade_id='p3-invalid'")).rows[0].allocation_state, "PENDING");
+      await tx(db.admin, (client) => state.recordSystemSell(client, { accountId, instId, baseCcy, sourceBuyTradeId: "p3-buy-2", tradeId: "p3-system-sell", fillSize: "0.25", fillTime: 102 }));
+      assert.deepEqual(await tx(db.admin, (client) => state.recordSystemSell(client, { accountId, instId, baseCcy, sourceBuyTradeId: "p3-buy-2", tradeId: "p3-system-sell", fillSize: "0.25", fillTime: 102 })), { applied: false, reason: "DUPLICATE_TRADE" });
+      assert.equal((await db.admin.query("SELECT disposed_size FROM filled_orders WHERE trade_id='p3-buy-2'")).rows[0].disposed_size, "0.75");
+    });
+
+    await t.test("P3 fixed retention only removes aged terminal attempts and preserves live ledger evidence", async () => {
+      assert.equal(P3_RETENTION_VERSION, "p3-retention-v1"); assert.match(P3_DELETE_TERMINAL_ATTEMPTS_SQL, /state IN \('NOT_CREATED','SETTLED'\)/);
+      await tx(db.admin, async (client) => {
+        await orders.reserveBuy(client, buy("retain-terminal", { accountId: "retention" }), admission("100"));
+        await orders.markSubmitted(client, "retain-terminal", "retained-order"); await orders.markSettled(client, "retain-terminal", "filled", "CONVERTED");
+        await orders.reserveBuy(client, buy("retain-active", { accountId: "retention", instId: "ETH-USDT", baseCcy: "ETH" }), admission("100"));
+        await state.insertFill(client, { accountId: "retention", instId: "BTC-USDT", baseCcy: "BTC", tradeId: "retain-account-sell", billId: "9", source: "ACCOUNT", side: "SELL", fillSize: "1", fillTime: 1, allocationState: "PENDING" });
+        await state.claimAnnouncement(client, { title: "Spot delisting BTC", pTime: 1 });
+        await orders.upsertWatermark(client, { accountId: "retention", instType: "SPOT", endpoint: "fills", watermark: 1, overlapBegin: 0, healthy: true });
+      });
+      await db.admin.query("UPDATE order_attempts SET updated_at='2000-01-01' WHERE cl_ord_id='retain-terminal'");
+      await tx(db.admin, (client) => retainTerminalAttempts(client, { before: new Date("2020-01-01T00:00:00Z"), limit: 10 }));
+      assert.equal((await db.admin.query("SELECT count(*)::int AS count FROM order_attempts WHERE cl_ord_id='retain-terminal'")).rows[0].count, 0);
+      assert.equal((await db.admin.query("SELECT state FROM order_attempts WHERE cl_ord_id='retain-active'")).rows[0].state, "PREPARED");
+      assert.equal((await db.admin.query("SELECT allocation_state FROM filled_orders WHERE trade_id='retain-account-sell'")).rows[0].allocation_state, "PENDING");
+      assert.equal((await db.admin.query("SELECT count(*)::int AS count FROM announcement_receipts WHERE title='Spot delisting BTC'")).rows[0].count, 1);
+      assert.equal((await db.admin.query("SELECT watermark FROM sync_watermarks WHERE account_id='retention'")).rows[0].watermark, "1");
+    });
+
+    await t.test("P3 partial exit settles once then creates exactly one next generation from durable remaining", async () => {
+      const accountId = "p3-partial";
+      await tx(db.admin, async (client) => {
+        await state.insertFill(client, { accountId, instId: "BTC-USDT", baseCcy: "BTC", tradeId: "p3-partial-buy", billId: "1", source: "SYSTEM", side: "BUY", fillSize: "2", fillTime: 1, holdHours: "24", strategyConfigHash: "cfg", sellTime: 2, sellState: "SELL_TRIGGERED" });
+        await orders.reserveExit(client, exitAttempt("p3-partial-exit", { accountId, source: "p3-partial-buy" })); await orders.markSubmitted(client, "p3-partial-exit", "order-1");
+      });
+      const attempt = await tx(db.admin, (client) => orders.findByClOrdId(client, "p3-partial-exit"));
+      const coordinator = new OrderCoordinator({ transaction: (fn) => tx(db.admin, fn), orders, state, market: { ticker: () => ({ last: "10" }) }, account: {}, readyGate: {}, ownerGuard: {}, config: {}, transport: {} });
+      const result = await coordinator.settleExit({ attempt, fills: [{ tradeId: "p3-partial-sell", fillSz: "1", fillTime: "3" }], exchangeState: "canceled", accFillSz: "1" });
+      assert.deepEqual(result, { settled: true, remaining: "1" });
+      assert.equal(coordinator.pending.SELL.size, 1);
+      assert.equal([...coordinator.pending.SELL.values()][0].generation, 1);
+      await coordinator.settleExit({ attempt, fills: [{ tradeId: "p3-partial-sell", fillSz: "1", fillTime: "3" }], exchangeState: "canceled", accFillSz: "1" });
+      assert.equal(coordinator.pending.SELL.size, 1, "lost settlement acknowledgement cannot enqueue another replacement");
+      assert.equal((await db.admin.query("SELECT count(*)::int AS count FROM filled_orders WHERE trade_id='p3-partial-sell'")).rows[0].count, 1);
+      assert.deepEqual((await db.admin.query("SELECT disposed_size,sell_state FROM filled_orders WHERE trade_id='p3-partial-buy'")).rows[0], { disposed_size: "1", sell_state: "SELL_TRIGGERED" });
+      assert.deepEqual((await db.admin.query("SELECT state,reservation_state FROM order_attempts WHERE cl_ord_id='p3-partial-exit'")).rows[0], { state: "SETTLED", reservation_state: "RELEASED" });
+    });
+
+    await t.test("P3 account SELL releases only PREPARED exits and waits for the smaller SPOT/MARGIN fence", async () => {
+      const accountId = "p3-manual"; const telemetry = [];
+      await tx(db.admin, async (client) => {
+        await state.insertFill(client, { accountId, instId: "BTC-USDT", baseCcy: "BTC", tradeId: "p3-manual-buy", billId: "1", source: "SYSTEM", side: "BUY", fillSize: "1", fillTime: 70, holdHours: "24", strategyConfigHash: "cfg", sellTime: 71, sellState: "SELL_TRIGGERED" });
+        await orders.reserveExit(client, exitAttempt("p3-manual-prepared", { accountId, source: "p3-manual-buy" }));
+        await orders.upsertWatermark(client, { accountId, instType: "SPOT", endpoint: "fills", watermark: 50, overlapBegin: 0, healthy: true });
+        await orders.upsertWatermark(client, { accountId, instType: "MARGIN", endpoint: "fills", watermark: 100, overlapBegin: 0, healthy: true });
+      });
+      const service = new ReconciliationService({ ownerGuard: { isHeld: () => true }, readyGate: new ReadyGate(), safetyWaitMs: 0, transaction: (fn) => tx(db.admin, fn), state, orders, telemetry: (event) => telemetry.push(event),
+        ownership: { accountId, managedAfter: 0, enabledInstIds: ["BTC-USDT"] }, transport: {} });
+      await tx(db.admin, (client) => service.ingestFill(client, { instType: "SPOT", instId: "BTC-USDT", side: "sell", tradeId: "p3-manual-sell", billId: "2", fillTime: 80, fillSz: "1" }, { tdMode: "cross", clOrdId: "manual" }));
+      assert.deepEqual((await db.admin.query("SELECT state,reservation_state FROM order_attempts WHERE cl_ord_id='p3-manual-prepared'")).rows[0], { state: "NOT_CREATED", reservation_state: "RELEASED" });
+      assert.deepEqual(await service.allocateSafeAccountSells({ accountId, baseCcy: "BTC" }), { allocated: 0 });
+      assert.equal((await db.admin.query("SELECT allocation_state FROM filled_orders WHERE trade_id='p3-manual-sell'")).rows[0].allocation_state, "PENDING");
+      await tx(db.admin, (client) => orders.upsertWatermark(client, { accountId, instType: "SPOT", endpoint: "fills", watermark: 90, overlapBegin: 0, healthy: true }));
+      assert.deepEqual(await service.allocateSafeAccountSells({ accountId, baseCcy: "BTC" }), { allocated: 1 });
+      assert.equal((await db.admin.query("SELECT disposed_size FROM filled_orders WHERE trade_id='p3-manual-buy'")).rows[0].disposed_size, "1");
+      assert.equal(telemetry.some((event) => event.reason === "PREPARED_EXIT_NOT_CREATED"), true);
+    });
+
+    await t.test("P3 unified PG protection orchestrator queues one durable fill-level DELIST without shared-base excess", async () => {
+      const accountId = "p3-orchestrator"; const now = { nowMs: () => 100 }; const market = new MarketProjection({ clock: now }); const account = new AccountCapitalSnapshot({ clock: now }); const ready = new ReadyGate();
+      for (const key of ready.required) ready.set(key, true); account.update({ ts: 100, totalEq: "10", adjEq: "10" });
+      market.updateInstrument({ instId: "BTC-USDT", ts: 1, state: "live", tickSz: "0.1", lotSz: "0.1", minSz: "0.1", base: "BTC" }); market.updateTicker({ instId: "BTC-USDT", ts: 100, last: "10", bidPx: "10" });
+      await tx(db.admin, async (client) => {
+        await state.upsertProtection(client, { instId: "BTC-USDT", baseCcy: "BTC", state: "EXITING", reason: "test" });
+        for (const [tradeId, fillTime] of [["orch-first", 1], ["orch-second", 2]]) await state.insertFill(client, { accountId, instId: "BTC-USDT", baseCcy: "BTC", tradeId, billId: String(fillTime), source: "SYSTEM", side: "BUY", fillSize: "1", fillTime, holdHours: "24", strategyConfigHash: "cfg", sellTime: 0, sellState: "WAITING" });
+      });
+      const coordinator = new OrderCoordinator({ transaction: (fn) => tx(db.admin, fn), orders, state, market, account, readyGate: ready, ownerGuard: { isHeld: () => true }, mode: () => "EXIT_ONLY", config: { accountId, orderVersion: "p3", strategyTag: "P3", orderExpiryMs: 1000, accountFreshMs: 1000, quoteFreshMs: 1000 }, clock: now, transport: { maxAvailSize: async () => [{ instId: "BTC-USDT", availSell: "1" }], submitBatchOrders: async (rows) => rows.map((row) => ({ clOrdId: row.clOrdId, status: "SUBMITTED", ordId: "o" })) } });
+      const orchestrator = new DelistOrchestrator({ transaction: (fn) => tx(db.admin, fn), state, orders, coordinator, accountId, market, availableBase: (row) => row.remaining_size });
+      assert.equal(await orchestrator.drive("BTC-USDT"), "EXITING"); assert.equal((await coordinator.drainOnce()).count, 1);
+      const attempts = (await db.admin.query("SELECT source_buy_trade_id,intent,state,reserved_base_size FROM order_attempts WHERE account_id=$1", [accountId])).rows;
+      assert.deepEqual(attempts, [{ source_buy_trade_id: "orch-first", intent: "DELIST", state: "SUBMITTED", reserved_base_size: "1" }]);
+    });
+
+    await t.test("P3 unified fake OKX and one PostgreSQL ledger survive DELIST partial UNKNOWN restart and converge", async () => {
+      const accountId = "p3-unified"; const instId = "UNI-USDT"; const baseCcy = "UNI";
+      const now = { nowMs: () => 1_000 }; const market = new MarketProjection({ clock: now }); const account = new AccountCapitalSnapshot({ clock: now });
+      market.updateInstrument({ instId, ts: 1, state: "live", tickSz: "0.01", lotSz: "0.01", minSz: "0.1", base: baseCcy });
+      market.updateTicker({ instId, ts: 2, last: "10", bidPx: "10", askPx: "10" }); account.update({ ts: 2, totalEq: "100", adjEq: "100" });
+      await tx(db.admin, async (client) => {
+        for (const row of [
+          ["unified-full", "1", "1", "WAITING"], ["unified-partial", "2", "2", "SELL_TRIGGERED"],
+          ["unified-unknown", "1", "3", "SELL_TRIGGERED"], ["unified-dust", "0.05", "4", "DUST_PENDING"],
+        ]) await state.insertFill(client, { accountId, instId, baseCcy, tradeId: row[0], billId: row[2], source: "SYSTEM", side: "BUY", fillSize: row[1], fillTime: Number(row[2]), holdHours: "24", strategyConfigHash: "cfg", sellTime: 0, sellState: row[3] });
+      });
+      const submissions = []; let sendNo = 0;
+      const fakeOkx = {
+        maxAvailSize: async () => [{ instId, availSell: "10" }],
+        submitBatchOrders: async (payload) => { submissions.push(payload); sendNo += 1; return payload.map((row) => sendNo >= 3 ? { clOrdId: row.clOrdId, status: "UNKNOWN", reason: "scripted-timeout" } : { clOrdId: row.clOrdId, status: "SUBMITTED", ordId: `ord-${sendNo}` }); },
+        order: async () => ({ state: "NOT_FOUND" }), ordersPending: async () => [], ordersHistory: async () => [], ordersHistoryArchive: async () => [], fills: async () => [], fillsHistory: async () => [],
+      };
+      const makeRuntime = () => {
+        const ready = new ReadyGate(); for (const key of ready.required) ready.set(key, true);
+        const telemetry = [];
+        const coordinator = new OrderCoordinator({ transaction: (fn) => tx(db.admin, fn), orders, state, market, account, readyGate: ready, ownerGuard: { isHeld: () => true }, mode: () => "EXIT_ONLY", clock: now,
+          config: { accountId, orderVersion: "p3", strategyTag: "P3", orderExpiryMs: 1_000, accountFreshMs: 10_000, quoteFreshMs: 10_000 }, transport: fakeOkx, telemetry: (event) => telemetry.push(event) });
+        const orchestrator = new DelistOrchestrator({ transaction: (fn) => tx(db.admin, fn), state, orders, coordinator, accountId, market, availableBase: (row) => row.remaining_size, telemetry: (event) => telemetry.push(event) }).bind();
+        return { ready, telemetry, coordinator, orchestrator };
+      };
+      let runtime = makeRuntime();
+      const protection = new InstrumentProtectionService({ state, transaction: (fn) => tx(db.admin, fn), onExit: ({ instId: protectedInstId }) => runtime.orchestrator.drive(protectedInstId) });
+      await protection.confirm({ instId, baseCcy, reason: "unified-test" }); assert.equal((await runtime.coordinator.drainOnce()).count, 1);
+      let attempt = (await db.admin.query("SELECT * FROM order_attempts WHERE account_id=$1 AND source_buy_trade_id='unified-full'", [accountId])).rows[0];
+      assert.deepEqual(await runtime.coordinator.settleExit({ attempt, fills: [{ tradeId: "exit-full", fillSz: "1", fillTime: "10" }], exchangeState: "filled", accFillSz: "1" }), { settled: true, remaining: "0" });
+      assert.equal((await runtime.coordinator.drainOnce()).count, 1, "next durable fill is selected only after the first settles");
+      attempt = (await db.admin.query("SELECT * FROM order_attempts WHERE account_id=$1 AND source_buy_trade_id='unified-partial' AND generation=0", [accountId])).rows[0];
+      assert.deepEqual(await runtime.coordinator.settleExit({ attempt, fills: [{ tradeId: "exit-partial-1", fillSz: "1", fillTime: "11" }], exchangeState: "canceled", accFillSz: "1" }), { settled: true, remaining: "1" });
+      assert.equal((await runtime.coordinator.drainOnce()).count, 1);
+      let unknown = (await db.admin.query("SELECT * FROM order_attempts WHERE account_id=$1 AND source_buy_trade_id='unified-partial' AND generation=1", [accountId])).rows[0];
+      assert.equal(unknown.state, "UNKNOWN"); assert.equal(unknown.reservation_state, "ACTIVE");
+
+      runtime = makeRuntime();
+      const recovery = new ReconciliationService({ transaction: (fn) => tx(db.admin, fn), state, orders, transport: fakeOkx, ownerGuard: { isHeld: () => true }, readyGate: runtime.ready, safetyWaitMs: 0,
+        onRecovery: ({ protection }) => runtime.orchestrator.recover(protection), ownership: { accountId, managedAfter: 0, enabledInstIds: [instId] } });
+      const recovered = await recovery.recover({ accountId });
+      assert.equal(recovered.recovered.some((row) => row.clOrdId === unknown.cl_ord_id && row.outcome === "RETAIN_UNKNOWN"), true);
+      assert.equal(runtime.coordinator.pending.DELIST.size, 0, "UNKNOWN blocks a replacement after process reconstruction");
+      for (const scope of ["public", "private", "business"]) recovery.completeBaseline(scope);
+      assert.deepEqual(await runtime.coordinator.settleExit({ attempt: unknown, fills: [{ tradeId: "exit-partial-2", fillSz: "1", fillTime: "12" }], exchangeState: "filled", accFillSz: "1" }), { settled: true, remaining: "0" });
+      assert.equal((await runtime.coordinator.drainOnce()).count, 1);
+      unknown = (await db.admin.query("SELECT * FROM order_attempts WHERE account_id=$1 AND source_buy_trade_id='unified-unknown'", [accountId])).rows[0];
+      assert.equal(unknown.state, "UNKNOWN");
+      await runtime.coordinator.settleExit({ attempt: unknown, fills: [{ tradeId: "exit-unknown", fillSz: "1", fillTime: "13" }], exchangeState: "filled", accFillSz: "1" });
+      assert.equal((await db.admin.query("SELECT state FROM instrument_protection WHERE inst_id=$1", [instId])).rows[0].state, "DELIST_DUST");
+      assert.deepEqual(submissions.map((batch) => batch.length), [1, 1, 1, 1]);
+      assert.ok(submissions.flat().every((row) => row.side === "sell" && row.tdMode === "cross" && row.reduceOnly === true && row.ordType === "market"));
+
+      await tx(db.admin, async (client) => {
+        await state.insertFill(client, { accountId, instId, baseCcy, tradeId: "manual-dust", billId: "5", source: "ACCOUNT", side: "SELL", fillSize: "0.05", fillTime: 5, allocationState: "PENDING" });
+        await orders.upsertWatermark(client, { accountId, instType: "SPOT", endpoint: "fills", watermark: 5, overlapBegin: 0, healthy: true });
+        await orders.upsertWatermark(client, { accountId, instType: "MARGIN", endpoint: "fills", watermark: 5, overlapBegin: 0, healthy: true });
+      });
+      assert.deepEqual(await recovery.allocateSafeAccountSells({ accountId, baseCcy }), { allocated: 1 });
+      assert.equal(await runtime.orchestrator.drive(instId), "EXITED");
+      const final = await db.admin.query("SELECT trade_id,disposed_size,sell_state FROM filled_orders WHERE account_id=$1 AND side='BUY' ORDER BY fill_time", [accountId]);
+      assert.equal(final.rows.every((row) => row.disposed_size !== "0" && row.sell_state === "SOLD"), true);
+      assert.equal((await db.admin.query("SELECT state FROM instrument_protection WHERE inst_id=$1", [instId])).rows[0].state, "EXITED");
+    });
+
+    await t.test("P3 concurrent ACCOUNT SELL allocation serializes with active exits and isolates post-HTTP contradictions", async () => {
+      const accountId = "p3-account-race"; const instId = "RACE-USDT"; const baseCcy = "RACE"; const telemetry = [];
+      await tx(db.admin, async (client) => {
+        await state.insertFill(client, { accountId, instId, baseCcy, tradeId: "race-buy", billId: "1", source: "SYSTEM", side: "BUY", fillSize: "1", fillTime: 1, holdHours: "24", strategyConfigHash: "cfg", sellTime: 2, sellState: "SELL_TRIGGERED" });
+        await orders.reserveExit(client, exitAttempt("race-active", { accountId, instId, baseCcy, source: "race-buy" })); await orders.markSubmitted(client, "race-active", "race-order");
+        await state.insertFill(client, { accountId, instId, baseCcy, tradeId: "race-sell-a", billId: "2", source: "ACCOUNT", side: "SELL", fillSize: "0.5", fillTime: 2, allocationState: "PENDING" });
+        await state.insertFill(client, { accountId, instId, baseCcy, tradeId: "race-sell-b", billId: "3", source: "ACCOUNT", side: "SELL", fillSize: "0.5", fillTime: 3, allocationState: "PENDING" });
+      });
+      assert.deepEqual(await tx(db.admin, (client) => state.allocatePendingAccountSells(client, { accountId, baseCcy, watermark: 3 })), { allocated: 0, reason: "ACTIVE_SYSTEM_EXIT" });
+      assert.equal((await db.admin.query("SELECT count(*)::int AS count FROM filled_orders WHERE account_id=$1 AND allocation_state='PENDING'", [accountId])).rows[0].count, 2);
+      await tx(db.admin, (client) => orders.markSettled(client, "race-active", "canceled", "RELEASED"));
+      const left = await db.connect(); const right = await db.connect();
+      try {
+        await Promise.all([
+          tx(left, (client) => state.allocatePendingAccountSells(client, { accountId, baseCcy, watermark: 3 })),
+          tx(right, (client) => state.allocatePendingAccountSells(client, { accountId, baseCcy, watermark: 3 })),
+        ]);
+      } finally { await db.close(left); await db.close(right); }
+      assert.deepEqual((await db.admin.query("SELECT trade_id,allocation_state,allocated_size FROM filled_orders WHERE account_id=$1 AND side='SELL' ORDER BY trade_id", [accountId])).rows,
+        [{ trade_id: "race-sell-a", allocation_state: "APPLIED", allocated_size: "0.5" }, { trade_id: "race-sell-b", allocation_state: "APPLIED", allocated_size: "0.5" }]);
+      assert.deepEqual(await tx(db.admin, (client) => state.allocatePendingAccountSells(client, { accountId, baseCcy, watermark: 3 })), { allocated: 0 }, "restart/duplicate replay is idempotent");
+
+      const contradictionAccount = "p3-contradiction";
+      await tx(db.admin, async (client) => {
+        await state.insertFill(client, { accountId: contradictionAccount, instId, baseCcy, tradeId: "contradiction-buy", billId: "10", source: "SYSTEM", side: "BUY", fillSize: "1", fillTime: 10, holdHours: "24", strategyConfigHash: "cfg", sellTime: 11, sellState: "SELL_TRIGGERED" });
+        await orders.reserveExit(client, exitAttempt("contradiction-exit", { accountId: contradictionAccount, instId, baseCcy, source: "contradiction-buy" })); await orders.markSubmitted(client, "contradiction-exit", "already-sent");
+        await state.applySystemSell(client, { accountId: contradictionAccount, sourceBuyTradeId: "contradiction-buy", fillSize: "1" });
+      });
+      const attempt = await tx(db.admin, (client) => orders.findByClOrdId(client, "contradiction-exit"));
+      const coordinator = new OrderCoordinator({ transaction: (fn) => tx(db.admin, fn), orders, state, market: { ticker: () => ({ last: "1" }) }, account: {}, readyGate: {}, ownerGuard: {}, config: {}, transport: {}, telemetry: (event) => telemetry.push(event) });
+      assert.deepEqual(await coordinator.settleExit({ attempt, fills: [{ tradeId: "late-system-sell", fillSz: "0.5", fillTime: "12" }], exchangeState: "filled", accFillSz: "0.5" }), { settled: false, reason: "DISPOSAL_CONTRADICTION" });
+      assert.equal(coordinator.isolatedBases.has(baseCcy), true); assert.equal(telemetry.some((event) => event.reason === "SYSTEM_ACCOUNT_SELL_CONTRADICTION"), true);
+      assert.equal((await db.admin.query("SELECT state FROM order_attempts WHERE cl_ord_id='contradiction-exit'")).rows[0].state, "SUBMITTED");
+      assert.equal((await db.admin.query("SELECT count(*)::int AS count FROM filled_orders WHERE trade_id='late-system-sell'")).rows[0].count, 0, "contradictory fill transaction rolls back");
+    });
+
+    await t.test("P3 announcement paging rolls back a failed page and persists idempotent receipts in PostgreSQL", async () => {
+      const nowMs = 200_000_000; const instruments = [{ instId: "ANN-USDT", base: "ANN" }, { instId: "FAIL-USDT", base: "FAIL" }];
+      const exits = []; const telemetry = [];
+      const service = new InstrumentProtectionService({ state, transaction: (fn) => tx(db.admin, fn), nowMs: () => nowMs, onExit: (row) => exits.push(row), telemetry: (event) => telemetry.push(event) });
+      const pages = async (page) => page === 1 ? { data: [{ details: [{ title: "Spot delisting ANN", pTime: nowMs - 1 }] }] } : page === 2 ? { data: [{ details: [{ title: "Spot delisting old ANN", pTime: nowMs - 86_400_001 }] }] } : { data: [{ details: [] }] };
+      assert.deepEqual(await service.scanAnnouncements(pages, instruments), { crossedWindow: true, pages: 2 });
+      await service.scanAnnouncements(pages, instruments); assert.equal(exits.length, 1, "durable title+pTime receipt suppresses replay");
+      const limit = await service.scanAnnouncements(async () => ({ data: [{ details: [{ title: "unrelated notice", pTime: nowMs }] }] }), instruments);
+      assert.deepEqual(limit, { retry: true, pages: 20 }); assert.equal(telemetry.some((event) => event.reason === "ANNOUNCEMENT_PAGE_LIMIT"), true);
+
+      const failingState = { ...state,
+        claimAnnouncement: (...args) => state.claimAnnouncement(...args),
+        upsertProtection: async (client, row) => { await state.upsertProtection(client, row); if (row.instId === "FAIL-USDT") throw new Error("page write failed"); },
+      };
+      const failing = new InstrumentProtectionService({ state: failingState, transaction: (fn) => tx(db.admin, fn), nowMs: () => nowMs, telemetry: (event) => telemetry.push(event) });
+      const failed = await failing.scanAnnouncements(async () => ({ data: [{ details: [{ title: "Spot delisting ANN and FAIL", pTime: nowMs }] }] }), instruments);
+      assert.deepEqual(failed, { retry: true, pages: 1 });
+      assert.equal((await db.admin.query("SELECT count(*)::int AS count FROM announcement_receipts WHERE title='Spot delisting ANN and FAIL'")).rows[0].count, 0);
+      assert.equal((await db.admin.query("SELECT count(*)::int AS count FROM instrument_protection WHERE inst_id='FAIL-USDT'")).rows[0].count, 0);
+      assert.equal(telemetry.some((event) => event.reason === "ANNOUNCEMENT_PAGE_TRANSACTION_FAILED"), true);
     });
   } finally {
     await db.stop();

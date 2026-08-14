@@ -1,7 +1,38 @@
 export class TradingStateRepository {
+  async claimAnnouncement(tx, { title, pTime }) {
+    return tx.query("INSERT INTO announcement_receipts(title,published_at) VALUES($1,$2) ON CONFLICT DO NOTHING", [title, pTime]);
+  }
   async listProtection(tx) { return (await tx.query("SELECT * FROM instrument_protection ORDER BY inst_id")).rows; }
+  async upsertProtection(tx, row) {
+    return tx.query(`INSERT INTO instrument_protection(inst_id,base_ccy,state,reason,announcement_url,announcement_time,instrument_exp_time)
+      VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(inst_id) DO UPDATE SET state='EXITING',reason=EXCLUDED.reason,
+      announcement_url=COALESCE(EXCLUDED.announcement_url,instrument_protection.announcement_url),
+      announcement_time=COALESCE(EXCLUDED.announcement_time,instrument_protection.announcement_time),
+      instrument_exp_time=COALESCE(EXCLUDED.instrument_exp_time,instrument_protection.instrument_exp_time),
+      version=instrument_protection.version+1,updated_at=now()`, [row.instId, row.baseCcy, row.state, row.reason, row.announcement?.url ?? null, row.announcement?.pTime ?? null, row.expTime ?? null]);
+  }
   async listDaily(tx) { return (await tx.query("SELECT * FROM daily_limit_cache ORDER BY inst_id,strategy_day")).rows; }
   async listManagedFills(tx, accountId) { return (await tx.query("SELECT * FROM filled_orders WHERE account_id=$1 ORDER BY fill_time,bill_id,trade_id", [accountId])).rows; }
+  async listDelistCandidates(tx, { accountId, instId }) {
+    return (await tx.query(`SELECT f.*, (f.fill_size-f.disposed_size)::text AS remaining_size,
+      COALESCE((SELECT max(a.generation)+1 FROM order_attempts a
+        WHERE a.account_id=f.account_id AND a.source_buy_trade_id=f.trade_id AND a.intent='DELIST'),0)::int AS next_generation
+      FROM filled_orders f JOIN instrument_protection p ON p.inst_id=f.inst_id
+      WHERE f.account_id=$1 AND f.inst_id=$2 AND f.side='BUY' AND p.state IN ('EXITING','DELIST_DUST')
+        AND f.disposed_size < f.fill_size
+      ORDER BY f.fill_time,f.trade_id`, [accountId, instId])).rows;
+  }
+  async findManagedBuy(tx, { accountId, tradeId }) {
+    return (await tx.query("SELECT *, (fill_size-disposed_size)::text AS remaining_size FROM filled_orders WHERE account_id=$1 AND trade_id=$2 AND side='BUY'", [accountId, tradeId])).rows[0] ?? null;
+  }
+  async convergeProtection(tx, { accountId, instId }) {
+    const result = await tx.query(`SELECT count(*) FILTER (WHERE disposed_size < fill_size)::int AS remaining,
+      count(*) FILTER (WHERE disposed_size < fill_size AND sell_state <> 'DUST_PENDING')::int AS tradable
+      FROM filled_orders WHERE account_id=$1 AND inst_id=$2 AND side='BUY'`, [accountId, instId]);
+    const row = result.rows[0]; const next = row.remaining === 0 ? "EXITED" : row.tradable === 0 ? "DELIST_DUST" : "EXITING";
+    await tx.query("UPDATE instrument_protection SET state=$2,updated_at=now(),version=version+1 WHERE inst_id=$1 AND state IN ('EXITING','DELIST_DUST') AND state IS DISTINCT FROM $2", [instId, next]);
+    return next;
+  }
   async insertFill(tx, fill) {
     return tx.query(`INSERT INTO filled_orders(
       account_id,inst_id,base_ccy,trade_id,bill_id,source,side,fill_size,fill_time,
@@ -21,15 +52,106 @@ export class TradingStateRepository {
       [disposedSize, id, version],
     );
   }
+
+  async listExitCandidates(tx, { accountId, baseCcy, nowMs, intent }) {
+    return (await tx.query(`SELECT *, (fill_size-disposed_size)::text AS remaining_size
+      FROM filled_orders WHERE account_id=$1 AND side='BUY' AND base_ccy=$2
+      AND sell_state IN ('WAITING','SELL_TRIGGERED','DUST_PENDING')
+      AND ($3::text='DELIST' OR sell_time <= $4)
+      ORDER BY sell_time,fill_time,trade_id FOR UPDATE`, [accountId, baseCcy, intent, nowMs])).rows;
+  }
+
+  async markSellTriggered(tx, { accountId, instId, tradeId, version, protectionPrice }) {
+    return tx.query(`UPDATE filled_orders SET sell_state='SELL_TRIGGERED',
+      protection_price=GREATEST(COALESCE(protection_price,0),$5::numeric),version=version+1
+      WHERE account_id=$1 AND inst_id=$2 AND trade_id=$3 AND side='BUY' AND version=$4
+      AND sell_state IN ('WAITING','SELL_TRIGGERED','DUST_PENDING') RETURNING *`, [accountId, instId, tradeId, version, protectionPrice]);
+  }
+
+  async raiseProtection(tx, { accountId, instId, tradeId, version, protectionPrice }) {
+    return tx.query(`UPDATE filled_orders SET protection_price=GREATEST(COALESCE(protection_price,0),$5::numeric),version=version+1
+      WHERE account_id=$1 AND inst_id=$2 AND trade_id=$3 AND side='BUY' AND version=$4
+      AND sell_state IN ('WAITING','SELL_TRIGGERED','DUST_PENDING') RETURNING *`, [accountId, instId, tradeId, version, protectionPrice]);
+  }
+
+  async markDust(tx, { accountId, instId, tradeId, version }) {
+    return tx.query(`UPDATE filled_orders SET sell_state='DUST_PENDING',version=version+1
+      WHERE account_id=$1 AND inst_id=$2 AND trade_id=$3 AND side='BUY' AND version=$4
+      AND sell_state='SELL_TRIGGERED'`, [accountId, instId, tradeId, version]);
+  }
+
+  async applySystemSell(tx, { accountId, sourceBuyTradeId, fillSize }) {
+    const row = (await tx.query(`UPDATE filled_orders SET disposed_size=disposed_size+$3::numeric,
+      sell_state=CASE WHEN disposed_size+$3::numeric=fill_size THEN 'SOLD' ELSE 'SELL_TRIGGERED' END,
+      version=version+1 WHERE account_id=$1 AND trade_id=$2 AND side='BUY'
+      AND disposed_size+$3::numeric <= fill_size RETURNING *`, [accountId, sourceBuyTradeId, fillSize])).rows[0];
+    if (!row) throw new Error("SYSTEM_SELL_DISPOSAL_OUT_OF_RANGE");
+    return row;
+  }
+
+  async recordSystemSell(tx, { accountId, instId, baseCcy, tradeId, fillSize, fillTime, sourceBuyTradeId }) {
+    const inserted = await this.insertFill(tx, { accountId, instId, baseCcy, tradeId, source: "SYSTEM", side: "SELL", fillSize, fillTime, allocationState: "APPLIED" });
+    if (inserted.rowCount === 0) return { applied: false, reason: "DUPLICATE_TRADE" };
+    const source = await this.applySystemSell(tx, { accountId, sourceBuyTradeId, fillSize });
+    return { applied: true, source };
+  }
+
+  async allocatePendingAccountSells(tx, { accountId, baseCcy, watermark }) {
+    await tx.query("SELECT pg_advisory_xact_lock(hashtext($1))", [`exit:${accountId}:${baseCcy}`]);
+    const active = await tx.query(`SELECT 1 FROM order_attempts WHERE account_id=$1 AND base_ccy=$2
+      AND intent IN ('SELL','DELIST') AND state IN ('PREPARED','SUBMITTED','UNKNOWN') LIMIT 1`, [accountId, baseCcy]);
+    if (active.rowCount) return { allocated: 0, reason: "ACTIVE_SYSTEM_EXIT" };
+    // A missing/non-numeric key makes chronological allocation unknowable. Do
+    // not silently coerce it to zero; leave every affected SELL pending.
+    const invalid = await tx.query(`SELECT 1 FROM filled_orders WHERE account_id=$1 AND base_ccy=$2
+      AND ((side='SELL' AND source='ACCOUNT' AND allocation_state='PENDING') OR side='BUY')
+      AND (bill_id IS NULL OR bill_id !~ '^[0-9]+$') LIMIT 1`, [accountId, baseCcy]);
+    if (invalid.rowCount) return { allocated: 0, reason: "INVALID_BILL_ID" };
+    const pending = (await tx.query(`SELECT * FROM filled_orders WHERE account_id=$1 AND base_ccy=$2
+      AND side='SELL' AND source='ACCOUNT' AND allocation_state='PENDING'
+      AND bill_id ~ '^[0-9]+$' AND fill_time <= $3 ORDER BY fill_time,bill_id::numeric,trade_id FOR UPDATE`, [accountId, baseCcy, watermark])).rows;
+    for (const sell of pending) {
+      let left = subtractDecimal(sell.fill_size, sell.allocated_size);
+      const buys = (await tx.query(`SELECT * FROM filled_orders WHERE account_id=$1 AND base_ccy=$2 AND side='BUY'
+        AND (fill_time,bill_id::numeric,trade_id) <= ($3,$4::numeric,$5)
+        AND disposed_size < fill_size ORDER BY fill_time,bill_id::numeric,trade_id FOR UPDATE`, [accountId, baseCcy, sell.fill_time, sell.bill_id, sell.trade_id])).rows;
+      let allocated = sell.allocated_size;
+      for (const buy of buys) {
+        if (compareDecimal(left, "0") <= 0) break;
+        const remaining = subtractDecimal(buy.fill_size, buy.disposed_size);
+        const part = compareDecimal(left, remaining) < 0 ? left : remaining;
+        if (compareDecimal(part, "0") <= 0) continue;
+        await this.applySystemSell(tx, { accountId, sourceBuyTradeId: buy.trade_id, fillSize: part });
+        allocated = addDecimal(allocated, part); left = subtractDecimal(left, part);
+      }
+      // Do not turn an account/system race into an over-disposal.  A SELL
+      // that cannot be completely matched remains an explicit quarantine for
+      // reconciliation rather than becoming a partially-applied fiction.
+      if (compareDecimal(left, "0") > 0) {
+        await tx.query("UPDATE filled_orders SET allocated_size=$1,version=version+1 WHERE id=$2", [allocated, sell.id]);
+        return { allocated: 0, reason: "ACCOUNT_SELL_SHORTFALL", tradeId: sell.trade_id };
+      }
+      await tx.query("UPDATE filled_orders SET allocated_size=$1,allocation_state='APPLIED',version=version+1 WHERE id=$2", [allocated, sell.id]);
+    }
+    return { allocated: pending.length };
+  }
 }
 
 export class OrderRepository {
+  async lockExitBase(tx, accountId, baseCcy) {
+    return tx.query("SELECT pg_advisory_xact_lock(hashtext($1))", [`exit:${accountId}:${baseCcy}`]);
+  }
   async findByClOrdId(tx, clOrdId) {
     return (await tx.query("SELECT * FROM order_attempts WHERE cl_ord_id=$1", [clOrdId])).rows[0] ?? null;
   }
   async listNonTerminal(tx, accountId) { return (await tx.query("SELECT * FROM order_attempts WHERE account_id=$1 AND state IN ('PREPARED','SUBMITTED','UNKNOWN') ORDER BY id", [accountId])).rows; }
   async listTodayBuys(tx, accountId, strategyDay) { return (await tx.query("SELECT * FROM order_attempts WHERE account_id=$1 AND intent='BUY' AND ($2::date IS NULL OR strategy_day=$2::date) ORDER BY inst_id,generation", [accountId, strategyDay ?? null])).rows; }
   async listWatermarks(tx, accountId) { return (await tx.query("SELECT * FROM sync_watermarks WHERE account_id=$1 ORDER BY inst_type,endpoint", [accountId])).rows; }
+  async listActiveExitForBase(tx, accountId, baseCcy) { return (await tx.query("SELECT * FROM order_attempts WHERE account_id=$1 AND base_ccy=$2 AND intent IN ('SELL','DELIST') AND state IN ('PREPARED','SUBMITTED','UNKNOWN')", [accountId, baseCcy])).rows; }
+  async releasePreparedExitsForBase(tx, accountId, baseCcy, reason = "ACCOUNT_SELL_BEFORE_HTTP") {
+    return tx.query(`UPDATE order_attempts SET state='NOT_CREATED',reservation_state='RELEASED',error_message=$3,updated_at=now(),version=version+1
+      WHERE account_id=$1 AND base_ccy=$2 AND intent IN ('SELL','DELIST') AND state='PREPARED'`, [accountId, baseCcy, reason]);
+  }
   async upsertWatermark(tx, { accountId, instType, endpoint, watermark, overlapBegin, managedFillStartTime = null, healthy }) {
     return tx.query(`INSERT INTO sync_watermarks(account_id,inst_type,endpoint,watermark,overlap_begin,managed_fill_start_time,healthy)
       VALUES($1,$2,$3,$4,$5,$6,$7)
@@ -54,8 +176,13 @@ export class OrderRepository {
   }
 
   async reserveExit(tx, attempt) {
-    await tx.query("SELECT pg_advisory_xact_lock(hashtext($1))", [`exit:${attempt.accountId}:${attempt.baseCcy}`]);
+    await this.lockExitBase(tx, attempt.accountId, attempt.baseCcy);
+    const pending = await tx.query("SELECT 1 FROM filled_orders WHERE account_id=$1 AND base_ccy=$2 AND side='SELL' AND source='ACCOUNT' AND allocation_state='PENDING' LIMIT 1", [attempt.accountId, attempt.baseCcy]);
+    if (pending.rowCount) return { authorized: false, reason: "ACCOUNT_SELL_PENDING" };
+    const source = await tx.query("SELECT (fill_size-disposed_size)::text AS remaining_size,version FROM filled_orders WHERE account_id=$1 AND trade_id=$2 AND side='BUY' FOR UPDATE", [attempt.accountId, attempt.sourceBuyTradeId]);
+    if (!source.rowCount || compareDecimal(source.rows[0].remaining_size, "0") <= 0 || compareDecimal(attempt.reservedBaseSize, source.rows[0].remaining_size) > 0) return { authorized: false, reason: "EXIT_REMAINING_CHANGED" };
     await this.insertAttempt(tx, attempt);
+    return { authorized: true, fillVersion: source.rows[0].version, remainingSize: source.rows[0].remaining_size };
   }
 
   async insertAttempt(tx, attempt) {
@@ -100,3 +227,4 @@ export class OrderRepository {
     return tx.query("UPDATE order_attempts SET state='SETTLED',reservation_state=$2,exchange_state=$3,updated_at=now(),version=version+1 WHERE cl_ord_id=$1 AND state IN ('SUBMITTED','UNKNOWN')", [clOrdId, reservationState, exchangeState ?? null]);
   }
 }
+import { compareDecimal, subtractDecimal, addDecimal } from "../../decimal.js";

@@ -60,11 +60,26 @@ export class BoundedPriorityQueue {
 }
 
 export class TradingEngine {
-  constructor({ projection = new MarketProjection(), account = new AccountCapitalSnapshot(), readyGate = new ReadyGate(), queue = new BoundedPriorityQueue(), clock = { nowMs: () => Date.now() }, timers = globalThis, watchdogMs = 5_000, onWatchdog = () => {} } = {}) {
-    Object.assign(this, { projection, account, readyGate, queue, clock, timers, watchdogMs, onWatchdog }); this.pendingBuy = new Map(); this.activeBuy = new Set(); this.watchdog = null;
+  constructor({ projection = new MarketProjection(), account = new AccountCapitalSnapshot(), readyGate = new ReadyGate(), queue = new BoundedPriorityQueue(), clock = { nowMs: () => Date.now() }, timers = globalThis, watchdogMs = 5_000, onWatchdog = () => {}, sellService = null, coordinator = null } = {}) {
+    Object.assign(this, { projection, account, readyGate, queue, clock, timers, watchdogMs, onWatchdog, sellService, coordinator }); this.pendingBuy = new Map(); this.activeBuy = new Set(); this.watchdog = null;
   }
-  receiveTicker(row) { const result = this.projection.updateTicker(row); if (result.accepted) this.queue.enqueue({ type: "ticker", instId: row.instId }); return result; }
-  receiveCandle(row) { const result = this.projection.updateCandle(row); if (result.accepted) this.queue.enqueue({ type: "market-recheck", instId: row.instId, priority: "normal" }); return result; }
+  receiveTicker(row) {
+    const result = this.projection.updateTicker(row);
+    if (result.accepted) { this.queue.enqueue({ type: "ticker", instId: row.instId }); for (const event of this.sellService?.observeTicker(row.instId) ?? []) this.queue.enqueue(event); }
+    return result;
+  }
+  receiveCandle(row) {
+    const result = this.projection.updateCandle(row);
+    if (result.accepted) { this.queue.enqueue({ type: "market-recheck", instId: row.instId, priority: "normal" }); for (const event of this.sellService?.observeCandle(row.instId) ?? []) this.queue.enqueue(event); }
+    return result;
+  }
+  rebuildExitWatches(fills) { this.sellService?.rebuild(fills); }
+  async consumeOne() {
+    const event = this.queue.take(); if (!event) return null;
+    if (event.type === "SELL_BREACH" || event.type === "SELL_PROTECTION") return this.sellService.consume(event);
+    return event;
+  }
+  protectInstrument(instId) { this.pendingBuy.delete(instId); return this.activeBuy.has(instId); }
   queueBuy(intent) { if (this.activeBuy.has(intent.instId)) return false; const current = this.pendingBuy.get(intent.instId); if (!current || intent.generation < current.generation || (intent.generation === current.generation && intent.eligibleSince <= current.eligibleSince)) this.pendingBuy.set(intent.instId, intent); return true; }
   takeBuyBatch(limit = 5) { return [...this.pendingBuy.values()].sort((a, b) => a.generation - b.generation || a.eligibleSince - b.eligibleSince || a.instId.localeCompare(b.instId)).slice(0, limit); }
   markBuyActive(instId) { this.pendingBuy.delete(instId); this.activeBuy.add(instId); }
