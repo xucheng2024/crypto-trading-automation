@@ -1,0 +1,1549 @@
+{
+  "generated_at": "2026-07-17T00:28:01",
+  "strategy_name": "d1_okx_1D_unified_marginal_v36",
+  "description": "D1 strategy from okx_1D_unified_marginal_v36.json (153 symbols)",
+  "strategy_type": "1D",
+  "duration": 1,
+  "strategy_params": {
+    "limit_range": [
+      60,
+      99
+    ],
+    "min_trades": 30,
+    "min_avg_earn": 1.01,
+    "buy_fee": 0.001,
+    "sell_fee": 0.001
+  },
+  "crypto_configs": {
+    "1INCH-USDT": {
+      "best_limit": "71",
+      "best_duration": "1D",
+      "max_returns": "5.68949",
+      "trade_count": "11",
+      "trades_per_month": "0.163124",
+      "win_rate": "0.909091",
+      "median_earn": "0.171232",
+      "avg_return_per_trade": "0.154701"
+    },
+    "AAVE-USDT": {
+      "best_limit": "74",
+      "best_duration": "1D",
+      "max_returns": "8.78446",
+      "trade_count": "14",
+      "trades_per_month": "0.201246",
+      "win_rate": "0.928571",
+      "median_earn": "0.167907",
+      "avg_return_per_trade": "0.148902"
+    },
+    "ACE-USDT": {
+      "best_limit": "83",
+      "best_duration": "1D",
+      "max_returns": "1.37849",
+      "trade_count": "20",
+      "trades_per_month": "0.641026",
+      "win_rate": "0.65",
+      "median_earn": "0.0161789",
+      "avg_return_per_trade": "-0.00456911"
+    },
+    "ACH-USDT": {
+      "best_limit": "82",
+      "best_duration": "1D",
+      "max_returns": "4.37068",
+      "trade_count": "13",
+      "trades_per_month": "0.331633",
+      "win_rate": "0.769231",
+      "median_earn": "0.120142",
+      "avg_return_per_trade": "0.0928391"
+    },
+    "ADA-USDT": {
+      "best_limit": "72",
+      "best_duration": "1D",
+      "max_returns": "5.30207",
+      "trade_count": "10",
+      "trades_per_month": "0.103128",
+      "win_rate": "0.9",
+      "median_earn": "0.181529",
+      "avg_return_per_trade": "0.153612"
+    },
+    "AEVO-USDT": {
+      "best_limit": "84",
+      "best_duration": "1D",
+      "max_returns": "1.44532",
+      "trade_count": "20",
+      "trades_per_month": "0.705882",
+      "win_rate": "0.6",
+      "median_earn": "0.0185873",
+      "avg_return_per_trade": "0.00142678"
+    },
+    "AGLD-USDT": {
+      "best_limit": "68",
+      "best_duration": "1D",
+      "max_returns": "1.61403",
+      "trade_count": "11",
+      "trades_per_month": "0.186335",
+      "win_rate": "0.636364",
+      "median_earn": "0.044482",
+      "avg_return_per_trade": "0.0160529"
+    },
+    "ALGO-USDT": {
+      "best_limit": "75",
+      "best_duration": "1D",
+      "max_returns": "5.7613",
+      "trade_count": "20",
+      "trades_per_month": "0.232558",
+      "win_rate": "0.75",
+      "median_earn": "0.0915057",
+      "avg_return_per_trade": "0.0597099"
+    },
+    "APE-USDT": {
+      "best_limit": "75",
+      "best_duration": "1D",
+      "max_returns": "2.32986",
+      "trade_count": "10",
+      "trades_per_month": "0.190355",
+      "win_rate": "0.8",
+      "median_earn": "0.0882606",
+      "avg_return_per_trade": "0.0664612"
+    },
+    "API3-USDT": {
+      "best_limit": "76",
+      "best_duration": "1D",
+      "max_returns": "9.38734",
+      "trade_count": "16",
+      "trades_per_month": "0.23541",
+      "win_rate": "0.9375",
+      "median_earn": "0.150228",
+      "avg_return_per_trade": "0.127326"
+    },
+    "APT-USDT": {
+      "best_limit": "81",
+      "best_duration": "1D",
+      "max_returns": "2.845",
+      "trade_count": "10",
+      "trades_per_month": "0.220588",
+      "win_rate": "0.8",
+      "median_earn": "0.110218",
+      "avg_return_per_trade": "0.0807516"
+    },
+    "ARB-USDT": {
+      "best_limit": "82",
+      "best_duration": "1D",
+      "max_returns": "4.501",
+      "trade_count": "13",
+      "trades_per_month": "0.323651",
+      "win_rate": "1",
+      "median_earn": "0.122676",
+      "avg_return_per_trade": "0.102988"
+    },
+    "ATOM-USDT": {
+      "best_limit": "70",
+      "best_duration": "1D",
+      "max_returns": "3.28911",
+      "trade_count": "11",
+      "trades_per_month": "0.125237",
+      "win_rate": "0.818182",
+      "median_earn": "0.114313",
+      "avg_return_per_trade": "0.07674"
+    },
+    "AVAX-USDT": {
+      "best_limit": "71",
+      "best_duration": "1D",
+      "max_returns": "4.15521",
+      "trade_count": "11",
+      "trades_per_month": "0.155881",
+      "win_rate": "0.909091",
+      "median_earn": "0.138245",
+      "avg_return_per_trade": "0.121828"
+    },
+    "AXS-USDT": {
+      "best_limit": "78",
+      "best_duration": "1D",
+      "max_returns": "2.42316",
+      "trade_count": "12",
+      "trades_per_month": "0.199005",
+      "win_rate": "0.916667",
+      "median_earn": "0.0765441",
+      "avg_return_per_trade": "0.0612867"
+    },
+    "BABYDOGE-USDT": {
+      "best_limit": "70",
+      "best_duration": "1D",
+      "max_returns": "5.2458",
+      "trade_count": "11",
+      "trades_per_month": "0.183844",
+      "win_rate": "0.727273",
+      "median_earn": "0.162619",
+      "avg_return_per_trade": "0.128778"
+    },
+    "BANANA-USDT": {
+      "best_limit": "84",
+      "best_duration": "1D",
+      "max_returns": "1.48259",
+      "trade_count": "10",
+      "trades_per_month": "0.474684",
+      "win_rate": "0.8",
+      "median_earn": "0.0401647",
+      "avg_return_per_trade": "0.0180684"
+    },
+    "BAND-USDT": {
+      "best_limit": "71",
+      "best_duration": "1D",
+      "max_returns": "6.58824",
+      "trade_count": "11",
+      "trades_per_month": "0.154062",
+      "win_rate": "0.909091",
+      "median_earn": "0.186953",
+      "avg_return_per_trade": "0.153633"
+    },
+    "BAT-USDT": {
+      "best_limit": "74",
+      "best_duration": "1D",
+      "max_returns": "3.67671",
+      "trade_count": "10",
+      "trades_per_month": "0.12931",
+      "win_rate": "0.9",
+      "median_earn": "0.139058",
+      "avg_return_per_trade": "0.117513"
+    },
+    "BCH-USDT": {
+      "best_limit": "76",
+      "best_duration": "1D",
+      "max_returns": "3.41212",
+      "trade_count": "15",
+      "trades_per_month": "0.16129",
+      "win_rate": "0.8",
+      "median_earn": "0.0852628",
+      "avg_return_per_trade": "0.0622122"
+    },
+    "BETH-USDT": {
+      "best_limit": "81",
+      "best_duration": "1D",
+      "max_returns": "3.31313",
+      "trade_count": "15",
+      "trades_per_month": "0.222222",
+      "win_rate": "0.866667",
+      "median_earn": "0.083135",
+      "avg_return_per_trade": "0.0736318"
+    },
+    "BIGTIME-USDT": {
+      "best_limit": "73",
+      "best_duration": "1D",
+      "max_returns": "3.00039",
+      "trade_count": "11",
+      "trades_per_month": "0.328685",
+      "win_rate": "0.818182",
+      "median_earn": "0.105045",
+      "avg_return_per_trade": "0.0760675"
+    },
+    "BIO-USDT": {
+      "best_limit": "82",
+      "best_duration": "1D",
+      "max_returns": "1.49563",
+      "trade_count": "14",
+      "trades_per_month": "0.756757",
+      "win_rate": "0.714286",
+      "median_earn": "0.0291709",
+      "avg_return_per_trade": "0.0117297"
+    },
+    "BLUR-USDT": {
+      "best_limit": "79",
+      "best_duration": "1D",
+      "max_returns": "4.18575",
+      "trade_count": "13",
+      "trades_per_month": "0.314263",
+      "win_rate": "0.769231",
+      "median_earn": "0.116423",
+      "avg_return_per_trade": "0.0947088"
+    },
+    "BNB-USDT": {
+      "best_limit": "89",
+      "best_duration": "1D",
+      "max_returns": "2.03098",
+      "trade_count": "10",
+      "trades_per_month": "0.231303",
+      "win_rate": "0.8",
+      "median_earn": "0.0734224",
+      "avg_return_per_trade": "0.0550952"
+    },
+    "BNT-USDT": {
+      "best_limit": "73",
+      "best_duration": "1D",
+      "max_returns": "8.03653",
+      "trade_count": "11",
+      "trades_per_month": "0.106383",
+      "win_rate": "0.818182",
+      "median_earn": "0.20859",
+      "avg_return_per_trade": "0.138999"
+    },
+    "BONK-USDT": {
+      "best_limit": "85",
+      "best_duration": "1D",
+      "max_returns": "15.8372",
+      "trade_count": "26",
+      "trades_per_month": "0.852459",
+      "win_rate": "0.769231",
+      "median_earn": "0.112094",
+      "avg_return_per_trade": "0.0727373"
+    },
+    "BTC-USDT": {
+      "best_limit": "90",
+      "best_duration": "1D",
+      "max_returns": "5.98345",
+      "trade_count": "72",
+      "trades_per_month": "0.676268",
+      "win_rate": "0.708333",
+      "median_earn": "0.0251584",
+      "avg_return_per_trade": "0.0177449"
+    },
+    "CAT-USDT": {
+      "best_limit": "82",
+      "best_duration": "1D",
+      "max_returns": "1.17384",
+      "trade_count": "10",
+      "trades_per_month": "0.48",
+      "win_rate": "0.8",
+      "median_earn": "0.0161571",
+      "avg_return_per_trade": "0.00246598"
+    },
+    "CATI-USDT": {
+      "best_limit": "82",
+      "best_duration": "1D",
+      "max_returns": "1.55003",
+      "trade_count": "11",
+      "trades_per_month": "0.5",
+      "win_rate": "0.727273",
+      "median_earn": "0.0406475",
+      "avg_return_per_trade": "0.0187766"
+    },
+    "CELO-USDT": {
+      "best_limit": "75",
+      "best_duration": "1D",
+      "max_returns": "4.58327",
+      "trade_count": "13",
+      "trades_per_month": "0.178571",
+      "win_rate": "0.769231",
+      "median_earn": "0.124242",
+      "avg_return_per_trade": "0.0995309"
+    },
+    "CELR-USDT": {
+      "best_limit": "71",
+      "best_duration": "1D",
+      "max_returns": "2.13606",
+      "trade_count": "12",
+      "trades_per_month": "0.186625",
+      "win_rate": "0.666667",
+      "median_earn": "0.0652898",
+      "avg_return_per_trade": "0.0424733"
+    },
+    "CFG-USDT": {
+      "best_limit": "85",
+      "best_duration": "1D",
+      "max_returns": "3.07198",
+      "trade_count": "32",
+      "trades_per_month": "0.527183",
+      "win_rate": "0.6875",
+      "median_earn": "0.0356949",
+      "avg_return_per_trade": "0.0228337"
+    },
+    "CFX-USDT": {
+      "best_limit": "71",
+      "best_duration": "1D",
+      "max_returns": "3.17161",
+      "trade_count": "10",
+      "trades_per_month": "0.153453",
+      "win_rate": "0.7",
+      "median_earn": "0.122349",
+      "avg_return_per_trade": "0.0880715"
+    },
+    "CHZ-USDT": {
+      "best_limit": "73",
+      "best_duration": "1D",
+      "max_returns": "5.21116",
+      "trade_count": "13",
+      "trades_per_month": "0.199488",
+      "win_rate": "0.923077",
+      "median_earn": "0.1354",
+      "avg_return_per_trade": "0.113949"
+    },
+    "COMP-USDT": {
+      "best_limit": "76",
+      "best_duration": "1D",
+      "max_returns": "7.39357",
+      "trade_count": "16",
+      "trades_per_month": "0.217984",
+      "win_rate": "0.9375",
+      "median_earn": "0.133192",
+      "avg_return_per_trade": "0.109741"
+    },
+    "CRO-USDT": {
+      "best_limit": "75",
+      "best_duration": "1D",
+      "max_returns": "2.69521",
+      "trade_count": "11",
+      "trades_per_month": "0.128355",
+      "win_rate": "0.727273",
+      "median_earn": "0.0943212",
+      "avg_return_per_trade": "0.0630142"
+    },
+    "CTC-USDT": {
+      "best_limit": "70",
+      "best_duration": "1D",
+      "max_returns": "19.4214",
+      "trade_count": "11",
+      "trades_per_month": "0.14461",
+      "win_rate": "0.909091",
+      "median_earn": "0.309533",
+      "avg_return_per_trade": "0.250559"
+    },
+    "CVX-USDT": {
+      "best_limit": "76",
+      "best_duration": "1D",
+      "max_returns": "4.59406",
+      "trade_count": "13",
+      "trades_per_month": "0.23118",
+      "win_rate": "0.846154",
+      "median_earn": "0.124445",
+      "avg_return_per_trade": "0.0866044"
+    },
+    "DEGEN-USDT": {
+      "best_limit": "80",
+      "best_duration": "1D",
+      "max_returns": "2.04922",
+      "trade_count": "13",
+      "trades_per_month": "0.543175",
+      "win_rate": "0.769231",
+      "median_earn": "0.0567404",
+      "avg_return_per_trade": "0.0378107"
+    },
+    "DGB-USDT": {
+      "best_limit": "69",
+      "best_duration": "1D",
+      "max_returns": "9.21064",
+      "trade_count": "12",
+      "trades_per_month": "0.116054",
+      "win_rate": "0.833333",
+      "median_earn": "0.203254",
+      "avg_return_per_trade": "0.166647"
+    },
+    "DOGE-USDT": {
+      "best_limit": "69",
+      "best_duration": "1D",
+      "max_returns": "14.9545",
+      "trade_count": "14",
+      "trades_per_month": "0.164577",
+      "win_rate": "0.928571",
+      "median_earn": "0.213144",
+      "avg_return_per_trade": "0.191272"
+    },
+    "DOGS-USDT": {
+      "best_limit": "83",
+      "best_duration": "1D",
+      "max_returns": "1.43607",
+      "trade_count": "12",
+      "trades_per_month": "0.526316",
+      "win_rate": "0.75",
+      "median_earn": "0.0306184",
+      "avg_return_per_trade": "0.00190501"
+    },
+    "DORA-USDT": {
+      "best_limit": "81",
+      "best_duration": "1D",
+      "max_returns": "1.28332",
+      "trade_count": "14",
+      "trades_per_month": "0.409357",
+      "win_rate": "0.571429",
+      "median_earn": "0.0179777",
+      "avg_return_per_trade": "-0.00887499"
+    },
+    "DOT-USDT": {
+      "best_limit": "75",
+      "best_duration": "1D",
+      "max_returns": "5.03237",
+      "trade_count": "14",
+      "trades_per_month": "0.195531",
+      "win_rate": "1",
+      "median_earn": "0.122346",
+      "avg_return_per_trade": "0.100415"
+    },
+    "DYDX-USDT": {
+      "best_limit": "69",
+      "best_duration": "1D",
+      "max_returns": "2.2082",
+      "trade_count": "10",
+      "trades_per_month": "0.169875",
+      "win_rate": "0.8",
+      "median_earn": "0.0824401",
+      "avg_return_per_trade": "0.0567092"
+    },
+    "EGLD-USDT": {
+      "best_limit": "74",
+      "best_duration": "1D",
+      "max_returns": "4.7038",
+      "trade_count": "11",
+      "trades_per_month": "0.156472",
+      "win_rate": "1",
+      "median_earn": "0.151149",
+      "avg_return_per_trade": "0.138719"
+    },
+    "EIGEN-USDT": {
+      "best_limit": "83",
+      "best_duration": "1D",
+      "max_returns": "1.96897",
+      "trade_count": "13",
+      "trades_per_month": "0.600924",
+      "win_rate": "0.692308",
+      "median_earn": "0.0534983",
+      "avg_return_per_trade": "0.0261225"
+    },
+    "ELF-USDT": {
+      "best_limit": "80",
+      "best_duration": "1D",
+      "max_returns": "5.51406",
+      "trade_count": "42",
+      "trades_per_month": "0.40619",
+      "win_rate": "0.619048",
+      "median_earn": "0.0414875",
+      "avg_return_per_trade": "0.0279175"
+    },
+    "ENJ-USDT": {
+      "best_limit": "80",
+      "best_duration": "1D",
+      "max_returns": "3.03186",
+      "trade_count": "10",
+      "trades_per_month": "0.298507",
+      "win_rate": "0.9",
+      "median_earn": "0.117303",
+      "avg_return_per_trade": "0.0956196"
+    },
+    "ETC-USDT": {
+      "best_limit": "70",
+      "best_duration": "1D",
+      "max_returns": "5.26799",
+      "trade_count": "10",
+      "trades_per_month": "0.0967118",
+      "win_rate": "0.8",
+      "median_earn": "0.180768",
+      "avg_return_per_trade": "0.158273"
+    },
+    "ETH-USDT": {
+      "best_limit": "76",
+      "best_duration": "1D",
+      "max_returns": "2.69952",
+      "trade_count": "11",
+      "trades_per_month": "0.103319",
+      "win_rate": "0.818182",
+      "median_earn": "0.0944799",
+      "avg_return_per_trade": "0.0732197"
+    },
+    "FET-USDT": {
+      "best_limit": "82",
+      "best_duration": "1D",
+      "max_returns": "3.61416",
+      "trade_count": "11",
+      "trades_per_month": "0.34375",
+      "win_rate": "0.909091",
+      "median_earn": "0.123901",
+      "avg_return_per_trade": "0.0772906"
+    },
+    "FIL-USDT": {
+      "best_limit": "68",
+      "best_duration": "1D",
+      "max_returns": "5.69133",
+      "trade_count": "10",
+      "trades_per_month": "0.146699",
+      "win_rate": "1",
+      "median_earn": "0.18993",
+      "avg_return_per_trade": "0.156489"
+    },
+    "FLOKI-USDT": {
+      "best_limit": "77",
+      "best_duration": "1D",
+      "max_returns": "3.46474",
+      "trade_count": "11",
+      "trades_per_month": "0.253456",
+      "win_rate": "0.818182",
+      "median_earn": "0.119595",
+      "avg_return_per_trade": "0.0943549"
+    },
+    "FLOW-USDT": {
+      "best_limit": "77",
+      "best_duration": "1D",
+      "max_returns": "3.77172",
+      "trade_count": "12",
+      "trades_per_month": "0.183393",
+      "win_rate": "0.916667",
+      "median_earn": "0.116979",
+      "avg_return_per_trade": "0.0900477"
+    },
+    "FLR-USDT": {
+      "best_limit": "85",
+      "best_duration": "1D",
+      "max_returns": "3.34632",
+      "trade_count": "12",
+      "trades_per_month": "0.281911",
+      "win_rate": "0.916667",
+      "median_earn": "0.105895",
+      "avg_return_per_trade": "0.0968598"
+    },
+    "G-USDT": {
+      "best_limit": "87",
+      "best_duration": "1D",
+      "max_returns": "1.56455",
+      "trade_count": "11",
+      "trades_per_month": "0.461538",
+      "win_rate": "0.909091",
+      "median_earn": "0.0415301",
+      "avg_return_per_trade": "0.0314669"
+    },
+    "GALA-USDT": {
+      "best_limit": "73",
+      "best_duration": "1D",
+      "max_returns": "5.02082",
+      "trade_count": "10",
+      "trades_per_month": "0.171233",
+      "win_rate": "0.9",
+      "median_earn": "0.175107",
+      "avg_return_per_trade": "0.144274"
+    },
+    "GLM-USDT": {
+      "best_limit": "75",
+      "best_duration": "1D",
+      "max_returns": "4.05249",
+      "trade_count": "11",
+      "trades_per_month": "0.167768",
+      "win_rate": "0.818182",
+      "median_earn": "0.135658",
+      "avg_return_per_trade": "0.103402"
+    },
+    "GMT-USDT": {
+      "best_limit": "75",
+      "best_duration": "1D",
+      "max_returns": "2.57172",
+      "trade_count": "12",
+      "trades_per_month": "0.230621",
+      "win_rate": "0.75",
+      "median_earn": "0.0818954",
+      "avg_return_per_trade": "0.06201"
+    },
+    "GMX-USDT": {
+      "best_limit": "77",
+      "best_duration": "1D",
+      "max_returns": "5.03631",
+      "trade_count": "10",
+      "trades_per_month": "0.234009",
+      "win_rate": "0.9",
+      "median_earn": "0.175469",
+      "avg_return_per_trade": "0.15479"
+    },
+    "GOAT-USDT": {
+      "best_limit": "81",
+      "best_duration": "1D",
+      "max_returns": "1.84284",
+      "trade_count": "11",
+      "trades_per_month": "0.571924",
+      "win_rate": "0.636364",
+      "median_earn": "0.0571465",
+      "avg_return_per_trade": "0.0293779"
+    },
+    "GODS-USDT": {
+      "best_limit": "67",
+      "best_duration": "1D",
+      "max_returns": "4.49681",
+      "trade_count": "10",
+      "trades_per_month": "0.174927",
+      "win_rate": "0.9",
+      "median_earn": "0.162226",
+      "avg_return_per_trade": "0.139623"
+    },
+    "GRT-USDT": {
+      "best_limit": "82",
+      "best_duration": "1D",
+      "max_returns": "41.3403",
+      "trade_count": "45",
+      "trades_per_month": "0.665025",
+      "win_rate": "0.688889",
+      "median_earn": "0.086224",
+      "avg_return_per_trade": "0.0573785"
+    },
+    "ICP-USDT": {
+      "best_limit": "75",
+      "best_duration": "1D",
+      "max_returns": "2.63037",
+      "trade_count": "11",
+      "trades_per_month": "0.174973",
+      "win_rate": "0.636364",
+      "median_earn": "0.0919012",
+      "avg_return_per_trade": "0.0726711"
+    },
+    "ICX-USDT": {
+      "best_limit": "64",
+      "best_duration": "1D",
+      "max_returns": "5.2099",
+      "trade_count": "10",
+      "trades_per_month": "0.0967118",
+      "win_rate": "0.8",
+      "median_earn": "0.179459",
+      "avg_return_per_trade": "0.151792"
+    },
+    "ID-USDT": {
+      "best_limit": "81",
+      "best_duration": "1D",
+      "max_returns": "3.27413",
+      "trade_count": "13",
+      "trades_per_month": "0.331351",
+      "win_rate": "0.846154",
+      "median_earn": "0.0955262",
+      "avg_return_per_trade": "0.0698378"
+    },
+    "ILV-USDT": {
+      "best_limit": "79",
+      "best_duration": "1D",
+      "max_returns": "2.62197",
+      "trade_count": "10",
+      "trades_per_month": "0.169779",
+      "win_rate": "0.9",
+      "median_earn": "0.101191",
+      "avg_return_per_trade": "0.0830819"
+    },
+    "IMX-USDT": {
+      "best_limit": "78",
+      "best_duration": "1D",
+      "max_returns": "3.55332",
+      "trade_count": "14",
+      "trades_per_month": "0.245902",
+      "win_rate": "0.857143",
+      "median_earn": "0.0947904",
+      "avg_return_per_trade": "0.0710696"
+    },
+    "INJ-USDT": {
+      "best_limit": "80",
+      "best_duration": "1D",
+      "max_returns": "3.60399",
+      "trade_count": "11",
+      "trades_per_month": "0.345912",
+      "win_rate": "0.818182",
+      "median_earn": "0.123613",
+      "avg_return_per_trade": "0.100254"
+    },
+    "IOTA-USDT": {
+      "best_limit": "71",
+      "best_duration": "1D",
+      "max_returns": "5.0108",
+      "trade_count": "12",
+      "trades_per_month": "0.116054",
+      "win_rate": "0.916667",
+      "median_earn": "0.143735",
+      "avg_return_per_trade": "0.116204"
+    },
+    "JOE-USDT": {
+      "best_limit": "75",
+      "best_duration": "1D",
+      "max_returns": "3.73812",
+      "trade_count": "11",
+      "trades_per_month": "0.204715",
+      "win_rate": "0.818182",
+      "median_earn": "0.127352",
+      "avg_return_per_trade": "0.107873"
+    },
+    "JUP-USDT": {
+      "best_limit": "83",
+      "best_duration": "1D",
+      "max_returns": "6.93603",
+      "trade_count": "17",
+      "trades_per_month": "0.571749",
+      "win_rate": "0.823529",
+      "median_earn": "0.120668",
+      "avg_return_per_trade": "0.0989492"
+    },
+    "KAIA-USDT": {
+      "best_limit": "89",
+      "best_duration": "1D",
+      "max_returns": "1.59845",
+      "trade_count": "20",
+      "trades_per_month": "0.969305",
+      "win_rate": "0.55",
+      "median_earn": "0.0237289",
+      "avg_return_per_trade": "0.0133836"
+    },
+    "KNC-USDT": {
+      "best_limit": "70",
+      "best_duration": "1D",
+      "max_returns": "3.26081",
+      "trade_count": "11",
+      "trades_per_month": "0.106383",
+      "win_rate": "0.727273",
+      "median_earn": "0.113438",
+      "avg_return_per_trade": "0.0859338"
+    },
+    "KSM-USDT": {
+      "best_limit": "71",
+      "best_duration": "1D",
+      "max_returns": "4.52358",
+      "trade_count": "10",
+      "trades_per_month": "0.140384",
+      "win_rate": "1",
+      "median_earn": "0.162916",
+      "avg_return_per_trade": "0.140923"
+    },
+    "LAT-USDT": {
+      "best_limit": "71",
+      "best_duration": "1D",
+      "max_returns": "4.46328",
+      "trade_count": "13",
+      "trades_per_month": "0.206897",
+      "win_rate": "0.846154",
+      "median_earn": "0.12195",
+      "avg_return_per_trade": "0.102725"
+    },
+    "LDO-USDT": {
+      "best_limit": "83",
+      "best_duration": "1D",
+      "max_returns": "7.4153",
+      "trade_count": "21",
+      "trades_per_month": "0.447761",
+      "win_rate": "0.666667",
+      "median_earn": "0.100106",
+      "avg_return_per_trade": "0.084226"
+    },
+    "LEO-USDT": {
+      "best_limit": "85",
+      "best_duration": "1D",
+      "max_returns": "6.76933",
+      "trade_count": "16",
+      "trades_per_month": "0.185759",
+      "win_rate": "0.9375",
+      "median_earn": "0.126962",
+      "avg_return_per_trade": "0.111214"
+    },
+    "LINK-USDT": {
+      "best_limit": "67",
+      "best_duration": "1D",
+      "max_returns": "11.188",
+      "trade_count": "10",
+      "trades_per_month": "0.0967118",
+      "win_rate": "0.9",
+      "median_earn": "0.273137",
+      "avg_return_per_trade": "0.221192"
+    },
+    "LPT-USDT": {
+      "best_limit": "74",
+      "best_duration": "1D",
+      "max_returns": "6.76883",
+      "trade_count": "12",
+      "trades_per_month": "0.187013",
+      "win_rate": "1",
+      "median_earn": "0.172761",
+      "avg_return_per_trade": "0.151024"
+    },
+    "LRC-USDT": {
+      "best_limit": "69",
+      "best_duration": "1D",
+      "max_returns": "7.54139",
+      "trade_count": "13",
+      "trades_per_month": "0.125725",
+      "win_rate": "0.769231",
+      "median_earn": "0.168144",
+      "avg_return_per_trade": "0.137669"
+    },
+    "LSK-USDT": {
+      "best_limit": "69",
+      "best_duration": "1D",
+      "max_returns": "5.02518",
+      "trade_count": "10",
+      "trades_per_month": "0.10142",
+      "win_rate": "0.9",
+      "median_earn": "0.175209",
+      "avg_return_per_trade": "0.14398"
+    },
+    "LTC-USDT": {
+      "best_limit": "74",
+      "best_duration": "1D",
+      "max_returns": "4.37814",
+      "trade_count": "12",
+      "trades_per_month": "0.116054",
+      "win_rate": "0.833333",
+      "median_earn": "0.130943",
+      "avg_return_per_trade": "0.10894"
+    },
+    "LUNA-USDT": {
+      "best_limit": "71",
+      "best_duration": "1D",
+      "max_returns": "3.42045",
+      "trade_count": "12",
+      "trades_per_month": "0.239362",
+      "win_rate": "0.916667",
+      "median_earn": "0.107916",
+      "avg_return_per_trade": "0.0896251"
+    },
+    "MAGIC-USDT": {
+      "best_limit": "72",
+      "best_duration": "1D",
+      "max_returns": "3.80628",
+      "trade_count": "10",
+      "trades_per_month": "0.1868",
+      "win_rate": "0.8",
+      "median_earn": "0.14301",
+      "avg_return_per_trade": "0.110555"
+    },
+    "MANA-USDT": {
+      "best_limit": "70",
+      "best_duration": "1D",
+      "max_returns": "9.01959",
+      "trade_count": "13",
+      "trades_per_month": "0.125725",
+      "win_rate": "0.769231",
+      "median_earn": "0.184339",
+      "avg_return_per_trade": "0.158975"
+    },
+    "ME-USDT": {
+      "best_limit": "85",
+      "best_duration": "1D",
+      "max_returns": "1.97527",
+      "trade_count": "12",
+      "trades_per_month": "0.621762",
+      "win_rate": "0.75",
+      "median_earn": "0.058365",
+      "avg_return_per_trade": "0.0404865"
+    },
+    "MEME-USDT": {
+      "best_limit": "79",
+      "best_duration": "1D",
+      "max_returns": "3.57195",
+      "trade_count": "11",
+      "trades_per_month": "0.336391",
+      "win_rate": "0.818182",
+      "median_earn": "0.122701",
+      "avg_return_per_trade": "0.101217"
+    },
+    "MENGO-USDT": {
+      "best_limit": "78",
+      "best_duration": "1D",
+      "max_returns": "1.99574",
+      "trade_count": "11",
+      "trades_per_month": "0.238095",
+      "win_rate": "0.636364",
+      "median_earn": "0.0648345",
+      "avg_return_per_trade": "0.0391973"
+    },
+    "MERL-USDT": {
+      "best_limit": "78",
+      "best_duration": "1D",
+      "max_returns": "1.96101",
+      "trade_count": "10",
+      "trades_per_month": "0.369004",
+      "win_rate": "0.9",
+      "median_earn": "0.0696657",
+      "avg_return_per_trade": "0.0498464"
+    },
+    "METIS-USDT": {
+      "best_limit": "75",
+      "best_duration": "1D",
+      "max_returns": "4.93936",
+      "trade_count": "10",
+      "trades_per_month": "0.18622",
+      "win_rate": "0.9",
+      "median_earn": "0.173186",
+      "avg_return_per_trade": "0.139538"
+    },
+    "MEW-USDT": {
+      "best_limit": "83",
+      "best_duration": "1D",
+      "max_returns": "4.16438",
+      "trade_count": "13",
+      "trades_per_month": "0.477356",
+      "win_rate": "0.846154",
+      "median_earn": "0.115983",
+      "avg_return_per_trade": "0.0849977"
+    },
+    "MOODENG-USDT": {
+      "best_limit": "83",
+      "best_duration": "1D",
+      "max_returns": "3.23872",
+      "trade_count": "20",
+      "trades_per_month": "0.993377",
+      "win_rate": "0.75",
+      "median_earn": "0.0605195",
+      "avg_return_per_trade": "0.0288164"
+    },
+    "MORPHO-USDT": {
+      "best_limit": "90",
+      "best_duration": "1D",
+      "max_returns": "4.69182",
+      "trade_count": "46",
+      "trades_per_month": "2.30769",
+      "win_rate": "0.608696",
+      "median_earn": "0.0341758",
+      "avg_return_per_trade": "0.0210729"
+    },
+    "NEAR-USDT": {
+      "best_limit": "73",
+      "best_duration": "1D",
+      "max_returns": "3.39898",
+      "trade_count": "11",
+      "trades_per_month": "0.161369",
+      "win_rate": "0.909091",
+      "median_earn": "0.117646",
+      "avg_return_per_trade": "0.0953546"
+    },
+    "NEIRO-USDT": {
+      "best_limit": "80",
+      "best_duration": "1D",
+      "max_returns": "1.77743",
+      "trade_count": "10",
+      "trades_per_month": "0.477707",
+      "win_rate": "0.7",
+      "median_earn": "0.059203",
+      "avg_return_per_trade": "0.0207272"
+    },
+    "NEO-USDT": {
+      "best_limit": "70",
+      "best_duration": "1D",
+      "max_returns": "3.87079",
+      "trade_count": "11",
+      "trades_per_month": "0.106383",
+      "win_rate": "0.818182",
+      "median_earn": "0.130932",
+      "avg_return_per_trade": "0.109179"
+    },
+    "NMR-USDT": {
+      "best_limit": "82",
+      "best_duration": "1D",
+      "max_returns": "4.43478",
+      "trade_count": "26",
+      "trades_per_month": "0.366541",
+      "win_rate": "0.692308",
+      "median_earn": "0.0589603",
+      "avg_return_per_trade": "0.0393757"
+    },
+    "NOT-USDT": {
+      "best_limit": "82",
+      "best_duration": "1D",
+      "max_returns": "2.09064",
+      "trade_count": "13",
+      "trades_per_month": "0.496183",
+      "win_rate": "0.769231",
+      "median_earn": "0.0583682",
+      "avg_return_per_trade": "0.029625"
+    },
+    "OKB-USDT": {
+      "best_limit": "75",
+      "best_duration": "1D",
+      "max_returns": "6.42689",
+      "trade_count": "14",
+      "trades_per_month": "0.138568",
+      "win_rate": "0.857143",
+      "median_earn": "0.142127",
+      "avg_return_per_trade": "0.117048"
+    },
+    "OMI-USDT": {
+      "best_limit": "89",
+      "best_duration": "1D",
+      "max_returns": "2.89239",
+      "trade_count": "68",
+      "trades_per_month": "1.13145",
+      "win_rate": "0.647059",
+      "median_earn": "0.0157415",
+      "avg_return_per_trade": "0.00471559"
+    },
+    "ONDO-USDT": {
+      "best_limit": "85",
+      "best_duration": "1D",
+      "max_returns": "3.84283",
+      "trade_count": "10",
+      "trades_per_month": "0.421348",
+      "win_rate": "0.9",
+      "median_earn": "0.144103",
+      "avg_return_per_trade": "0.115602"
+    },
+    "ONE-USDT": {
+      "best_limit": "75",
+      "best_duration": "1D",
+      "max_returns": "2.96242",
+      "trade_count": "10",
+      "trades_per_month": "0.18226",
+      "win_rate": "0.8",
+      "median_earn": "0.114717",
+      "avg_return_per_trade": "0.0762811"
+    },
+    "ONT-USDT": {
+      "best_limit": "68",
+      "best_duration": "1D",
+      "max_returns": "3.66403",
+      "trade_count": "11",
+      "trades_per_month": "0.108553",
+      "win_rate": "0.818182",
+      "median_earn": "0.125302",
+      "avg_return_per_trade": "0.10243"
+    },
+    "ORBS-USDT": {
+      "best_limit": "67",
+      "best_duration": "1D",
+      "max_returns": "98.2112",
+      "trade_count": "20",
+      "trades_per_month": "0.235756",
+      "win_rate": "0.85",
+      "median_earn": "0.25779",
+      "avg_return_per_trade": "0.21573"
+    },
+    "ORDI-USDT": {
+      "best_limit": "74",
+      "best_duration": "1D",
+      "max_returns": "1.79222",
+      "trade_count": "11",
+      "trades_per_month": "0.287707",
+      "win_rate": "0.636364",
+      "median_earn": "0.0544732",
+      "avg_return_per_trade": "0.0323953"
+    },
+    "PENDLE-USDT": {
+      "best_limit": "85",
+      "best_duration": "1D",
+      "max_returns": "2.89864",
+      "trade_count": "12",
+      "trades_per_month": "0.551302",
+      "win_rate": "0.916667",
+      "median_earn": "0.0927385",
+      "avg_return_per_trade": "0.0757262"
+    },
+    "PENGU-USDT": {
+      "best_limit": "85",
+      "best_duration": "1D",
+      "max_returns": "1.21903",
+      "trade_count": "20",
+      "trades_per_month": "1.04895",
+      "win_rate": "0.55",
+      "median_earn": "0.00995188",
+      "avg_return_per_trade": "-0.0079197"
+    },
+    "PEOPLE-USDT": {
+      "best_limit": "64",
+      "best_duration": "1D",
+      "max_returns": "3.6703",
+      "trade_count": "10",
+      "trades_per_month": "0.17783",
+      "win_rate": "0.7",
+      "median_earn": "0.13886",
+      "avg_return_per_trade": "0.114986"
+    },
+    "PEPE-USDT": {
+      "best_limit": "75",
+      "best_duration": "1D",
+      "max_returns": "9.18403",
+      "trade_count": "14",
+      "trades_per_month": "0.360206",
+      "win_rate": "0.928571",
+      "median_earn": "0.171624",
+      "avg_return_per_trade": "0.145745"
+    },
+    "PIXEL-USDT": {
+      "best_limit": "85",
+      "best_duration": "1D",
+      "max_returns": "2.21912",
+      "trade_count": "18",
+      "trades_per_month": "0.776978",
+      "win_rate": "0.777778",
+      "median_earn": "0.0452792",
+      "avg_return_per_trade": "0.0322055"
+    },
+    "POL-USDT": {
+      "best_limit": "86",
+      "best_duration": "1D",
+      "max_returns": "1.88621",
+      "trade_count": "10",
+      "trades_per_month": "0.444444",
+      "win_rate": "0.8",
+      "median_earn": "0.0655137",
+      "avg_return_per_trade": "0.0475828"
+    },
+    "PYTH-USDT": {
+      "best_limit": "84",
+      "best_duration": "1D",
+      "max_returns": "8.58799",
+      "trade_count": "21",
+      "trades_per_month": "0.653527",
+      "win_rate": "0.857143",
+      "median_earn": "0.107825",
+      "avg_return_per_trade": "0.0893662"
+    },
+    "QTUM-USDT": {
+      "best_limit": "68",
+      "best_duration": "1D",
+      "max_returns": "3.78266",
+      "trade_count": "11",
+      "trades_per_month": "0.106383",
+      "win_rate": "0.818182",
+      "median_earn": "0.128566",
+      "avg_return_per_trade": "0.0888433"
+    },
+    "RON-USDT": {
+      "best_limit": "77",
+      "best_duration": "1D",
+      "max_returns": "3.27912",
+      "trade_count": "12",
+      "trades_per_month": "0.221538",
+      "win_rate": "0.833333",
+      "median_earn": "0.104027",
+      "avg_return_per_trade": "0.0810609"
+    },
+    "RPL-USDT": {
+      "best_limit": "87",
+      "best_duration": "1D",
+      "max_returns": "1.6616",
+      "trade_count": "20",
+      "trades_per_month": "0.488998",
+      "win_rate": "0.65",
+      "median_earn": "0.0257142",
+      "avg_return_per_trade": "0.00982887"
+    },
+    "RSR-USDT": {
+      "best_limit": "73",
+      "best_duration": "1D",
+      "max_returns": "10.5386",
+      "trade_count": "20",
+      "trades_per_month": "0.280112",
+      "win_rate": "0.8",
+      "median_earn": "0.124965",
+      "avg_return_per_trade": "0.101371"
+    },
+    "RVN-USDT": {
+      "best_limit": "71",
+      "best_duration": "1D",
+      "max_returns": "4.36465",
+      "trade_count": "12",
+      "trades_per_month": "0.154308",
+      "win_rate": "0.916667",
+      "median_earn": "0.130652",
+      "avg_return_per_trade": "0.110152"
+    },
+    "S-USDT": {
+      "best_limit": "85",
+      "best_duration": "1D",
+      "max_returns": "1.43366",
+      "trade_count": "13",
+      "trades_per_month": "0.726257",
+      "win_rate": "0.769231",
+      "median_earn": "0.0280978",
+      "avg_return_per_trade": "0.0123875"
+    },
+    "SAFE-USDT": {
+      "best_limit": "84",
+      "best_duration": "1D",
+      "max_returns": "1.3996",
+      "trade_count": "10",
+      "trades_per_month": "0.370828",
+      "win_rate": "0.8",
+      "median_earn": "0.03419",
+      "avg_return_per_trade": "0.0213067"
+    },
+    "SAND-USDT": {
+      "best_limit": "71",
+      "best_duration": "1D",
+      "max_returns": "4.73021",
+      "trade_count": "12",
+      "trades_per_month": "0.185567",
+      "win_rate": "0.916667",
+      "median_earn": "0.138256",
+      "avg_return_per_trade": "0.124774"
+    },
+    "SHIB-USDT": {
+      "best_limit": "69",
+      "best_duration": "1D",
+      "max_returns": "9.01146",
+      "trade_count": "11",
+      "trades_per_month": "0.174696",
+      "win_rate": "0.818182",
+      "median_earn": "0.221236",
+      "avg_return_per_trade": "0.190558"
+    },
+    "SKL-USDT": {
+      "best_limit": "72",
+      "best_duration": "1D",
+      "max_returns": "4.103",
+      "trade_count": "11",
+      "trades_per_month": "0.171073",
+      "win_rate": "0.818182",
+      "median_earn": "0.136937",
+      "avg_return_per_trade": "0.110538"
+    },
+    "SNX-USDT": {
+      "best_limit": "77",
+      "best_duration": "1D",
+      "max_returns": "5.8166",
+      "trade_count": "21",
+      "trades_per_month": "0.289389",
+      "win_rate": "0.761905",
+      "median_earn": "0.0874588",
+      "avg_return_per_trade": "0.0689961"
+    },
+    "SOL-USDT": {
+      "best_limit": "70",
+      "best_duration": "1D",
+      "max_returns": "5.46471",
+      "trade_count": "10",
+      "trades_per_month": "0.142248",
+      "win_rate": "0.8",
+      "median_earn": "0.185105",
+      "avg_return_per_trade": "0.148999"
+    },
+    "SONIC-USDT": {
+      "best_limit": "86",
+      "best_duration": "1D",
+      "max_returns": "1.46669",
+      "trade_count": "13",
+      "trades_per_month": "0.707804",
+      "win_rate": "0.692308",
+      "median_earn": "0.0299007",
+      "avg_return_per_trade": "0.00915321"
+    },
+    "SSV-USDT": {
+      "best_limit": "86",
+      "best_duration": "1D",
+      "max_returns": "4.02239",
+      "trade_count": "33",
+      "trades_per_month": "0.806846",
+      "win_rate": "0.636364",
+      "median_earn": "0.0430802",
+      "avg_return_per_trade": "0.0226968"
+    },
+    "STETH-USDT": {
+      "best_limit": "88",
+      "best_duration": "1D",
+      "max_returns": "2.33265",
+      "trade_count": "13",
+      "trades_per_month": "0.358456",
+      "win_rate": "0.923077",
+      "median_earn": "0.0673237",
+      "avg_return_per_trade": "0.0575369"
+    },
+    "SUI-USDT": {
+      "best_limit": "80",
+      "best_duration": "1D",
+      "max_returns": "4.78603",
+      "trade_count": "10",
+      "trades_per_month": "0.257732",
+      "win_rate": "1",
+      "median_earn": "0.169493",
+      "avg_return_per_trade": "0.140149"
+    },
+    "SUSHI-USDT": {
+      "best_limit": "63",
+      "best_duration": "1D",
+      "max_returns": "12.3759",
+      "trade_count": "10",
+      "trades_per_month": "0.140318",
+      "win_rate": "0.8",
+      "median_earn": "0.286049",
+      "avg_return_per_trade": "0.240289"
+    },
+    "SWFTC-USDT": {
+      "best_limit": "72",
+      "best_duration": "1D",
+      "max_returns": "5.10078",
+      "trade_count": "14",
+      "trades_per_month": "0.135397",
+      "win_rate": "0.785714",
+      "median_earn": "0.123429",
+      "avg_return_per_trade": "0.0921337"
+    },
+    "T-USDT": {
+      "best_limit": "81",
+      "best_duration": "1D",
+      "max_returns": "2.52936",
+      "trade_count": "14",
+      "trades_per_month": "0.268886",
+      "win_rate": "0.642857",
+      "median_earn": "0.0685295",
+      "avg_return_per_trade": "0.0400698"
+    },
+    "TIA-USDT": {
+      "best_limit": "81",
+      "best_duration": "1D",
+      "max_returns": "4.76622",
+      "trade_count": "11",
+      "trades_per_month": "0.335707",
+      "win_rate": "0.909091",
+      "median_earn": "0.15253",
+      "avg_return_per_trade": "0.109596"
+    },
+    "TRB-USDT": {
+      "best_limit": "64",
+      "best_duration": "1D",
+      "max_returns": "7.33549",
+      "trade_count": "10",
+      "trades_per_month": "0.140056",
+      "win_rate": "0.9",
+      "median_earn": "0.220514",
+      "avg_return_per_trade": "0.179278"
+    },
+    "TRX-USDT": {
+      "best_limit": "74",
+      "best_duration": "1D",
+      "max_returns": "8.94853",
+      "trade_count": "13",
+      "trades_per_month": "0.125725",
+      "win_rate": "0.846154",
+      "median_earn": "0.183618",
+      "avg_return_per_trade": "0.14876"
+    },
+    "TURBO-USDT": {
+      "best_limit": "72",
+      "best_duration": "1D",
+      "max_returns": "8.75503",
+      "trade_count": "10",
+      "trades_per_month": "0.262009",
+      "win_rate": "1",
+      "median_earn": "0.242298",
+      "avg_return_per_trade": "0.202859"
+    },
+    "UMA-USDT": {
+      "best_limit": "72",
+      "best_duration": "1D",
+      "max_returns": "3.41422",
+      "trade_count": "11",
+      "trades_per_month": "0.154278",
+      "win_rate": "0.818182",
+      "median_earn": "0.118101",
+      "avg_return_per_trade": "0.0970958"
+    },
+    "UNI-USDT": {
+      "best_limit": "75",
+      "best_duration": "1D",
+      "max_returns": "4.3934",
+      "trade_count": "12",
+      "trades_per_month": "0.169651",
+      "win_rate": "0.916667",
+      "median_earn": "0.131271",
+      "avg_return_per_trade": "0.0945932"
+    },
+    "VELO-USDT": {
+      "best_limit": "71",
+      "best_duration": "1D",
+      "max_returns": "5.28778",
+      "trade_count": "10",
+      "trades_per_month": "0.153846",
+      "win_rate": "0.8",
+      "median_earn": "0.181211",
+      "avg_return_per_trade": "0.118775"
+    },
+    "VELODROME-USDT": {
+      "best_limit": "79",
+      "best_duration": "1D",
+      "max_returns": "2.6773",
+      "trade_count": "11",
+      "trades_per_month": "0.272502",
+      "win_rate": "0.909091",
+      "median_earn": "0.0936581",
+      "avg_return_per_trade": "0.0689474"
+    },
+    "WAXP-USDT": {
+      "best_limit": "79",
+      "best_duration": "1D",
+      "max_returns": "1.98858",
+      "trade_count": "10",
+      "trades_per_month": "0.186683",
+      "win_rate": "0.7",
+      "median_earn": "0.0711598",
+      "avg_return_per_trade": "0.0455426"
+    },
+    "WLD-USDT": {
+      "best_limit": "78",
+      "best_duration": "1D",
+      "max_returns": "3.21873",
+      "trade_count": "11",
+      "trades_per_month": "0.304991",
+      "win_rate": "0.909091",
+      "median_earn": "0.112124",
+      "avg_return_per_trade": "0.0918926"
+    },
+    "WOO-USDT": {
+      "best_limit": "87",
+      "best_duration": "1D",
+      "max_returns": "6.60611",
+      "trade_count": "62",
+      "trades_per_month": "1.11511",
+      "win_rate": "0.66129",
+      "median_earn": "0.0309199",
+      "avg_return_per_trade": "0.0202679"
+    },
+    "XLM-USDT": {
+      "best_limit": "69",
+      "best_duration": "1D",
+      "max_returns": "8.4747",
+      "trade_count": "11",
+      "trades_per_month": "0.106383",
+      "win_rate": "0.909091",
+      "median_earn": "0.214437",
+      "avg_return_per_trade": "0.189609"
+    },
+    "XRP-USDT": {
+      "best_limit": "66",
+      "best_duration": "1D",
+      "max_returns": "7.35194",
+      "trade_count": "10",
+      "trades_per_month": "0.0967118",
+      "win_rate": "0.8",
+      "median_earn": "0.220788",
+      "avg_return_per_trade": "0.180204"
+    },
+    "YFI-USDT": {
+      "best_limit": "77",
+      "best_duration": "1D",
+      "max_returns": "8.83054",
+      "trade_count": "22",
+      "trades_per_month": "0.308123",
+      "win_rate": "0.818182",
+      "median_earn": "0.104077",
+      "avg_return_per_trade": "0.0848692"
+    },
+    "YGG-USDT": {
+      "best_limit": "71",
+      "best_duration": "1D",
+      "max_returns": "6.20147",
+      "trade_count": "11",
+      "trades_per_month": "0.182522",
+      "win_rate": "0.909091",
+      "median_earn": "0.180443",
+      "avg_return_per_trade": "0.134019"
+    },
+    "ZBCN-USDT": {
+      "best_limit": "87",
+      "best_duration": "1D",
+      "max_returns": "6.57083",
+      "trade_count": "37",
+      "trades_per_month": "1.36029",
+      "win_rate": "0.702703",
+      "median_earn": "0.0521989",
+      "avg_return_per_trade": "0.0383192"
+    },
+    "ZETA-USDT": {
+      "best_limit": "81",
+      "best_duration": "1D",
+      "max_returns": "2.54044",
+      "trade_count": "12",
+      "trades_per_month": "0.40404",
+      "win_rate": "0.75",
+      "median_earn": "0.0807927",
+      "avg_return_per_trade": "0.0551181"
+    },
+    "ZIL-USDT": {
+      "best_limit": "69",
+      "best_duration": "1D",
+      "max_returns": "4.78673",
+      "trade_count": "11",
+      "trades_per_month": "0.11059",
+      "win_rate": "0.909091",
+      "median_earn": "0.15298",
+      "avg_return_per_trade": "0.12499"
+    },
+    "ZRX-USDT": {
+      "best_limit": "75",
+      "best_duration": "1D",
+      "max_returns": "21.5275",
+      "trade_count": "26",
+      "trades_per_month": "0.251451",
+      "win_rate": "0.769231",
+      "median_earn": "0.125302",
+      "avg_return_per_trade": "0.106667"
+    }
+  }
+}

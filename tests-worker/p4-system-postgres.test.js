@@ -25,7 +25,7 @@ test("P4 system harness persists a real PostgreSQL lifecycle across restart", { 
   const stop = async () => { await client?.end(); client = null; if (running) { await run("pg_ctl", ["-D", dir, "-m", "immediate", "-w", "stop"]); running = false; } };
   try {
     await run("initdb", ["-D", dir, "--no-locale", "-E", "UTF8", "-A", "trust"]); await start();
-    for (const name of ["0001_p1_core.sql", "0002_p3_exit.sql", "0003_p4_import.sql", "0004_hybrid_execution.sql", "0005_execution_route.sql", "0006_decision_observability.sql"]) await client.query(await readFile(new URL(`../migrations/postgres/${name}`, import.meta.url), "utf8"));
+    for (const name of ["0001_p1_core.sql", "0002_p3_exit.sql", "0003_p4_import.sql", "0004_hybrid_execution.sql", "0005_execution_route.sql", "0006_decision_observability.sql", "0007_sell_force_hold.sql"]) await client.query(await readFile(new URL(`../migrations/postgres/${name}`, import.meta.url), "utf8"));
     const harness = new P4SystemHarness({ postgres: { stop, start } });
     await client.query("INSERT INTO daily_limit_cache(inst_id,strategy_day,status,input_hash) VALUES('P4-USDT','2026-01-01','READY','p4')");
     const orders = new OrderRepository(); await transaction(client, (tx) => orders.reserveBuy(tx, buy("p4-restart-attempt"), { managedExposure: "0", maxExposure: "100" }));
@@ -49,7 +49,7 @@ test("P4 full runtime uses one PostgreSQL, fake OKX WS/REST, five-order Coordina
   };
   try {
     await run("initdb", ["-D", dir, "--no-locale", "-E", "UTF8", "-A", "trust"]); await start();
-    for (const name of ["0001_p1_core.sql", "0002_p3_exit.sql", "0003_p4_import.sql", "0004_hybrid_execution.sql", "0005_execution_route.sql", "0006_decision_observability.sql"]) await client.query(await readFile(new URL(`../migrations/postgres/${name}`, import.meta.url), "utf8"));
+    for (const name of ["0001_p1_core.sql", "0002_p3_exit.sql", "0003_p4_import.sql", "0004_hybrid_execution.sql", "0005_execution_route.sql", "0006_decision_observability.sql", "0007_sell_force_hold.sql"]) await client.query(await readFile(new URL(`../migrations/postgres/${name}`, import.meta.url), "utf8"));
     const ids = Array.from({ length: 50 }, (_, index) => `Q${index}-USDT`); const owner = new PostgresOwnerGuard(client, "p4-real-runtime");
     const day = new Date(Date.now() + 8 * 3_600_000).toISOString().slice(0, 10); const dayStart = Date.parse(`${day}T00:00:00+08:00`); const priorStart = dayStart - 86_400_000; const closedTs = expectedClosedCandleTs(Date.now());
     let submitted = []; const rest = {

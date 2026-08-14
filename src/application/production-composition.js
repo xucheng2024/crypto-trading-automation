@@ -75,14 +75,16 @@ export async function composeProductionRuntime(env, injected = {}) {
   const ownerGuard = injected.ownerGuard ?? new PostgresOwnerGuard(ownerClient);
   const market = injected.market ?? new MarketProjection({ clock: runtime.clock }); market.quoteFreshMs ??= config.quote_max_age_ms; const account = injected.account ?? new AccountCapitalSnapshot({ clock: runtime.clock });
   const orders = injected.orders ?? new OrderRepository(); const state = injected.state ?? new TradingStateRepository();
-  const transaction = injected.transaction ?? asTransaction(pool); const profile = OKX_PROFILES[config.entityProfile]; const rest = injected.rest ?? new OkxRestClient({ credentials, profile, clock: runtime.clock, timeoutMs: config.http_timeout_ms, requestGapMs: injected.requestGapMs ?? 60 });
+  const slo = injected.slo ?? new VirtualSloMetrics(runtime.clock);
+  const transaction = injected.transaction ?? asTransaction(pool); const profile = OKX_PROFILES[config.entityProfile]; const rest = injected.rest ?? new OkxRestClient({ credentials, profile, clock: runtime.clock, timeoutMs: config.http_timeout_ms, requestGapMs: injected.requestGapMs ?? 60, slo });
   const instIds = injected.instIds ?? config.instrumentIds;
   const executionRoutes = injected.executionRoutes ?? new Map();
   const quoteCurrencies = injected.quoteCurrencies ?? new Map();
-  const slo = injected.slo ?? new VirtualSloMetrics(runtime.clock);
-  let buyPlanner; let engine;
+  let buyPlanner; let engine; let sellService;
+  const delistingInstIds = new Set();
   const coordinator = injected.coordinator ?? new OrderCoordinator({ transaction, orders, state, transport: rest, ownerGuard, readyGate, market, account, mode: () => config.tradingMode, executionRoute: (instId) => executionRoutes.get(instId), tradeQuoteCurrency: (instId) => quoteCurrencies.get(instId), isBuyAllowed: (instId) => !buyPlanner?.protected?.has(instId), clock: runtime.clock, config: injected.orderConfig ?? { accountId: config.accountId, strategyTag: config.strategyTag, orderVersion: config.orderVersion, accountFreshMs: config.account_max_age_ms, quoteFreshMs: config.quote_max_age_ms, orderExpiryMs: config.order_expiry_ms }, telemetry, slo,
     onBuySettled: async () => { if (!buyPlanner) return; const ledger = await buyPlanner.reloadLedger(); rebuildSellWatches(ledger); },
+    onExitDust: ({ row }) => sellService?.applyDust(row),
   });
   const refreshCandle = async (instId) => {
     const candle = normalizeConfirmed3mCandle(instId, await rest.candles(instId, { bar: "3m", limit: 3 }));
@@ -93,20 +95,20 @@ export async function composeProductionRuntime(env, injected = {}) {
     if (!clockSyncPromise) clockSyncPromise = Promise.resolve(rest.syncServerTime()).finally(() => { clockSyncPromise = null; });
     return clockSyncPromise;
   };
-  const sellService = injected.sellService ?? new SellService({ state, transaction, coordinator, market, clock: runtime.clock, exchangeNowMs: () => runtime.clock.nowMs() + Number(rest.clockSkewMs ?? 0), clockFresh: () => rest.clockFresh(CLOCK_SYNC_STALE_AFTER_MS), triggerClockSync: clockSync, refreshCandle, telemetry });
+  sellService = injected.sellService ?? new SellService({ state, transaction, coordinator, market, clock: runtime.clock, exchangeNowMs: () => runtime.clock.nowMs() + Number(rest.clockSkewMs ?? 0), clockFresh: () => rest.clockFresh(CLOCK_SYNC_STALE_AFTER_MS), triggerClockSync: clockSync, isDelisting: (instId) => delistingInstIds.has(instId), refreshCandle, telemetry });
   function rebuildSellWatches(ledger, attempts = []) {
     sellService.rebuild(ledger);
     const active = new Set(attempts.filter((attempt) => ["SELL", "DELIST"].includes(attempt.intent) && !["NOT_CREATED", "SETTLED"].includes(attempt.state)).map((attempt) => attempt.source_buy_trade_id ?? attempt.sourceBuyTradeId));
     engine?.enqueueSellEvents?.([...(sellService.resumeTriggered?.(active) ?? []), ...(sellService.resumeForceHold?.(active) ?? [])]);
   }
   const delist = injected.delist ?? new DelistOrchestrator({ transaction, state, orders, coordinator, accountId: config.accountId, market, telemetry }).bind();
-  const protection = injected.protection ?? new InstrumentProtectionService({ state, transaction, telemetry, onProtect: (p) => buyPlanner?.protected?.add(p.instId), onExit: (p) => delist.drive(p.instId) });
+  const protection = injected.protection ?? new InstrumentProtectionService({ state, transaction, telemetry, onProtect: (p) => { delistingInstIds.add(p.instId); buyPlanner?.protected?.add(p.instId); }, onExit: (p) => delist.drive(p.instId) });
   const holdHoursByInst = Object.fromEntries(Object.entries(config.strategyConfig.rows).map(([instId, row]) => [instId, row.holdHours]));
   const maxHoldHoursByInst = Object.fromEntries(Object.entries(config.strategyConfig.rows).map(([instId, row]) => [instId, row.maxHoldHours]));
   buyPlanner = injected.buyPlanner ?? new BuySignalPlanner({ accountId: config.accountId, instIds, strategyConfig: config.strategyConfig, market, account, coordinator, state, orders, transaction, rest, readyGate, clock: runtime.clock, quoteFreshMs: config.quote_max_age_ms, telemetry, slo });
   const reconciliation = injected.reconciliation ?? new ReconciliationService({ orders, state, transport: rest, ownerGuard, readyGate, clock: runtime.clock, safetyWaitMs: config.owner_safety_wait_ms, transaction, telemetry,
     ownership: { accountId: config.accountId, managedAfter: config.managedFillStartMs, enabledInstIds: instIds, systemClOrdIdPrefix: config.orderVersion, strategyTag: config.strategyTag, holdHoursByInst, maxHoldHoursByInst, configHash: config.strategyConfig.contentHash },
-    onAccountBuy: (instId) => engine?.protectInstrument(instId), onRecovery: ({ ledger, protection: rows, daily, buyAttempts, attempts }) => { rebuildSellWatches(ledger, attempts); buyPlanner.restore?.({ ledger, protection: rows, daily, buyAttempts }); return delist.recover(rows); },
+    onAccountBuy: (instId) => engine?.protectInstrument(instId), onRecovery: ({ ledger, protection: rows, daily, buyAttempts, attempts }) => { delistingInstIds.clear(); for (const row of rows) if (["EXITING", "DELIST_DUST"].includes(row.state)) delistingInstIds.add(row.inst_id ?? row.instId); rebuildSellWatches(ledger, attempts); buyPlanner.restore?.({ ledger, protection: rows, daily, buyAttempts }); return delist.recover(rows); },
     onTerminal: async ({ attempt, order, fills, exchangeState, accFillSz }) => {
       const result = attempt.intent === "BUY" ? await coordinator.settleBuy({ attempt, fills, exchangeState, accFillSz }) : await coordinator.settleExit({ attempt, fills, exchangeState, accFillSz });
       if (result?.settled) { const ledger = await buyPlanner.reloadLedger?.(); if (ledger) rebuildSellWatches(ledger); }
@@ -154,7 +156,7 @@ export async function composeProductionRuntime(env, injected = {}) {
   };
   const baseline = injected.baseline ?? (() => runRestBaseline({ rest, instIds, market, account, readyGate, clock: runtime.clock, executionRoutes, quoteCurrencies }));
   const recurring = injected.recurring ?? new EngineRecurringWork({ timers: injected.timers ?? globalThis, telemetry,
-    announcementMs: injected.announcementMs ?? 60_000, reconcileMs: injected.reconcileMs ?? 300_000, routeMs: injected.routeMs ?? 3_600_000, weeklyMs: injected.weeklyMs ?? 7 * 86_400_000, clockSyncMs: injected.clockSyncMs ?? 300_000, candleReviewMs: injected.candleReviewMs ?? 15_000,
+    announcementMs: injected.announcementMs ?? 60_000, reconcileMs: injected.reconcileMs ?? 300_000, routeMs: injected.routeMs ?? 3_600_000, weeklyMs: injected.weeklyMs ?? 7 * 86_400_000, clockSyncMs: injected.clockSyncMs ?? 300_000, candleReviewMs: injected.candleReviewMs ?? 15_000, dustReviewMs: injected.dustReviewMs ?? 15_000,
     announcements: () => protection.scanAnnouncements((page) => rest.announcements(page), instIds.map((instId) => market.instrument(instId)).filter(Boolean)),
     reconcile, refreshRoutes: async () => {
       try {
@@ -165,6 +167,11 @@ export async function composeProductionRuntime(env, injected = {}) {
     }, weeklyReconcile: injected.weeklyReconcile ?? reconcile, clockSync, reviewCandles: () => {
       sellService.reviewCandleFreshness();
       engine.enqueueSellEvents(sellService.reviewForceHold());
+    },
+    reviewDust: async () => {
+      await sellService.reviewDust();
+      const rows = await transaction((tx) => state.listProtection(tx));
+      for (const row of rows) if (["EXITING", "DELIST_DUST"].includes(row.state)) await delist.drive(row.inst_id ?? row.instId);
     },
     reportMetrics: () => { const snapshot = engine.snapshot(); telemetry({ type: "metric_snapshot", reason: "RUNTIME_METRICS", ...slo.snapshot({ reset: true }), ready: snapshot.ready.ready ? 1 : 0, queue_depth_current: snapshot.queue, pending_buy_current: coordinator.pending?.BUY?.size ?? 0, active_buy_current: snapshot.activeBuy }); },
   });

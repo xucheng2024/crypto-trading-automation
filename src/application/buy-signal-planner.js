@@ -155,7 +155,10 @@ export class BuySignalPlanner {
     if (reason) { this.emitDecision(instId, { ...base, reason }); return { queued: false, reason }; }
     const signal = buySignal({ last: quote.last, askPx: quote.askPx, limitPrice: daily.dailyLimitPrice, previousClosedHigh: candle.high });
     if (!signal.eligible) { this.emitDecision(instId, { ...base, reason: signal.reason, breakoutPrice: signal.breakoutPrice }); return { queued: false, reason: signal.reason }; }
-    const cycle = await this.transaction((tx) => this.orders.listBuyCycle(tx, this.accountId, instId, day));
+    const cycleStarted = this.clock.nowMs();
+    let cycle;
+    try { cycle = await this.transaction((tx) => this.orders.listBuyCycle(tx, this.accountId, instId, day)); }
+    finally { this.slo?.record("buy_cycle_tx", cycleStarted); }
     if (this.hasOpenManagedBuy(instId) && cycle.attempts.length === 0) { this.emitDecision(instId, { ...base, reason: "STRATEGY_POSITION_EXISTS" }); return { queued: false, reason: "STRATEGY_POSITION_EXISTS" }; }
     const previous = cycle.attempts.at(-1); const active = cycle.attempts.find((row) => ["PREPARED", "SUBMITTED", "UNKNOWN"].includes(row.state));
     if (active) { this.emitDecision(instId, { ...base, reason: "ACTIVE_BUY_ATTEMPT", clOrdId: active.cl_ord_id }); return { queued: false, reason: "ACTIVE_BUY_ATTEMPT" }; }

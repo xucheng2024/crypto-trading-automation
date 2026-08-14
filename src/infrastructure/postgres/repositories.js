@@ -101,7 +101,7 @@ export class TradingStateRepository {
   async markDust(tx, { accountId, instId, tradeId, version }) {
     return tx.query(`UPDATE filled_orders SET sell_state='DUST_PENDING',version=version+1
       WHERE account_id=$1 AND inst_id=$2 AND trade_id=$3 AND side='BUY' AND version=$4
-      AND sell_state='SELL_TRIGGERED'`, [accountId, instId, tradeId, version]);
+      AND sell_state IN ('WAITING','SELL_TRIGGERED') RETURNING *`, [accountId, instId, tradeId, version]);
   }
 
   async applySystemSell(tx, { accountId, sourceBuyTradeId, fillSize }) {

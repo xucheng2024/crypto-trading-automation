@@ -84,7 +84,7 @@ export function classifyManagedFill(fill, order, { managedAfter, enabledInstIds,
 export const classifyCrossFill = classifyManagedFill;
 
 export class OkxRestClient {
-  constructor({ credentials = {}, profile = OKX_PROFILES.GLOBAL, fetcher = fetch, clock = { nowMs: () => Date.now() }, sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)), requestGapMs = 0, timeoutMs = 15_000 } = {}) {
+  constructor({ credentials = {}, profile = OKX_PROFILES.GLOBAL, fetcher = fetch, clock = { nowMs: () => Date.now() }, sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)), requestGapMs = 0, timeoutMs = 15_000, slo = null } = {}) {
     if (!profile?.restUrl) throw new TypeError("OKX entity profile is required");
     this.credentials = credentials;
     this.profile = profile;
@@ -93,6 +93,7 @@ export class OkxRestClient {
     this.sleep = sleep;
     this.requestGapMs = Math.max(0, requestGapMs);
     this.timeoutMs = timeoutMs;
+    this.slo = slo;
     this.nextRequestAt = 0;
     this.clockSkewMs = 0;
     this.clockSyncedAt = 0;
@@ -105,15 +106,24 @@ export class OkxRestClient {
     return base64(await crypto.subtle.sign("HMAC", key, encoder.encode(text)));
   }
 
-  async waitForSlot() {
+  async waitForSlot(path = "") {
     const now = this.clock.nowMs();
     const delay = Math.max(0, this.nextRequestAt - now);
     this.nextRequestAt = Math.max(now, this.nextRequestAt) + this.requestGapMs;
+    const started = this.clock.nowMs();
     if (delay) await this.sleep(delay);
+    const waited = Math.max(0, this.clock.nowMs() - started);
+    this.slo?.observe("rest_throttle_delay", delay);
+    this.slo?.observe("rest_throttle_wait", waited);
+    if (path === "/api/v5/account/max-avail-size") {
+      this.slo?.observe("max_avail_throttle_delay", delay);
+      this.slo?.observe("max_avail_throttle_wait", waited);
+    }
+    return { delay, waited };
   }
 
   async syncServerTime() {
-    await this.waitForSlot();
+    await this.waitForSlot("/api/v5/public/time");
     const before = this.clock.nowMs();
     const data = assertOkxResponse(await this.request("GET", "/api/v5/public/time", { authenticated: false, retryReads: 0, skipWait: true }));
     const after = this.clock.nowMs();
@@ -134,7 +144,7 @@ export class OkxRestClient {
     let lastError;
     for (let attempt = 0; attempt <= retryReads; attempt += 1) {
       try {
-        if (!skipWait || attempt > 0) await this.waitForSlot();
+        if (!skipWait || attempt > 0) await this.waitForSlot(path);
         const headers = { Accept: "application/json", "Content-Type": "application/json" };
         if (authenticated) {
           const timestamp = new Date(this.clock.nowMs() + this.clockSkewMs).toISOString();

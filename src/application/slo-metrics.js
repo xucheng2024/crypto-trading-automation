@@ -1,8 +1,10 @@
-export function percentile(samples, p) {
-  const values = samples.filter(Number.isFinite).sort((a, b) => a - b);
+function percentileFromSorted(values, p) {
   if (!values.length) return null;
   const index = Math.min(values.length - 1, Math.ceil(values.length * p) - 1);
   return values[index];
+}
+export function percentile(samples, p) {
+  return percentileFromSorted(samples.filter(Number.isFinite).sort((a, b) => a - b), p);
 }
 export class VirtualSloMetrics {
   constructor(clock = { nowMs: () => 0 }) { this.clock = clock; this.samples = new Map(); this.counters = new Map(); }
@@ -13,8 +15,8 @@ export class VirtualSloMetrics {
   snapshot({ reset = false } = {}) {
     const result = {};
     for (const [name, values] of this.samples) {
-      const finite = values.filter(Number.isFinite); if (!finite.length) continue;
-      result[`${name}_count`] = finite.length; result[`${name}_p50_ms`] = percentile(finite, .5); result[`${name}_p95_ms`] = percentile(finite, .95); result[`${name}_p99_ms`] = percentile(finite, .99); result[`${name}_max_ms`] = Math.max(...finite);
+      const finite = values.filter(Number.isFinite).sort((a, b) => a - b); if (!finite.length) continue;
+      result[`${name}_count`] = finite.length; result[`${name}_p50_ms`] = percentileFromSorted(finite, .5); result[`${name}_p95_ms`] = percentileFromSorted(finite, .95); result[`${name}_p99_ms`] = percentileFromSorted(finite, .99); result[`${name}_max_ms`] = finite.at(-1);
     }
     for (const [name, value] of this.counters) result[name] = value;
     if (reset) { this.samples.clear(); this.counters.clear(); }

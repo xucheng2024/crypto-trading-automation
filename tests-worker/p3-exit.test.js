@@ -43,6 +43,31 @@ test("P3 exits submit immediate five-base batches with DELIST priority and no sh
   assert.equal((await coordinator.drainOnce()).reason, "NO_ELIGIBLE");
 });
 
+test("P3 final exit guard bumps generation instead of permanently colliding with NOT_CREATED", async () => {
+  const now = clock(); const market = new MarketProjection({ clock: now }); const account = new AccountCapitalSnapshot({ clock: now }); account.update({ ts: 1, totalEq: "100", adjEq: "100" });
+  market.updateInstrument({ instId: "BTC-USDT", ts: 1, state: "live", tickSz: "0.1", lotSz: "0.1", minSz: "0.1", base: "BTC" }); market.updateTicker({ instId: "BTC-USDT", ts: 1, last: "10", bidPx: "10" });
+  const ready = gate(); const attempts = []; let first = true;
+  const coordinator = new OrderCoordinator({ transaction: async (fn) => fn({}), market, account, readyGate: ready, ownerGuard: { isHeld: () => true }, mode: () => "EXIT_ONLY", clock: now, config,
+    orders: { reserveExit: async (_tx, row) => { attempts.push(row); if (first) { first = false; ready.set("public", false); } return { authorized: true }; }, markNotCreated: async () => {}, markSubmitted: async () => {}, markUnknown: async () => {} },
+    transport: { maxAvailSize: async () => [{ instId: "BTC-USDT", availSell: "1" }], submitBatchOrders: async (rows) => rows.map((row) => ({ clOrdId: row.clOrdId, status: "SUBMITTED" })) },
+  });
+  coordinator.enqueue({ intent: "SELL", instId: "BTC-USDT", baseCcy: "BTC", sourceBuyTradeId: "guard-retry", remainingSize: "1", fillVersion: 1, sellTime: 1 });
+  assert.equal((await coordinator.drainOnce()).reason, "FINAL_GUARD"); assert.equal(coordinator.pending.SELL.get("BTC:guard-retry").generation, 1);
+  ready.set("public", true); assert.equal((await coordinator.drainOnce()).submitted, true); assert.deepEqual(attempts.map((row) => row.generation), [0, 1]);
+});
+
+test("P3 dust transition drops the hot pending intent and synchronizes the watch", async () => {
+  const now = clock(); const market = new MarketProjection({ clock: now }); const account = new AccountCapitalSnapshot({ clock: now }); account.update({ ts: 1, totalEq: "100", adjEq: "100" });
+  market.updateInstrument({ instId: "BTC-USDT", ts: 1, state: "live", tickSz: "0.1", lotSz: "0.1", minSz: "0.1", base: "BTC" }); market.updateTicker({ instId: "BTC-USDT", ts: 1, last: "1", bidPx: "1" });
+  const row = { account_id: "p3", inst_id: "BTC-USDT", base_ccy: "BTC", trade_id: "dust-sync", side: "BUY", fill_size: "0.05", disposed_size: "0", sell_time: 1, sell_state: "DUST_PENDING", version: 2 }; let availCalls = 0; let applied;
+  const coordinator = new OrderCoordinator({ transaction: async (fn) => fn({}), market, account, readyGate: gate(), ownerGuard: { isHeld: () => true }, mode: () => "EXIT_ONLY", clock: now, config, onExitDust: ({ row: value }) => { applied = value; },
+    state: { markDust: async () => ({ rowCount: 1, rows: [row] }) }, orders: {}, transport: { maxAvailSize: async () => { availCalls += 1; return [{ instId: "BTC-USDT", availSell: "0.05" }]; } },
+  });
+  coordinator.enqueue({ intent: "SELL", instId: "BTC-USDT", baseCcy: "BTC", sourceBuyTradeId: "dust-sync", remainingSize: "0.05", fillVersion: 1, sellTime: 1, bidPx: "1" });
+  assert.equal((await coordinator.drainOnce()).reason, "NO_ELIGIBLE"); assert.equal(coordinator.pending.SELL.size, 0); assert.equal(applied, row);
+  await coordinator.drainOnce(); assert.equal(availCalls, 1);
+});
+
 test("P3 engine latches breach in the callback and persists only from its critical consumer", async () => {
   const now = clock(); const market = new MarketProjection({ clock: now });
   market.updateInstrument({ instId: "BTC-USDT", ts: 1, state: "live", tickSz: "0.1", lotSz: "0.1", minSz: "0.1", base: "BTC" });

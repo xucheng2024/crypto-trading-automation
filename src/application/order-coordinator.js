@@ -14,8 +14,8 @@ function add(left, right) {
 
 /** The only component allowed to invoke an injected mutation transport. */
 export class OrderCoordinator {
-  constructor({ transaction, orders, state, transport, ownerGuard, readyGate, market, account, mode = () => "OFF", executionRoute = () => "margin", tradeQuoteCurrency = () => null, isBuyAllowed = () => true, clock = { nowMs: () => Date.now() }, config, telemetry = () => {}, onBuySettled = null, onExitSettled = null, slo = null }) {
-    Object.assign(this, { transaction, orders, state, transport, ownerGuard, readyGate, market, account, mode, executionRoute, tradeQuoteCurrency, isBuyAllowed, clock, config, telemetry, onBuySettled, onExitSettled, slo });
+  constructor({ transaction, orders, state, transport, ownerGuard, readyGate, market, account, mode = () => "OFF", executionRoute = () => "margin", tradeQuoteCurrency = () => null, isBuyAllowed = () => true, clock = { nowMs: () => Date.now() }, config, telemetry = () => {}, onBuySettled = null, onExitSettled = null, onExitDust = null, slo = null }) {
+    Object.assign(this, { transaction, orders, state, transport, ownerGuard, readyGate, market, account, mode, executionRoute, tradeQuoteCurrency, isBuyAllowed, clock, config, telemetry, onBuySettled, onExitSettled, onExitDust, slo });
     this.pending = { BUY: new Map(), SELL: new Map(), DELIST: new Map() }; this.submitting = false; this.accepting = true; this.isolatedBases = new Set();
   }
   enqueue(intent) { if (!this.accepting) return false; const group = this.pending[intent.intent]; if (!group) throw new Error("unknown intent"); const key = intent.intent === "BUY" ? intent.instId : `${intent.baseCcy}:${intent.sourceBuyTradeId}`; group.set(key, intent); return true; }
@@ -30,7 +30,7 @@ export class OrderCoordinator {
     const kind = ["DELIST", "SELL", "BUY"].find((name) => this.pending[name].size);
     if (!kind) return { submitted: false, reason: "EMPTY" };
     if (kind !== "BUY") {
-      const candidates = [...this.pending[kind].values()]
+      const candidates = [...this.pending[kind].values()].filter((intent) => !Number.isFinite(intent.notBefore) || intent.notBefore <= this.clock.nowMs())
         .sort((a, b) => a.baseCcy.localeCompare(b.baseCcy) || a.sellTime - b.sellTime || String(a.sourceBuyTradeId).localeCompare(String(b.sourceBuyTradeId)))
         .filter((item, index, rows) => index === 0 || item.baseCcy !== rows[index - 1].baseCcy).slice(0, 5);
       const prepared = await this.prepareExits(kind, candidates);
@@ -73,6 +73,7 @@ export class OrderCoordinator {
   }
   async submitBuys(candidates) {
     const started = this.clock.nowMs();
+    const reservationStarted = this.clock.nowMs();
     let prepared;
     try {
       prepared = await this.transaction(async (tx) => {
@@ -106,7 +107,10 @@ export class OrderCoordinator {
           decisionTriggerPrice: quote.last, decisionReferencePrice: guard.signal.breakoutPrice, decisionReason: "BUY_BREAKOUT_CONFIRMED",
         };
         try {
-          const reserve = await this.orders.reserveBuy(tx, attempt, { managedExposure: intent.managedExposure ?? "0", maxExposure: multiplyDecimal(BUY_ADMISSION_LEVERAGE, attempt.admissionEquity) });
+          const reserveStarted = this.clock.nowMs();
+          let reserve;
+          try { reserve = await this.orders.reserveBuy(tx, attempt, { managedExposure: intent.managedExposure ?? "0", maxExposure: multiplyDecimal(BUY_ADMISSION_LEVERAGE, attempt.admissionEquity) }); }
+          finally { this.slo?.record("buy_reserve_db", reserveStarted); }
           if (reserve.authorized) rows.push({ intent, attempt, payload });
         } catch (error) {
           // A lost COMMIT acknowledgement is resolved by the deterministic business key.
@@ -130,7 +134,7 @@ export class OrderCoordinator {
       }
       this._emit({ type: "buy_replay", reason: "COMMIT_ACK_LOST", clOrdId: error.clOrdId, state: existing.state });
       return { submitted: false, reason: "COMMIT_ACK_LOST" };
-    }
+    } finally { this.slo?.record("buy_reservation_tx", reservationStarted); }
     if (!prepared.length) return { submitted: false, reason: "RESERVATION_DENIED" };
     for (const row of prepared) this._emit({ type: "order_lifecycle", reason: "BUY_PREPARED", intent: "BUY", instId: row.intent.instId, clOrdId: row.attempt.clOrdId, generation: row.intent.generation, limitPrice: row.attempt.executionLimitPrice, plannedSize: row.attempt.plannedSize, triggerPrice: row.attempt.decisionTriggerPrice, referencePrice: row.attempt.decisionReferencePrice });
     const safe = [];
@@ -165,7 +169,10 @@ export class OrderCoordinator {
     for (const intent of candidates) {
       const guard = this._exitGuard(intent, kind);
       if (guard.allowed) eligible.push(intent);
-      else this._emit({ type: "exit_deferred", intent: kind, reason: guard.reason, baseCcy: intent.baseCcy, sourceBuyTradeId: intent.sourceBuyTradeId });
+      else {
+        this._deferExit(intent, kind, guard.reason);
+        this._emit({ type: "exit_deferred", intent: kind, reason: guard.reason, baseCcy: intent.baseCcy, sourceBuyTradeId: intent.sourceBuyTradeId });
+      }
     }
     if (!eligible.length) return [];
     let available;
@@ -184,8 +191,7 @@ export class OrderCoordinator {
       const raw = min(intent.remainingSize, availableBase ?? reduceOnly, reduceOnly);
       const size = roundToStep(raw, instrument.lotSz, "down");
       if (compareDecimal(size, instrument.minSz) < 0 || (intent.bidPx && compareDecimal(multiplyDecimal(size, intent.bidPx), "0.1") < 0)) {
-        await this.transaction((tx) => this.state.markDust?.(tx, { ...intent, version: intent.fillVersion }));
-        this._emit({ type: "exit_deferred", intent: kind, reason: "DUST", sourceBuyTradeId: intent.sourceBuyTradeId });
+        await this._resolveDust(intent, kind);
         continue;
       }
       if (compareDecimal(size, "0") <= 0) { this._emit({ type: "exit_deferred", intent: kind, reason: "BALANCE_SHORTFALL", sourceBuyTradeId: intent.sourceBuyTradeId }); continue; }
@@ -193,13 +199,61 @@ export class OrderCoordinator {
     }
     return planned;
   }
+  // Retries a stalled exit under a fresh generation. Reusing the same
+  // generation would collide forever with order_attempts_exit_generation_uq
+  // (unfiltered by state) once a terminal NOT_CREATED row exists for it.
+  _retryExit(intent, kind, reason) {
+    this.pending[kind].delete(`${intent.baseCcy}:${intent.sourceBuyTradeId}`);
+    this.enqueue({ ...intent, generation: (intent.generation ?? 0) + 1 });
+    this._emit({ type: "exit_deferred", intent: kind, reason, sourceBuyTradeId: intent.sourceBuyTradeId, retried: true });
+  }
+  _deferExit(intent, kind, reason, delayMs = 1_000) {
+    const key = `${intent.baseCcy}:${intent.sourceBuyTradeId}`;
+    const current = this.pending[kind].get(key) ?? intent;
+    this.pending[kind].set(key, { ...current, notBefore: this.clock.nowMs() + delayMs });
+    this._emit({ type: "exit_deferred", intent: kind, reason, sourceBuyTradeId: intent.sourceBuyTradeId, retryAfterMs: delayMs });
+  }
+  // A dust-sized remainder must stop being redriven every ~10ms and must be
+  // reflected out of the local pending map immediately: nothing else clears
+  // it. A CAS miss on markDust does not by itself mean the exit is gone —
+  // re-read durable truth before deciding to drop it.
+  async _resolveDust(intent, kind) {
+    const key = `${intent.baseCcy}:${intent.sourceBuyTradeId}`;
+    const result = await this.transaction((tx) => this.state.markDust?.(tx, { ...intent, version: intent.fillVersion }));
+    if (result?.rowCount === 1) {
+      this.pending[kind].delete(key);
+      const row = result.rows?.[0];
+      this._emit({ type: "exit_deferred", intent: kind, reason: "DUST", sourceBuyTradeId: intent.sourceBuyTradeId });
+      if (row && this.onExitDust) await this.onExitDust({ intent: kind, row });
+      return;
+    }
+    const fill = await this.transaction((tx) => this.state.findManagedBuy?.(tx, { accountId: intent.accountId, tradeId: intent.sourceBuyTradeId }));
+    if (!fill) {
+      this.pending[kind].delete(key);
+      this._emit({ type: "exit_deferred", intent: kind, reason: "DUST_CAS_LOST_FILL_MISSING", sourceBuyTradeId: intent.sourceBuyTradeId });
+      return;
+    }
+    if (["DUST_PENDING", "SOLD"].includes(fill.sell_state)) {
+      this.pending[kind].delete(key);
+      this._emit({ type: "exit_deferred", intent: kind, reason: "DUST_CAS_LOST_ALREADY_RESOLVED", sourceBuyTradeId: intent.sourceBuyTradeId });
+      if (fill.sell_state === "DUST_PENDING" && this.onExitDust) await this.onExitDust({ intent: kind, row: fill });
+      return;
+    }
+    // Still WAITING/SELL_TRIGGERED under a newer version: some unrelated
+    // writer (e.g. raiseProtection) moved it first. Retry with the fresh
+    // version instead of silently dropping a genuinely sellable exit.
+    this.pending[kind].delete(key);
+    this.enqueue({ ...intent, fillVersion: fill.version });
+    this._emit({ type: "exit_deferred", intent: kind, reason: "DUST_CAS_LOST_RETRY", sourceBuyTradeId: intent.sourceBuyTradeId });
+  }
   async submitExits(kind, candidates) {
     let prepared;
     try {
       prepared = await this.transaction(async (tx) => {
         const rows = [];
         for (const intent of candidates) {
-          if (!this._exitGuard(intent, kind).allowed) continue;
+          const guard = this._exitGuard(intent, kind);
+          if (!guard.allowed) { this._deferExit(intent, kind, `FINAL_${guard.reason}`); continue; }
           const instrument = this.market.instrument(intent.instId);
           const executionMode = this._executionMode(intent);
           const executionRoute = this._executionRoute(intent);
@@ -207,22 +261,50 @@ export class OrderCoordinator {
           const tuple = { instId: intent.instId, tradeId: intent.sourceBuyTradeId, generation: intent.generation ?? 0, intent: kind };
           const clOrdId = await createClOrdId(this.config.orderVersion, kind, tuple); payload.clOrdId = clOrdId;
           const attempt = { accountId: this.config.accountId, intent: kind, instId: intent.instId, baseCcy: intent.baseCcy ?? instrument.base, clOrdId, payloadHash: await payloadHash(payload), sourceBuyTradeId: intent.sourceBuyTradeId, generation: intent.generation ?? 0, plannedSize: intent.plannedSize, reservedBaseSize: intent.plannedSize, executionMode, executionRoute, decisionTriggerPrice: intent.triggerPrice ?? this.market.ticker(intent.instId)?.last, decisionReferencePrice: intent.protection, decisionReason: kind === "DELIST" ? "DELIST_EXIT" : "SELL_BREAKDOWN_CONFIRMED" };
-          const reserve = await this.orders.reserveExit(tx, attempt);
-          if (reserve?.authorized !== false) rows.push({ intent, attempt, payload });
-          else this._emit({ type: "exit_deferred", intent: kind, reason: reserve.reason, sourceBuyTradeId: intent.sourceBuyTradeId });
+          try {
+            const reserve = await this.orders.reserveExit(tx, attempt);
+            if (reserve?.authorized !== false) rows.push({ intent, attempt, payload });
+            else this._deferExit(intent, kind, reserve.reason ?? "RESERVATION_DENIED");
+          } catch (error) {
+            // Same ambiguity as the BUY path: a lost COMMIT acknowledgement is
+            // resolved by the deterministic business key, never by minting a
+            // second generation blindly.
+            error.exitIntent = intent;
+            if (error?.code === "23505" && typeof this.orders.findByClOrdId === "function") { error.clOrdId = clOrdId; error.expectedPayloadHash = attempt.payloadHash; }
+            throw error;
+          }
         }
         return rows;
       });
     } catch (error) {
-      this._emit({ type: "exit_replay", intent: kind, reason: "DB_DURABILITY_BLOCKED", error: error?.message });
-      return { submitted: false, reason: "DB_DURABILITY_BLOCKED" };
+      if (error?.code !== "23505" || !error.clOrdId || typeof this.orders.findByClOrdId !== "function") {
+        if (error?.exitIntent) this._deferExit(error.exitIntent, kind, "DB_DURABILITY_BLOCKED");
+        this._emit({ type: "exit_replay", intent: kind, reason: "DB_DURABILITY_BLOCKED", error: error?.message });
+        return { submitted: false, reason: "DB_DURABILITY_BLOCKED" };
+      }
+      const existing = await this.transaction((tx) => this.orders.findByClOrdId(tx, error.clOrdId));
+      if (!existing || (existing.payload_hash ?? existing.payloadHash) !== error.expectedPayloadHash) {
+        this.pending[kind].delete(`${error.exitIntent.baseCcy}:${error.exitIntent.sourceBuyTradeId}`);
+        this._emit({ type: "exit_replay", intent: kind, reason: "HASH_COLLISION", clOrdId: error.clOrdId });
+        return { submitted: false, reason: "HASH_COLLISION" };
+      }
+      if (["PREPARED", "SUBMITTED", "UNKNOWN"].includes(existing.state)) {
+        this.pending[kind].delete(`${error.exitIntent.baseCcy}:${error.exitIntent.sourceBuyTradeId}`);
+        this._emit({ type: "exit_replay", intent: kind, reason: "COMMIT_ACK_LOST", clOrdId: error.clOrdId, state: existing.state });
+        return { submitted: false, reason: "COMMIT_ACK_LOST" };
+      }
+      // Our own prior attempt at this generation already concluded terminally
+      // (e.g. a FINAL_GUARD rejection whose retry raced this one) — the next
+      // attempt must move to a fresh generation, not repeat this collision.
+      this._retryExit(error.exitIntent, kind, "STALE_GENERATION_RETRY");
+      return { submitted: false, reason: "STALE_GENERATION_RETRIED" };
     }
     if (!prepared.length) return { submitted: false, reason: "RESERVATION_DENIED" };
     for (const row of prepared) this._emit({ type: "order_lifecycle", reason: `${kind}_PREPARED`, intent: kind, instId: row.intent.instId, clOrdId: row.attempt.clOrdId, plannedSize: row.attempt.plannedSize, triggerPrice: row.attempt.decisionTriggerPrice, referencePrice: row.attempt.decisionReferencePrice, sourceBuyTradeId: row.intent.sourceBuyTradeId });
     const safe = [];
     for (const row of prepared) {
       const guard = this._exitGuard(row.intent, kind);
-      if (!guard.allowed) await this.transaction((tx) => this.orders.markNotCreated(tx, row.attempt.clOrdId, guard.reason));
+      if (!guard.allowed) { await this.transaction((tx) => this.orders.markNotCreated(tx, row.attempt.clOrdId, guard.reason)); this._retryExit(row.intent, kind, "FINAL_GUARD"); }
       else safe.push(row);
     }
     if (!safe.length) return { submitted: false, reason: "FINAL_GUARD" };

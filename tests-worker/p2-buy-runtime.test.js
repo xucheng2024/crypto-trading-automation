@@ -71,6 +71,7 @@ test("P2 BUY coordinator uses one fake batch, persists item-independent outcomes
   const result = await coordinator.drainOnce();
   assert.equal(result.count, 3); assert.equal(sends, 1); assert.deepEqual([...attempts.values()].map((row) => row.state).sort(), ["NOT_CREATED", "SUBMITTED", "UNKNOWN"]);
   assert.deepEqual(slo.assertInvariants(), { maxBatchSize: 3, maxMutationConcurrency: 1, unknownCount: 1 }); assert.equal(slo.samples.get("signal_post")[0], 0);
+  assert.equal(slo.samples.get("buy_reserve_db").length, 3); assert.deepEqual(slo.samples.get("buy_reservation_tx"), [0]);
   assert.equal(events.at(-1).count, 3); await coordinator.drainOnce(); assert.equal(sends, 1, "UNKNOWN is never blindly resent");
 });
 

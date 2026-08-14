@@ -71,6 +71,19 @@ test("P1 safe GET retries ordinary transport errors without making mutations ret
   assert.equal(calls, 3); assert.deepEqual(delays, [1_000, 2_000]);
 });
 
+test("P5 REST transport records shared throttle delay and max-avail critical-path wait", async () => {
+  let now = 0;
+  const samples = new Map();
+  const slo = { observe: (name, value) => (samples.get(name) ?? samples.set(name, []).get(name)).push(value) };
+  const client = new OkxRestClient({ credentials, requestGapMs: 60, slo, clock: { nowMs: () => now }, sleep: async (ms) => { now += ms; }, fetcher: async () => ok([]) });
+  await client.maxAvailSize("BTC-USDT");
+  await client.maxAvailSize("ETH-USDT");
+  assert.deepEqual(samples.get("rest_throttle_delay"), [0, 60]);
+  assert.deepEqual(samples.get("rest_throttle_wait"), [0, 60]);
+  assert.deepEqual(samples.get("max_avail_throttle_delay"), [0, 60]);
+  assert.deepEqual(samples.get("max_avail_throttle_wait"), [0, 60]);
+});
+
 test("P1 recovery endpoints preserve pagination cursors and GET timeout errors retry", async () => {
   let attempts = 0; const urls = []; const delays = [];
   const client = new OkxRestClient({ credentials, sleep: async (ms) => delays.push(ms), fetcher: async (url) => {

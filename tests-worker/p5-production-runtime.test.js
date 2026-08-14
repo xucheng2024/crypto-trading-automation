@@ -20,18 +20,19 @@ test("P5 daily selection and production planner create a BUY only above the stri
   market.updateTicker({ instId: "BTC-USDT", ts: current, last: "94.9", askPx: "94.9", bidPx: "94.8" });
   market.updateCandle({ instId: "BTC-USDT", ts: current - 180_000, open: "93", high: "94.5", low: "92", close: "94", confirm: true });
   const account = new AccountCapitalSnapshot({ clock }); account.update({ ts: current, totalEq: "100", adjEq: "99" });
-  const gate = new ReadyGate(); const stored = new Map(); const intents = []; const events = [];
+  const gate = new ReadyGate(); const stored = new Map(); const intents = []; const events = []; const metricNames = [];
   const state = {
     findDaily: async (_tx, instId, day) => stored.get(`${instId}:${day}`),
     claimDaily: async (_tx, row) => { stored.set(`${row.instId}:${row.strategyDay}`, row); return row; },
     recordAdversePrice: async () => ({ rowCount: 0 }), listManagedFills: async () => [],
   };
   const planner = new BuySignalPlanner({ accountId: "a", instIds: ["BTC-USDT"], strategyConfig: { contentHash: "a".repeat(64), rows: { "BTC-USDT": { bestLimit: "95", holdHours: "6" } } }, market, account,
-    coordinator: { enqueue: (intent) => Boolean(intents.push(intent)) }, state, orders: { listBuyCycle: async () => ({ attempts: [], consumedUsd: "0" }) }, transaction: async (fn) => fn({}), rest: { clockSkewMs: 0, clockFresh: () => true, candles: async (_instId, options) => options.bar === "1D" ? rows : [[String(current - 180_000), "93", "94.5", "92", "94", "1", "1", "1", "1"]] }, readyGate: gate, clock, telemetry: (event) => events.push(event),
+    coordinator: { enqueue: (intent) => Boolean(intents.push(intent)) }, state, orders: { listBuyCycle: async () => ({ attempts: [], consumedUsd: "0" }) }, transaction: async (fn) => fn({}), rest: { clockSkewMs: 0, clockFresh: () => true, candles: async (_instId, options) => options.bar === "1D" ? rows : [[String(current - 180_000), "93", "94.5", "92", "94", "1", "1", "1", "1"]] }, readyGate: gate, clock, telemetry: (event) => events.push(event), slo: { record: (name) => metricNames.push(name) },
   });
   await planner.prime(); assert.equal(gate.snapshot().dependencies.strategy, true); assert.equal(stored.get("BTC-USDT:2026-08-14").todayOpen, "100");
   assert.deepEqual(await planner.observe({ type: "ticker", instId: "BTC-USDT" }), { queued: true, reason: "BUY_QUEUED" });
   assert.equal(intents[0].dailyLimitPrice, "95"); assert.equal(intents[0].breakoutPrice, "94.7835"); assert.equal(intents[0].holdHours, "6");
+  assert.ok(metricNames.includes("buy_cycle_tx"));
   market.updateTicker({ instId: "BTC-USDT", ts: current + 1, last: "94.7835", askPx: "94.7835", bidPx: "94.7" });
   assert.equal((await planner.observe({ type: "ticker", instId: "BTC-USDT" })).reason, "BREAKOUT_NOT_CONFIRMED");
   assert.ok(events.some((event) => event.reason === "BUY_QUEUED")); assert.ok(events.some((event) => event.reason === "BREAKOUT_NOT_CONFIRMED"));

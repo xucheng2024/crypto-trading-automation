@@ -9,8 +9,8 @@ const field = (row, snake, camel) => row[snake] ?? row[camel];
  * consume* runs later and is the only part that reads/writes durable state.
  */
 export class SellService {
-  constructor({ state, transaction = async (fn) => fn(null), coordinator, market, clock = { nowMs: () => Date.now() }, exchangeNowMs = () => clock.nowMs(), clockFresh = () => true, triggerClockSync = () => {}, refreshCandle = async () => {}, telemetry = () => {}, loadFill = async (_tx, key) => this.fills.get(key) }) {
-    Object.assign(this, { state, transaction, coordinator, market, clock, exchangeNowMs, clockFresh, triggerClockSync, refreshCandle, telemetry, loadFill });
+  constructor({ state, transaction = async (fn) => fn(null), coordinator, market, clock = { nowMs: () => Date.now() }, exchangeNowMs = () => clock.nowMs(), clockFresh = () => true, triggerClockSync = () => {}, refreshCandle = async () => {}, isDelisting = () => false, telemetry = () => {}, loadFill = async (_tx, key) => this.fills.get(key) }) {
+    Object.assign(this, { state, transaction, coordinator, market, clock, exchangeNowMs, clockFresh, triggerClockSync, refreshCandle, isDelisting, telemetry, loadFill });
     this.fills = new Map(); this.byInst = new Map(); this.latches = new Set(); this.candleRefreshes = new Set(); this.clockSyncStale = false;
   }
   key(fill) { return `${field(fill, "account_id", "accountId")}:${field(fill, "inst_id", "instId")}:${field(fill, "trade_id", "tradeId")}`; }
@@ -20,6 +20,16 @@ export class SellService {
     const released = this.latches.delete(event.key);
     if (released) this._emit({ type: "sell_trigger_retry", reason, instId: event.instId, key: event.key });
     return released;
+  }
+  // The coordinator has no memory of its own for a fill's sell_state: this is
+  // the only place DUST_PENDING (written durably by prepareExits/markDust)
+  // gets reflected back into the in-memory watch, and it is the only place a
+  // dust key's stale latch is cleared so a later reviewDust() retry can arm.
+  applyDust(row) {
+    if (!row) return;
+    const key = this.key(row);
+    this.fills.set(key, row);
+    this.latches.delete(key);
   }
   noteRetry(event, reason, delayMs) {
     this._emit({ type: "sell_trigger_retry", reason: "SELL_EVENT_RETRY_SCHEDULED", retryReason: reason, retryCount: event.retryCount, delayMs, instId: event.instId, key: event.key });
@@ -163,7 +173,11 @@ export class SellService {
   _enqueueTriggered(fill, event) {
     const accountId = field(fill, "account_id", "accountId"); const instId = field(fill, "inst_id", "instId"); const tradeId = field(fill, "trade_id", "tradeId");
     const quote = this.market.ticker(instId);
-    const accepted = this.coordinator.enqueue({ intent: "SELL", accountId, instId, baseCcy: field(fill, "base_ccy", "baseCcy"), sourceBuyTradeId: tradeId, remainingSize: subtractDecimal(field(fill, "fill_size", "fillSize"), field(fill, "disposed_size", "disposedSize") ?? "0"), fillVersion: fill.version, sellTime: Number(field(fill, "sell_time", "sellTime")), availableBase: fill.availableBase, bidPx: quote?.bidPx ?? quote?.last, protection: event.protection ?? fill.protection_price, triggerPrice: event.triggerPrice, quoteTs: event.quoteTs, executionMode: field(fill, "execution_mode", "executionMode"), executionRoute: field(fill, "execution_route", "executionRoute") });
+    // An instrument under active delist protection is no longer "live", so
+    // _exitGuard only accepts a DELIST-kind attempt for it — a fill reclaimed
+    // here while delisting must route the same way or it can never sell.
+    const intentKind = this.isDelisting(instId) ? "DELIST" : "SELL";
+    const accepted = this.coordinator.enqueue({ intent: intentKind, accountId, instId, baseCcy: field(fill, "base_ccy", "baseCcy"), sourceBuyTradeId: tradeId, remainingSize: subtractDecimal(field(fill, "fill_size", "fillSize"), field(fill, "disposed_size", "disposedSize") ?? "0"), fillVersion: fill.version, sellTime: Number(field(fill, "sell_time", "sellTime")), availableBase: fill.availableBase, bidPx: quote?.bidPx ?? quote?.last, protection: event.protection ?? fill.protection_price, triggerPrice: event.triggerPrice, quoteTs: event.quoteTs, executionMode: field(fill, "execution_mode", "executionMode"), executionRoute: field(fill, "execution_route", "executionRoute") });
     if (!accepted) {
       this._emit({ type: "sell_trigger_retry", reason: "COORDINATOR_REJECTED", instId, sourceBuyTradeId: tradeId });
       return { accepted: false, reason: "COORDINATOR_REJECTED", retryable: true };

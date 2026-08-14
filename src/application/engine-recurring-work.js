@@ -2,9 +2,9 @@
 // credential-free maintenance Job: these actions use the authenticated OKX
 // read port but never the mutation transport.
 export class EngineRecurringWork {
-  constructor({ timers = globalThis, telemetry = () => {}, announcementMs = 60_000, reconcileMs = 300_000, routeMs = 3_600_000, weeklyMs = 7 * 86_400_000, metricsMs = 60_000, clockSyncMs = 300_000, candleReviewMs = 15_000, announcements = async () => {}, reconcile = async () => {}, refreshRoutes = async () => {}, weeklyReconcile = reconcile, reportMetrics = async () => {}, clockSync = async () => {}, reviewCandles = async () => {} } = {}) {
-    Object.assign(this, { timers, telemetry, announcementMs, reconcileMs, routeMs, weeklyMs, metricsMs, clockSyncMs, candleReviewMs, announcements, reconcile, refreshRoutes, weeklyReconcile, reportMetrics, clockSync, reviewCandles });
-    this.handles = []; this.busy = false;
+  constructor({ timers = globalThis, telemetry = () => {}, announcementMs = 60_000, reconcileMs = 300_000, routeMs = 3_600_000, weeklyMs = 7 * 86_400_000, metricsMs = 60_000, clockSyncMs = 300_000, candleReviewMs = 15_000, dustReviewMs = candleReviewMs, announcements = async () => {}, reconcile = async () => {}, refreshRoutes = async () => {}, weeklyReconcile = reconcile, reportMetrics = async () => {}, clockSync = async () => {}, reviewCandles = async () => {}, reviewDust = async () => {} } = {}) {
+    Object.assign(this, { timers, telemetry, announcementMs, reconcileMs, routeMs, weeklyMs, metricsMs, clockSyncMs, candleReviewMs, dustReviewMs, announcements, reconcile, refreshRoutes, weeklyReconcile, reportMetrics, clockSync, reviewCandles, reviewDust });
+    this.handles = []; this.busy = false; this.independent = new Map();
   }
   _emit(event) { try { Promise.resolve(this.telemetry(event)).catch(() => {}); } catch { /* telemetry cannot alter scheduling */ } }
   async run(name, work) {
@@ -15,8 +15,14 @@ export class EngineRecurringWork {
     finally { this.busy = false; }
   }
   async runIndependent(name, work) {
+    if (this.independent.has(name)) return this.independent.get(name);
+    const running = (async () => {
     try { await work(); return { ok: true }; }
     catch (error) { this._emit({ type: "recurring_work", reason: `${name}_FAILED`, error: error?.message }); return { ok: false }; }
+    finally { this.independent.delete(name); }
+    })();
+    this.independent.set(name, running);
+    return running;
   }
   start() {
     if (this.handles.length) return;
@@ -31,6 +37,7 @@ export class EngineRecurringWork {
     add("METRICS", this.metricsMs, this.reportMetrics, false);
     add("CLOCK_SYNC", this.clockSyncMs, this.clockSync, false);
     add("CANDLE_REVIEW", this.candleReviewMs, this.reviewCandles, false);
+    add("DUST_REVIEW", this.dustReviewMs, this.reviewDust, false);
   }
   stop() { for (const handle of this.handles.splice(0)) this.timers.clearInterval(handle); }
 }
