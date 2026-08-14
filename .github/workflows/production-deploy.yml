@@ -1,0 +1,167 @@
+name: Production deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      promote_full:
+        description: Promote the verified OFF revision to FULL after approval
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: production-deploy
+  cancel-in-progress: false
+
+env:
+  RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP }}
+  ACR_NAME: ${{ vars.ACR_NAME }}
+  ACR_LOGIN_SERVER: ${{ vars.ACR_LOGIN_SERVER }}
+  CONTAINER_APP_NAME: ${{ vars.CONTAINER_APP_NAME }}
+  POSTGRES_MIGRATION_URL: ${{ vars.POSTGRES_MIGRATION_URL }}
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm test
+      - run: npm run test:iac
+      - run: npm run test:container
+      - run: npm run migrate:rehearsal
+
+  build:
+    needs: validate
+    runs-on: ubuntu-latest
+    outputs:
+      image: ${{ steps.image.outputs.image }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_DEPLOY_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      - uses: docker/setup-buildx-action@v3
+      - run: az acr login --name "$ACR_NAME"
+      - run: docker buildx build --platform linux/amd64 --push --tag "$ACR_LOGIN_SERVER/trading-engine:${GITHUB_SHA}" .
+      - id: image
+        run: |
+          digest="$(az acr repository show --name "$ACR_NAME" --image "trading-engine:${GITHUB_SHA}" --query digest --output tsv)"
+          image="$ACR_LOGIN_SERVER/trading-engine@$digest"
+          docker buildx imagetools inspect "$image" | grep --fixed-strings "linux/amd64"
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+
+  migrate:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: production-migrate
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --omit=dev
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_MIGRATION_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      - id: firewall
+        name: Create the short-lived migration firewall rule
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$POSTGRES_MIGRATION_URL"
+          server="$(node -p 'new URL(process.env.POSTGRES_MIGRATION_URL).hostname.split(".")[0]')"
+          runner_ip="$(curl --fail --silent --show-error https://api.ipify.org)"
+          rule="github-migration-${GITHUB_RUN_ID}"
+          az postgres flexible-server firewall-rule create --resource-group "$RESOURCE_GROUP" --server-name "$server" --name "$rule" --start-ip-address "$runner_ip" --end-ip-address "$runner_ip" --output none
+          echo "server=$server" >> "$GITHUB_OUTPUT"
+          echo "rule=$rule" >> "$GITHUB_OUTPUT"
+      - name: Apply reviewed migrations through Entra authentication
+        run: npm run migrate:apply
+      - if: ${{ always() }}
+        name: Remove the short-lived migration firewall rule
+        shell: bash
+        env:
+          SERVER: ${{ steps.firewall.outputs.server }}
+          RULE: ${{ steps.firewall.outputs.rule }}
+        run: |
+          test -z "$SERVER" || test -z "$RULE" || az postgres flexible-server firewall-rule delete --resource-group "$RESOURCE_GROUP" --server-name "$SERVER" --name "$RULE" --yes --output none
+
+  deploy_off:
+    needs: [build, migrate]
+    runs-on: ubuntu-latest
+    environment: production-off
+    outputs:
+      revision: ${{ steps.deploy.outputs.revision }}
+    steps:
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_DEPLOY_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      - id: deploy
+        shell: bash
+        env:
+          IMAGE: ${{ needs.build.outputs.image }}
+        run: |
+          set -euo pipefail
+          suffix="off-${GITHUB_SHA:0:7}-${GITHUB_RUN_NUMBER}"
+          az containerapp update --name "$CONTAINER_APP_NAME" --resource-group "$RESOURCE_GROUP" --image "$IMAGE" --set-env-vars TRADING_MODE=OFF --revision-suffix "$suffix" --output none
+          revision="$(az containerapp show --name "$CONTAINER_APP_NAME" --resource-group "$RESOURCE_GROUP" --query properties.latestRevisionName --output tsv)"
+          for old in $(az containerapp revision list --name "$CONTAINER_APP_NAME" --resource-group "$RESOURCE_GROUP" --query "[?properties.active].name" --output tsv); do
+            [ "$old" = "$revision" ] || az containerapp revision deactivate --name "$CONTAINER_APP_NAME" --resource-group "$RESOURCE_GROUP" --revision "$old" --output none
+          done
+          az containerapp revision restart --name "$CONTAINER_APP_NAME" --resource-group "$RESOURCE_GROUP" --revision "$revision" --output none
+          for attempt in {1..30}; do
+            state="$(az containerapp revision show --name "$CONTAINER_APP_NAME" --resource-group "$RESOURCE_GROUP" --revision "$revision" --query "[properties.runningState, properties.healthState]" --output tsv | paste -sd ' ' -)"
+            [ "$state" = "RunningAtMaxScale Healthy" ] && break
+            sleep 10
+          done
+          [ "$state" = "RunningAtMaxScale Healthy" ]
+          [ "$(az containerapp revision list --name "$CONTAINER_APP_NAME" --resource-group "$RESOURCE_GROUP" --query "[?properties.active].name | length(@)" --output tsv)" = "1" ]
+          echo "revision=$revision" >> "$GITHUB_OUTPUT"
+
+  promote_full:
+    if: ${{ inputs.promote_full }}
+    needs: [build, deploy_off]
+    runs-on: ubuntu-latest
+    environment: production-full
+    steps:
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_DEPLOY_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      - name: Promote the already-verified digest and verify the singleton revision
+        shell: bash
+        env:
+          IMAGE: ${{ needs.build.outputs.image }}
+        run: |
+          set -euo pipefail
+          suffix="full-${GITHUB_SHA:0:7}-${GITHUB_RUN_NUMBER}"
+          az containerapp update --name "$CONTAINER_APP_NAME" --resource-group "$RESOURCE_GROUP" --image "$IMAGE" --set-env-vars TRADING_MODE=FULL --revision-suffix "$suffix" --output none
+          revision="$(az containerapp show --name "$CONTAINER_APP_NAME" --resource-group "$RESOURCE_GROUP" --query properties.latestRevisionName --output tsv)"
+          for old in $(az containerapp revision list --name "$CONTAINER_APP_NAME" --resource-group "$RESOURCE_GROUP" --query "[?properties.active].name" --output tsv); do
+            [ "$old" = "$revision" ] || az containerapp revision deactivate --name "$CONTAINER_APP_NAME" --resource-group "$RESOURCE_GROUP" --revision "$old" --output none
+          done
+          az containerapp revision restart --name "$CONTAINER_APP_NAME" --resource-group "$RESOURCE_GROUP" --revision "$revision" --output none
+          for attempt in {1..30}; do
+            state="$(az containerapp revision show --name "$CONTAINER_APP_NAME" --resource-group "$RESOURCE_GROUP" --revision "$revision" --query "[properties.runningState, properties.healthState]" --output tsv | paste -sd ' ' -)"
+            [ "$state" = "RunningAtMaxScale Healthy" ] && break
+            sleep 10
+          done
+          [ "$state" = "RunningAtMaxScale Healthy" ]
+          [ "$(az containerapp revision list --name "$CONTAINER_APP_NAME" --resource-group "$RESOURCE_GROUP" --query "[?properties.active].name | length(@)" --output tsv)" = "1" ]
