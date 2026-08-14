@@ -118,7 +118,7 @@ var keyVaultSecretsUserRole = subscriptionResourceId(
 )
 var monitoringReaderRole = subscriptionResourceId(
   'Microsoft.Authorization/roleDefinitions',
-  '43d0d8ad-25c7-4b0b-bb1b-2d04b1817e7d'
+  '43d0d8ad-25c7-4714-9337-8ba259a9fe05'
 )
 resource acr 'Microsoft.ContainerRegistry/registries@2023-07-01' existing = {
   name: last(split(acrId, '/'))
