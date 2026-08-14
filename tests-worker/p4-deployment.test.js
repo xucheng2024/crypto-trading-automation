@@ -87,6 +87,17 @@ test("P4 production health server is closed by graceful shutdown", async () => {
   await engine.shutdown();
 });
 
+test("P4 OFF remains operational for the explicitly known account-profile prerequisite", async () => {
+  const telemetry = [];
+  const { startTradingEngine } = await import("../src/entrypoints/azure/trading-engine.js");
+  const lifecycle = { start: async () => { throw new Error("OKX_BASELINE_ACCOUNT_PROFILE"); } };
+  const engine = await startTradingEngine({ TRADING_MODE: "OFF" }, { lifecycle, telemetry: (event) => telemetry.push(event) });
+  assert.equal(engine.startupDegraded, "OKX_BASELINE_ACCOUNT_PROFILE");
+  assert.equal(engine.liveness(), true); assert.equal(engine.readiness(), true);
+  assert.deepEqual(telemetry, [{ event: "OFF_SAFE_DEGRADED", reason: "OKX_BASELINE_ACCOUNT_PROFILE" }]);
+  await assert.rejects(startTradingEngine({ TRADING_MODE: "FULL" }, { lifecycle }), /OKX_BASELINE_ACCOUNT_PROFILE/);
+});
+
 test("P4 maintenance composition replays safely with fake management ports", async () => {
   const calls = []; const tx = { query: async () => ({ rowCount: 0 }) };
   const result = await runMaintenanceCycle({ tx, announcements: async () => ({ ok: true }), reconcile: async () => ({ ok: true }), management: { postgresCapacity: async () => ({ ok: true }), natIp: async () => ({ ok: true }) }, retentionBefore: new Date(0), telemetry: (x) => calls.push(x) });
