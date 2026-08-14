@@ -60,12 +60,16 @@ export class BoundedPriorityQueue {
 }
 
 export class TradingEngine {
-  constructor({ projection = new MarketProjection(), account = new AccountCapitalSnapshot(), readyGate = new ReadyGate(), queue = new BoundedPriorityQueue(), clock = { nowMs: () => Date.now() }, timers = globalThis, watchdogMs = 5_000, onWatchdog = () => {}, sellService = null, coordinator = null } = {}) {
-    Object.assign(this, { projection, account, readyGate, queue, clock, timers, watchdogMs, onWatchdog, sellService, coordinator }); this.pendingBuy = new Map(); this.activeBuy = new Set(); this.watchdog = null;
+  constructor({ projection = new MarketProjection(), account = new AccountCapitalSnapshot(), readyGate = new ReadyGate(), queue = new BoundedPriorityQueue(), clock = { nowMs: () => Date.now() }, timers = globalThis, watchdogMs = 5_000, onWatchdog = () => {}, sellService = null, coordinator = null, slo = null } = {}) {
+    Object.assign(this, { projection, account, readyGate, queue, clock, timers, watchdogMs, onWatchdog, sellService, coordinator, slo }); this.pendingBuy = new Map(); this.activeBuy = new Set(); this.watchdog = null;
   }
   receiveTicker(row) {
+    const started = this.clock.nowMs();
     const result = this.projection.updateTicker(row);
     if (result.accepted) { this.queue.enqueue({ type: "ticker", instId: row.instId }); for (const event of this.sellService?.observeTicker(row.instId) ?? []) this.queue.enqueue(event); }
+    // Ingress SLO boundary: normalized WS event through projection and into
+    // the bounded consumer queue. Keep the old metric for dashboard continuity.
+    this.slo?.record("event_enqueue", started); this.slo?.record("ws_projection_enqueue", started); this.slo?.observe("queue_depth", this.queue.size);
     return result;
   }
   receiveCandle(row) {

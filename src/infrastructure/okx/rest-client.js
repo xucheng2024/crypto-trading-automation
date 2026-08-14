@@ -163,7 +163,8 @@ export class OkxRestClient {
   accountInstruments(instType) { return this.read("/api/v5/account/instruments", { instType }); }
   accountConfig() { return this.read("/api/v5/account/config"); }
   balance(ccy) { return this.read("/api/v5/account/balance", ccy ? { ccy } : {}); }
-  maxAvailSize(instId) { return this.read("/api/v5/account/max-avail-size", { instId, tdMode: "cross" }); }
+  leverageInfo(instId) { return this.read("/api/v5/account/leverage-info", { instId, mgnMode: "cross" }); }
+  maxAvailSize(instId, { tdMode = "cross", reduceOnly } = {}) { return this.read("/api/v5/account/max-avail-size", { instId, tdMode, reduceOnly }); }
   order({ instId, ordId, clOrdId }) { return this.read("/api/v5/trade/order", { instId, ordId, clOrdId }); }
   ordersPending(instType, params = {}) { return this.read("/api/v5/trade/orders-pending", { ...params, instType }); }
   ordersHistory(instType, params = {}) { return this.read("/api/v5/trade/orders-history", { ...params, instType }); }

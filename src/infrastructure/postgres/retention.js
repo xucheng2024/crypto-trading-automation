@@ -17,3 +17,8 @@ export async function retainTerminalAttempts(tx, { before, limit }) {
   if (!(before instanceof Date) || !Number.isInteger(limit) || limit <= 0) throw new TypeError("fixed P3 retention arguments required");
   return tx.query(P3_DELETE_TERMINAL_ATTEMPTS_SQL, [before, limit]);
 }
+
+export async function retainTerminalAttemptsAsMaintenance(tx, { before, limit }) {
+  if (!(before instanceof Date) || !Number.isInteger(limit) || limit <= 0 || limit > 5000) throw new TypeError("fixed P4 retention arguments required");
+  return tx.query("SELECT id FROM p4_retain_terminal_attempts($1, $2)", [before, limit]);
+}

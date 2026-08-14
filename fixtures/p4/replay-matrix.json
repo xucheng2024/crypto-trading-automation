@@ -1,0 +1,14 @@
+[
+  {"scenario":"BUY full/partial/zero/UNKNOWN/restart","file":"tests-worker/p2-buy-runtime.test.js","test":"P2 BUY coordinator uses one fake batch, persists item-independent outcomes, and does not resend UNKNOWN"},
+  {"scenario":"SELL/DELIST partial/UNKNOWN/restart","file":"tests-worker/postgres.integration.test.js","test":"P3 unified fake OKX and one PostgreSQL ledger survive DELIST partial UNKNOWN restart and converge"},
+  {"scenario":"ACCOUNT BUY/SELL ordering and same-ms billId","file":"tests-worker/postgres.integration.test.js","test":"P3 account SELL allocation uses bigint bill keys and SYSTEM SELL replay is idempotent"},
+  {"scenario":"protection queued/PREPARED/submitted BUY","file":"tests-worker/p2-buy-runtime.test.js","test":"P2 insufficient funds waits for a newer safe risk version, while protection blocks before and after PREPARED"},
+  {"scenario":"mutation 429/timeout/partial rejection/missing item","file":"tests-worker/okx-infrastructure.test.js","test":"P1 mutation transport makes one send attempt then returns UNKNOWN, while batch items stay independent"},
+  {"scenario":"PREPARED/SETTLED ack loss","file":"tests-worker/postgres.integration.test.js","test":"P2 real PostgreSQL survives commit-ack-loss and SETTLED replay without duplicate exposure"},
+  {"scenario":"owner loss/PG restart/pool exhaustion","file":"tests-worker/p4-system-postgres.test.js","test":"P4 system harness persists a real PostgreSQL lifecycle across restart"},
+  {"scenario":"Public/Private/Business stale/64008/reconnect","file":"tests-worker/okx-infrastructure.test.js","test":"P1 Public WS requires every ACK, normalizes status, permits same-time corrections, isolates watermarks, and reconnects on 64008"},
+  {"scenario":"announcement failure and recovery","file":"tests-worker/postgres.integration.test.js","test":"P3 announcement paging rolls back a failed page and persists idempotent receipts in PostgreSQL"},
+  {"scenario":"maintenance interruption/replay","file":"tests-worker/p4-deployment.test.js","test":"P4 maintenance composition handles interruption and telemetry failure without mutation"},
+  {"scenario":"shutdown four commit boundaries","file":"tests-worker/p4-deployment.test.js","test":"P4 graceful shutdown stops intake before transports and owner release"},
+  {"scenario":"50-coin concentrated trigger and exit preemption","file":"tests-worker/p4-system-postgres.test.js","test":"P4 full runtime uses one PostgreSQL, fake OKX WS/REST, five-order Coordinator batch, SLO, coalescing and exit preemption"}
+]

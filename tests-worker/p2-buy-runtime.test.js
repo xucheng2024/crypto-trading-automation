@@ -4,6 +4,7 @@ import test from "node:test";
 import { AccountCapitalSnapshot, BoundedPriorityQueue, MarketProjection, ReadyGate, TradingEngine } from "../src/application/trading-engine.js";
 import { OrderCoordinator } from "../src/application/order-coordinator.js";
 import { ReconciliationService } from "../src/application/reconciliation-service.js";
+import { VirtualSloMetrics } from "../src/application/slo-metrics.js";
 import { assessLeverage, dailyLimit } from "../src/domain/rules.js";
 
 const clock = (value = 0) => ({ value, nowMs() { return this.value; } });
@@ -48,7 +49,7 @@ test("P2 recovery keeps READY false, waits owner safety window, and treats PREPA
 
 test("P2 BUY coordinator uses one fake batch, persists item-independent outcomes, and does not resend UNKNOWN", async () => {
   const now = clock(10); const market = setupMarket(now); const account = new AccountCapitalSnapshot({ clock: now }); account.update({ ts: 1, totalEq: "150", adjEq: "150", mgnRatio: "2" });
-  const attempts = new Map(); const events = []; let sends = 0;
+  const attempts = new Map(); const events = []; const slo = new VirtualSloMetrics(now); let sends = 0;
   const orders = {
     async reserveBuy(_tx, attempt) { attempts.set(attempt.clOrdId, { ...attempt, state: "PREPARED", reservationState: "ACTIVE" }); return { authorized: true }; },
     async markSubmitted(_tx, id, ordId) { Object.assign(attempts.get(id), { state: "SUBMITTED", ordId }); },
@@ -56,7 +57,7 @@ test("P2 BUY coordinator uses one fake batch, persists item-independent outcomes
     async markNotCreated(_tx, id) { Object.assign(attempts.get(id), { state: "NOT_CREATED", reservationState: "RELEASED" }); },
     async markSettled(_tx, id) { Object.assign(attempts.get(id), { state: "SETTLED" }); },
   };
-  const coordinator = new OrderCoordinator({ transaction: async (fn) => fn({}), orders, state: { insertFill: async () => {} }, ownerGuard: { isHeld: () => true }, readyGate: ready(), market, account, mode: () => "FULL", clock: now, config, telemetry: (event) => events.push(event), transport: {
+  const coordinator = new OrderCoordinator({ transaction: async (fn) => fn({}), orders, state: { insertFill: async () => {} }, ownerGuard: { isHeld: () => true }, readyGate: ready(), market, account, mode: () => "FULL", clock: now, config, slo, telemetry: (event) => events.push(event), transport: {
     maxAvailSize: async (ids) => ids.split(",").map((instId) => ({ instId, availBuy: "100" })),
     submitBatchOrders: async (payload) => { sends += 1; assert.equal(payload.length, 3); assert.ok(payload.every((item) => item.tdMode === "cross" && item.ordType === "ioc" && item.tradeQuoteCcy === "USDT")); return [{ clOrdId: payload[0].clOrdId, status: "SUBMITTED", ordId: "1" }, { clOrdId: payload[1].clOrdId, status: "NOT_CREATED", reason: "rejected" }, { clOrdId: payload[2].clOrdId, status: "UNKNOWN", reason: "timeout" }]; },
   } });
@@ -66,6 +67,7 @@ test("P2 BUY coordinator uses one fake batch, persists item-independent outcomes
   }
   const result = await coordinator.drainOnce();
   assert.equal(result.count, 3); assert.equal(sends, 1); assert.deepEqual([...attempts.values()].map((row) => row.state).sort(), ["NOT_CREATED", "SUBMITTED", "UNKNOWN"]);
+  assert.deepEqual(slo.assertInvariants(), { maxBatchSize: 3, maxMutationConcurrency: 1, unknownCount: 1 }); assert.equal(slo.samples.get("signal_post")[0], 0);
   assert.equal(events.at(-1).count, 3); await coordinator.drainOnce(); assert.equal(sends, 1, "UNKNOWN is never blindly resent");
 });
 

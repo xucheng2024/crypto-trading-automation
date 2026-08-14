@@ -3,7 +3,7 @@ import { compareDecimal } from "../decimal.js";
 // Durable protection -> fill-level DELIST bridge.  It creates no attempts:
 // the Coordinator remains the sole reservation/HTTP authority.
 export class DelistOrchestrator {
-  constructor({ transaction, state, orders, coordinator, accountId, market, availableBase = () => "0", telemetry = () => {} }) { Object.assign(this, { transaction, state, orders, coordinator, accountId, market, availableBase, telemetry }); }
+  constructor({ transaction, state, orders, coordinator, accountId, market, availableBase = async () => null, telemetry = () => {} }) { Object.assign(this, { transaction, state, orders, coordinator, accountId, market, availableBase, telemetry }); }
   bind() {
     this.coordinator.onExitSettled = async ({ attempt }) => {
       if (attempt.intent === "DELIST") await this.drive(attempt.inst_id ?? attempt.instId);
@@ -25,7 +25,7 @@ export class DelistOrchestrator {
     const row = rows.find((candidate) => candidate.sell_state !== "DUST_PENDING");
     if (!row) return this.transaction((tx) => this.state.convergeProtection(tx, { accountId: this.accountId, instId }));
     const quote = this.market.ticker(instId); const confirmedAvailable = await this.availableBase(row);
-    if (!confirmedAvailable || compareDecimal(confirmedAvailable, "0") <= 0) {
+    if (confirmedAvailable !== null && (!confirmedAvailable || compareDecimal(confirmedAvailable, "0") <= 0)) {
       this._emit({ type: "protection", reason: "BALANCE_SHORTFALL", instId, sourceBuyTradeId: row.trade_id });
       return "EXITING";
     }

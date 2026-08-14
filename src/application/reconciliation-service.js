@@ -96,7 +96,9 @@ export class ReconciliationService {
   async ingestFill(tx, fill, order) {
     const managed = classifyCrossFill(fill, order, this.ownership);
     if (!managed) return false;
+    if (managed.source === "ACCOUNT" && order?.clOrdId && typeof this.orders.findByClOrdId === "function" && await this.orders.findByClOrdId(tx, order.clOrdId)) managed.source = "SYSTEM";
     const isBuy = managed.side === "buy";
+    if (isBuy && !this.ownership.holdHoursByInst?.[managed.instId]) { emit(this.telemetry, { type: "account_fill", reason: "STRATEGY_CONFIG_MISSING", instId: managed.instId }); return false; }
     const baseCcy = managed.instId.split("-")[0];
     if (managed.source === "ACCOUNT" && !isBuy) await this.orders.lockExitBase?.(tx, this.ownership.accountId, baseCcy);
     const inserted = await this.state.insertFill(tx, {

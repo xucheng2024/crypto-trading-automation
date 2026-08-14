@@ -1,0 +1,22 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "imageDigest": { "value": "<ACR_LOGIN_SERVER>/<REPOSITORY>@sha256:<IMMUTABLE_DIGEST>" },
+    "location": { "value": "eastasia" },
+    "prefix": { "value": "<RESOURCE_PREFIX>" },
+    "monthlyBudgetUsd": { "value": 250 },
+    "budgetStartDate": { "value": "<ISO_8601_START_DATE>" },
+    "budgetContactEmails": { "value": ["<BUDGET_ALERT_EMAIL>"] },
+    "budgetThresholdPercent": { "value": 80 },
+    "appInsightsDailyCapGb": { "value": 1 },
+    "entraAdministratorObjectId": { "value": "<ENTRA_OBJECT_ID>" },
+    "entraAdministratorPrincipalName": { "value": "<ENTRA_PRINCIPAL_NAME>" },
+    "entraAdministratorPrincipalType": { "value": "Group" }
+    ,"postgresDatabase": { "value": "trading" }
+    ,"okxAccountId": { "value": "<OKX_ACCOUNT_ALIAS>" }
+    ,"okxInstruments": { "value": "BTC-USDT,ETH-USDT" }
+    ,"managedFillStartMs": { "value": "<UTC_EPOCH_MILLISECONDS>" }
+    ,"strategyConfigJson": { "value": "<VERSIONED_CONVERTER_OUTPUT_JSON>" }
+  }
+}

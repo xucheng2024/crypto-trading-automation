@@ -13,11 +13,13 @@ function add(left, right) {
 
 /** The only component allowed to invoke an injected mutation transport. */
 export class OrderCoordinator {
-  constructor({ transaction, orders, state, transport, ownerGuard, readyGate, market, account, mode = () => "OFF", isBuyAllowed = () => true, clock = { nowMs: () => Date.now() }, config, telemetry = () => {}, onExitSettled = null }) {
-    Object.assign(this, { transaction, orders, state, transport, ownerGuard, readyGate, market, account, mode, isBuyAllowed, clock, config, telemetry, onExitSettled });
-    this.pending = { BUY: new Map(), SELL: new Map(), DELIST: new Map() }; this.submitting = false; this.isolatedBases = new Set();
+  constructor({ transaction, orders, state, transport, ownerGuard, readyGate, market, account, mode = () => "OFF", isBuyAllowed = () => true, clock = { nowMs: () => Date.now() }, config, telemetry = () => {}, onExitSettled = null, slo = null }) {
+    Object.assign(this, { transaction, orders, state, transport, ownerGuard, readyGate, market, account, mode, isBuyAllowed, clock, config, telemetry, onExitSettled, slo });
+    this.pending = { BUY: new Map(), SELL: new Map(), DELIST: new Map() }; this.submitting = false; this.accepting = true; this.isolatedBases = new Set();
   }
-  enqueue(intent) { const group = this.pending[intent.intent]; if (!group) throw new Error("unknown intent"); const key = intent.intent === "BUY" ? intent.instId : `${intent.baseCcy}:${intent.sourceBuyTradeId}`; group.set(key, intent); }
+  enqueue(intent) { if (!this.accepting) return false; const group = this.pending[intent.intent]; if (!group) throw new Error("unknown intent"); const key = intent.intent === "BUY" ? intent.instId : `${intent.baseCcy}:${intent.sourceBuyTradeId}`; group.set(key, intent); return true; }
+  stopNewMutations() { this.accepting = false; }
+  async finishInFlight() { while (this.submitting) await new Promise((resolve) => setTimeout(resolve, 1)); }
   _emit(event) { try { Promise.resolve(this.telemetry(event)).catch(() => {}); } catch { /* telemetry cannot block trading */ } }
   canCreateNextBuy({ previousAttempt, nextMarketKey }) {
     return previousAttempt?.state === "SETTLED" && Boolean(nextMarketKey) && nextMarketKey !== previousAttempt.decision_market_key;
@@ -36,7 +38,7 @@ export class OrderCoordinator {
       this.submitting = true;
       try { return await this.submitExits(kind, prepared); } finally { this.submitting = false; }
     }
-    const candidates = [...this.pending.BUY.values()].sort((a, b) => a.generation - b.generation || a.eligibleSince - b.eligibleSince || a.instId.localeCompare(b.instId)).slice(0, 5);
+    const candidates = [...this.pending.BUY.values()].sort((a, b) => a.generation - b.generation || a.eligibleSince - b.eligibleSince || a.instId.localeCompare(b.instId)).slice(0, 5).map((intent) => { intent._signalStartedAt ??= Number.isFinite(intent.signalAt) ? intent.signalAt : this.clock.nowMs(); return intent; });
     const prepared = await this.prepareBuys(candidates);
     if (!prepared.length) return { submitted: false, reason: "NO_ELIGIBLE" };
     if (this.pending.DELIST.size || this.pending.SELL.size) return { submitted: false, reason: "PREEMPTED" };
@@ -47,7 +49,8 @@ export class OrderCoordinator {
     const riskVersion = this.account.value?.version ?? 0;
     const eligible = candidates.filter((intent) => (!intent.waitForRiskVersion || riskVersion > intent.waitForRiskVersion) && this._buyGuard(intent).allowed);
     if (!eligible.length) return [];
-    const avail = await this.transport.maxAvailSize(eligible.map((item) => item.instId).join(","));
+    const maxAvailStarted = this.clock.nowMs();
+    const avail = await this.transport.maxAvailSize(eligible.map((item) => item.instId).join(",")); this.slo?.record("signal_max_avail", maxAvailStarted);
     const byInst = new Map((avail ?? []).map((row) => [row.instId, row.availBuy]));
     return eligible.flatMap((intent) => {
       const availBuy = byInst.get(intent.instId);
@@ -60,6 +63,7 @@ export class OrderCoordinator {
     });
   }
   async submitBuys(candidates) {
+    const started = this.clock.nowMs();
     let prepared;
     try {
       prepared = await this.transaction(async (tx) => {
@@ -122,7 +126,8 @@ export class OrderCoordinator {
     if (!safe.length) return { submitted: false, reason: "FINAL_GUARD" };
     let response;
     try {
-      response = await this.transport.submitBatchOrders(safe.map((row) => row.payload), this.clock.nowMs() + this.config.orderExpiryMs);
+      this.slo?.record("signal_post", Math.min(...safe.map((row) => row.intent._signalStartedAt))); this.slo?.record("prepared_post", started); this.slo?.record("prepared_submit", started); const submittedAt = this.clock.nowMs();
+      response = await this.transport.submitBatchOrders(safe.map((row) => row.payload), this.clock.nowMs() + this.config.orderExpiryMs); this.slo?.record("submit_ack", submittedAt);
     } catch (error) {
       response = safe.map((row) => ({ clOrdId: row.attempt.clOrdId, status: "UNKNOWN", reason: error?.message ?? "TRANSPORT_FAILURE" }));
     }
@@ -135,7 +140,7 @@ export class OrderCoordinator {
       }
     });
     for (const row of safe) this.pending.BUY.delete(row.intent.instId);
-    this._emit({ type: "buy_batch", count: safe.length, results: response.map((item) => ({ clOrdId: item.clOrdId, status: item.status })) });
+    const unknown = response.filter((item) => item.status === "UNKNOWN").length; this.slo?.observe("unknown_count", unknown); this.slo?.increment?.("unknown_count", unknown); this.slo?.observe("batch_size", safe.length); this.slo?.observe("mutation_concurrency", 1); this._emit({ type: "buy_batch", count: safe.length, results: response.map((item) => ({ clOrdId: item.clOrdId, status: item.status })) });
     return { submitted: true, count: safe.length, response };
   }
   async prepareExits(kind, candidates) {
@@ -155,7 +160,7 @@ export class OrderCoordinator {
       const instrument = this.market.instrument(intent.instId); const reduceOnly = byInst.get(intent.instId);
       const availableBase = intent.availableBase;
       if (!instrument || !reduceOnly || !availableBase) continue;
-      const raw = min(intent.remainingSize, availableBase, reduceOnly);
+      const raw = min(intent.remainingSize, availableBase ?? reduceOnly, reduceOnly);
       const size = roundToStep(raw, instrument.lotSz, "down");
       if (compareDecimal(size, instrument.minSz) < 0 || (intent.bidPx && compareDecimal(multiplyDecimal(size, intent.bidPx), "0.1") < 0)) {
         await this.transaction((tx) => this.state.markDust?.(tx, { ...intent, version: intent.fillVersion }));

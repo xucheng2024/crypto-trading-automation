@@ -14,7 +14,9 @@ import { AccountCapitalSnapshot, MarketProjection, ReadyGate } from "../src/appl
 import { OrderCoordinator } from "../src/application/order-coordinator.js";
 import { DelistOrchestrator } from "../src/application/delist-orchestrator.js";
 import { InstrumentProtectionService } from "../src/application/instrument-protection-service.js";
-import { P3_DELETE_TERMINAL_ATTEMPTS_SQL, P3_RETENTION_VERSION, retainTerminalAttempts } from "../src/infrastructure/postgres/retention.js";
+import { P3_DELETE_TERMINAL_ATTEMPTS_SQL, P3_RETENTION_VERSION, retainTerminalAttempts, retainTerminalAttemptsAsMaintenance } from "../src/infrastructure/postgres/retention.js";
+import { importOfflineProtection } from "../src/infrastructure/postgres/offline-import.js";
+import { convertD1Export } from "../tools/convert-d1-export.mjs";
 
 const run = promisify(execFile);
 
@@ -66,7 +68,7 @@ async function startPostgres() {
     await run("pg_ctl", ["-D", dir, "-l", logPath, "-o", `-p ${port} -h 127.0.0.1`, "-w", "start"]);
     started = true;
     let admin = await connect();
-    const migrations = ["0001_p1_core.sql", "0002_p3_exit.sql"];
+    const migrations = ["0001_p1_core.sql", "0002_p3_exit.sql", "0003_p4_import.sql"];
     for (const migration of migrations) {
       const sql = await readFile(new URL(`../migrations/postgres/${migration}`, import.meta.url), "utf8");
       await admin.query(sql); await admin.query(sql);
@@ -128,6 +130,7 @@ test("temporary PostgreSQL enforces P1-B invariants", { timeout: 60_000 }, async
   try {
     await t.test("migration is repeatable and forbidden tables/columns are absent", async () => {
       const tables = await db.admin.query("SELECT table_name FROM information_schema.tables WHERE table_schema='public'");
+      assert.equal(tables.rows.some((row) => row.table_name === "deployment_config"), false);
       const names = new Set(tables.rows.map((row) => row.table_name));
       for (const required of ["daily_limit_cache", "filled_orders", "instrument_protection", "order_attempts", "sync_watermarks"]) assert.equal(names.has(required), true);
       for (const forbidden of ["system_control", "crypto_limits", "buy_cycles", "managed_positions", "sell_groups", "sell_items"]) assert.equal(names.has(forbidden), false);
@@ -394,6 +397,20 @@ test("temporary PostgreSQL enforces P1-B invariants", { timeout: 60_000 }, async
       assert.equal((await db.admin.query("SELECT count(*)::int AS count FROM announcement_receipts WHERE title='Spot delisting BTC'")).rows[0].count, 1);
       assert.equal((await db.admin.query("SELECT watermark FROM sync_watermarks WHERE account_id='retention'")).rows[0].watermark, "1");
     });
+    await t.test("P4 maintenance role can execute only the bounded SECURITY DEFINER retention port", async () => {
+      await db.admin.query("CREATE ROLE p4_maintenance_test NOLOGIN");
+      await db.admin.query("GRANT USAGE ON SCHEMA public TO p4_maintenance_test");
+      await db.admin.query("GRANT EXECUTE ON FUNCTION p4_retain_terminal_attempts(timestamptz, integer) TO p4_maintenance_test");
+      await orders.reserveBuy(db.admin, buy("p4-maintenance-terminal", { accountId: "p4-maintenance" }), admission("100"));
+      await orders.markNotCreated(db.admin, "p4-maintenance-terminal", "fixture");
+      await db.admin.query("UPDATE order_attempts SET updated_at='2019-01-01' WHERE cl_ord_id='p4-maintenance-terminal'");
+      await db.admin.query("SET ROLE p4_maintenance_test");
+      try {
+        const removed = await retainTerminalAttemptsAsMaintenance(db.admin, { before: new Date("2020-01-01T00:00:00Z"), limit: 10 });
+        assert.equal(removed.rowCount, 1);
+        await assert.rejects(db.admin.query("INSERT INTO order_attempts(account_id,intent,inst_id,cl_ord_id,payload_hash,state,reservation_state) VALUES('x','BUY','X-USDT','forbidden','hash','PREPARED','ACTIVE')"), /permission denied/);
+      } finally { await db.admin.query("RESET ROLE"); }
+    });
 
     await t.test("P3 partial exit settles once then creates exactly one next generation from durable remaining", async () => {
       const accountId = "p3-partial";
@@ -570,6 +587,19 @@ test("temporary PostgreSQL enforces P1-B invariants", { timeout: 60_000 }, async
       assert.equal((await db.admin.query("SELECT count(*)::int AS count FROM announcement_receipts WHERE title='Spot delisting ANN and FAIL'")).rows[0].count, 0);
       assert.equal((await db.admin.query("SELECT count(*)::int AS count FROM instrument_protection WHERE inst_id='FAIL-USDT'")).rows[0].count, 0);
       assert.equal(telemetry.some((event) => event.reason === "ANNOUNCEMENT_PAGE_TRANSACTION_FAILED"), true);
+    });
+
+    await t.test("P4 offline protection import is parameterized, transactional and replayable", async () => {
+      const artifact = convertD1Export({ legacyDurationUnit: "H", blacklist: [{ crypto_symbol: "P4IMP", reason: "fixture" }], limits: [{ inst_id: "P4IMP-USDT", best_limit: "1", best_duration: "24" }] });
+      const first = await importOfflineProtection(db.admin, artifact);
+      const second = await importOfflineProtection(db.admin, artifact);
+      assert.deepEqual(first, { input_hash: artifact.content_hash, schema_version: 1, inserted: 1, unchanged: 0, conflict: 0, config_artifact_hash: artifact.content_hash });
+      assert.equal(second.unchanged, 1);
+      await assert.rejects(importOfflineProtection(db.admin, { ...artifact, content_hash: "bad" }), /INVALID_IMPORT_ARTIFACT/);
+      await assert.rejects(importOfflineProtection(db.admin, convertD1Export({ legacyDurationUnit: "H", blacklist: [{ crypto_symbol: "P4ROLL" }], limits: [] }), { injectFailure: true }), /INJECTED_IMPORT_FAILURE/);
+      assert.equal((await db.admin.query("SELECT count(*)::int AS n FROM instrument_protection WHERE inst_id='P4ROLL-USDT'")).rows[0].n, 0);
+      await db.restart();
+      assert.equal((await importOfflineProtection(db.admin, artifact)).unchanged, 1, "safe after cluster restart");
     });
   } finally {
     await db.stop();
