@@ -15,6 +15,15 @@ export class SellService {
   }
   key(fill) { return `${field(fill, "account_id", "accountId")}:${field(fill, "inst_id", "instId")}:${field(fill, "trade_id", "tradeId")}`; }
   _emit(event) { try { Promise.resolve(this.telemetry(event)).catch(() => {}); } catch { /* best effort */ } }
+  releaseLatch(event, reason) {
+    if (event?.type !== "SELL_BREACH" || !event.key) return false;
+    const released = this.latches.delete(event.key);
+    if (released) this._emit({ type: "sell_trigger_retry", reason, instId: event.instId, key: event.key });
+    return released;
+  }
+  noteRetry(event, reason, delayMs) {
+    this._emit({ type: "sell_trigger_retry", reason: "SELL_EVENT_RETRY_SCHEDULED", retryReason: reason, retryCount: event.retryCount, delayMs, instId: event.instId, key: event.key });
+  }
   rebuild(fills) {
     this.fills.clear(); this.byInst.clear(); this.latches.clear();
     for (const fill of fills) {
@@ -22,6 +31,16 @@ export class SellService {
       const key = this.key(fill); this.fills.set(key, { ...fill });
       const instId = field(fill, "inst_id", "instId"); const rows = this.byInst.get(instId) ?? []; rows.push(key); this.byInst.set(instId, rows);
     }
+  }
+  resumeTriggered(activeSourceTradeIds = new Set()) {
+    const events = [];
+    for (const [key, fill] of this.fills) {
+      const tradeId = field(fill, "trade_id", "tradeId");
+      if (field(fill, "sell_state", "sellState") !== "SELL_TRIGGERED" || activeSourceTradeIds.has(tradeId) || this.latches.has(key)) continue;
+      this.latches.add(key);
+      events.push({ type: "SELL_BREACH", priority: "critical", key, instId: field(fill, "inst_id", "instId"), protection: fill.protection_price, resumed: true });
+    }
+    return events;
   }
   observeCandle(instId) {
     const candle = this.market.candle(instId); const instrument = this.market.instrument(instId);
@@ -82,7 +101,7 @@ export class SellService {
   }
   async consume(event) {
     const fill = await this.transaction((tx) => this.loadFill(tx, event.key));
-    if (!fill) return { accepted: false, reason: "FILL_MISSING" };
+    if (!fill) { this.releaseLatch(event, "FILL_MISSING"); return { accepted: false, reason: "FILL_MISSING" }; }
     const accountId = field(fill, "account_id", "accountId"); const instId = field(fill, "inst_id", "instId"); const tradeId = field(fill, "trade_id", "tradeId");
     if (event.type === "SELL_PROTECTION") {
       const result = await this.transaction((tx) => this.state.raiseProtection(tx, { accountId, instId, tradeId, version: fill.version, protectionPrice: event.protection }));
@@ -94,13 +113,28 @@ export class SellService {
       return { accepted: result?.rowCount === 1, reason: "PROTECTION_UPDATED" };
     }
     if (event.type !== "SELL_BREACH") return { accepted: false, reason: "UNSUPPORTED" };
+    const sellState = field(fill, "sell_state", "sellState");
+    if (sellState === "SOLD") { this.releaseLatch(event, "FILL_SOLD"); return { accepted: false, reason: "FILL_SOLD" }; }
+    if (sellState === "SELL_TRIGGERED") return this._enqueueTriggered(fill, event);
     const result = await this.transaction((tx) => this.state.markSellTriggered(tx, { accountId, instId, tradeId, version: fill.version, protectionPrice: event.protection }));
-    if (result?.rowCount !== 1) return { accepted: false, reason: "CAS_LOST" };
+    if (result?.rowCount !== 1) return { accepted: false, reason: "CAS_LOST", retryable: true };
     const current = result.rows?.[0] ?? { ...fill, sell_state: "SELL_TRIGGERED", protection_price: event.protection, version: BigInt(fill.version) + 1n };
     this.fills.set(event.key, current);
-    this.coordinator.enqueue({ intent: "SELL", accountId, instId, baseCcy: field(current, "base_ccy", "baseCcy"), sourceBuyTradeId: tradeId, remainingSize: subtractDecimal(field(current, "fill_size", "fillSize"), field(current, "disposed_size", "disposedSize") ?? "0"), fillVersion: current.version, sellTime: Number(field(current, "sell_time", "sellTime")), availableBase: current.availableBase, bidPx: this.market.ticker(instId)?.bidPx ?? this.market.ticker(instId)?.last, protection: event.protection, triggerPrice: event.triggerPrice, quoteTs: event.quoteTs, executionMode: field(current, "execution_mode", "executionMode"), executionRoute: field(current, "execution_route", "executionRoute") });
+    const queued = this._enqueueTriggered(current, event);
+    if (!queued.accepted) return queued;
     this._emit({ type: "sell_triggered", reason: "SELL_TRIGGERED", instId, sourceBuyTradeId: tradeId, breakdownPrice: event.protection, triggerPrice: event.triggerPrice, quoteTs: event.quoteTs });
     return { accepted: true, reason: "SELL_TRIGGERED" };
+  }
+  _enqueueTriggered(fill, event) {
+    const accountId = field(fill, "account_id", "accountId"); const instId = field(fill, "inst_id", "instId"); const tradeId = field(fill, "trade_id", "tradeId");
+    const quote = this.market.ticker(instId);
+    const accepted = this.coordinator.enqueue({ intent: "SELL", accountId, instId, baseCcy: field(fill, "base_ccy", "baseCcy"), sourceBuyTradeId: tradeId, remainingSize: subtractDecimal(field(fill, "fill_size", "fillSize"), field(fill, "disposed_size", "disposedSize") ?? "0"), fillVersion: fill.version, sellTime: Number(field(fill, "sell_time", "sellTime")), availableBase: fill.availableBase, bidPx: quote?.bidPx ?? quote?.last, protection: event.protection ?? fill.protection_price, triggerPrice: event.triggerPrice, quoteTs: event.quoteTs, executionMode: field(fill, "execution_mode", "executionMode"), executionRoute: field(fill, "execution_route", "executionRoute") });
+    if (!accepted) {
+      this._emit({ type: "sell_trigger_retry", reason: "COORDINATOR_REJECTED", instId, sourceBuyTradeId: tradeId });
+      return { accepted: false, reason: "COORDINATOR_REJECTED", retryable: true };
+    }
+    if (event.resumed) this._emit({ type: "sell_trigger_retry", reason: "SELL_TRIGGERED_RESUMED", instId, sourceBuyTradeId: tradeId });
+    return { accepted: true, reason: event.resumed ? "SELL_TRIGGERED_RESUMED" : "SELL_TRIGGERED" };
   }
   async reviewDust() {
     for (const [key, fill] of this.fills) {

@@ -74,6 +74,56 @@ test("P3 SELL uses a strict 3m breakdown: equality does not trigger", () => {
   assert.equal(sell.observeTicker("BTC-USDT").length, 1);
 });
 
+test("P3 releases a breach latch when the critical queue rejects the event", async () => {
+  const now = clock(); const market = new MarketProjection({ clock: now });
+  market.updateInstrument({ instId: "BTC-USDT", ts: 1, state: "live", tickSz: "0.1", lotSz: "0.1", minSz: "0.1", base: "BTC" });
+  const fill = { account_id: "a", inst_id: "BTC-USDT", base_ccy: "BTC", trade_id: "queue-full", side: "BUY", fill_size: "1", disposed_size: "0", sell_time: 1, sell_state: "WAITING", version: 1, protection_price: "90" };
+  const sell = new SellService({ market, clock: now, coordinator: { enqueue: () => true }, state: {} });
+  const { BoundedPriorityQueue, TradingEngine } = await import("../src/application/trading-engine.js");
+  sell.rebuild([fill]); const engine = new TradingEngine({ projection: market, clock: now, sellService: sell, queue: new BoundedPriorityQueue({ capacity: 0 }) });
+  engine.receiveTicker({ instId: "BTC-USDT", ts: 2, last: "89", bidPx: "89" });
+  assert.equal(sell.latches.has(sell.key(fill)), false);
+  assert.equal(sell.observeTicker("BTC-USDT").length, 1, "the next observation can arm the breach again");
+});
+
+test("P3 retries DB failures and CAS loss without leaking the breach latch", async () => {
+  const now = { value: 1_000, nowMs() { return this.value; } }; const market = new MarketProjection({ clock: now });
+  market.updateInstrument({ instId: "BTC-USDT", ts: 1, state: "live", tickSz: "0.1", lotSz: "0.1", minSz: "0.1", base: "BTC" });
+  market.updateTicker({ instId: "BTC-USDT", ts: 2, last: "89", bidPx: "89" });
+  const fill = { account_id: "a", inst_id: "BTC-USDT", base_ccy: "BTC", trade_id: "retry", side: "BUY", fill_size: "1", disposed_size: "0", sell_time: 1, sell_state: "WAITING", version: 1, protection_price: "90" };
+  let loads = 0; let marks = 0; const intents = [];
+  const sell = new SellService({ market, clock: now, coordinator: { enqueue: (intent) => Boolean(intents.push(intent)) }, loadFill: async () => { if (loads++ === 0) throw new Error("db down"); return fill; }, state: { markSellTriggered: async () => marks++ === 0 ? { rowCount: 0 } : { rowCount: 1, rows: [{ ...fill, sell_state: "SELL_TRIGGERED", version: 2 }] } } });
+  sell.rebuild([fill]); const engine = new (await import("../src/application/trading-engine.js")).TradingEngine({ projection: market, clock: now, sellService: sell });
+  engine.enqueueSellEvents(sell.observeTicker("BTC-USDT"));
+  await assert.rejects(engine.consumeOne(), /db down/);
+  now.value += 100; assert.equal((await engine.consumeOne()).reason, "CAS_LOST");
+  now.value += 200; assert.equal((await engine.consumeOne()).reason, "SELL_TRIGGERED");
+  assert.equal(intents.length, 1); assert.equal(sell.latches.has(sell.key(fill)), true);
+});
+
+test("P3 resumes durable SELL_TRIGGERED exits without another price breach", async () => {
+  const now = clock(); const market = new MarketProjection({ clock: now }); const intents = []; let marks = 0;
+  market.updateInstrument({ instId: "BTC-USDT", ts: 1, state: "live", tickSz: "0.1", lotSz: "0.1", minSz: "0.1", base: "BTC" });
+  market.updateTicker({ instId: "BTC-USDT", ts: 2, last: "100", bidPx: "100" });
+  const fill = { account_id: "a", inst_id: "BTC-USDT", base_ccy: "BTC", trade_id: "durable", side: "BUY", fill_size: "1", disposed_size: "0", sell_time: 1, sell_state: "SELL_TRIGGERED", version: 2, protection_price: "90" };
+  const sell = new SellService({ market, clock: now, coordinator: { enqueue: (intent) => Boolean(intents.push(intent)) }, loadFill: async () => fill, state: { markSellTriggered: async () => { marks += 1; } } });
+  sell.rebuild([fill]); const events = sell.resumeTriggered();
+  assert.equal(events.length, 1); assert.equal(events[0].resumed, true);
+  assert.equal((await sell.consume(events[0])).reason, "SELL_TRIGGERED_RESUMED");
+  assert.equal(marks, 0); assert.equal(intents.length, 1);
+});
+
+test("P3 retries Coordinator rejection after persisting SELL_TRIGGERED", async () => {
+  const now = { value: 1_000, nowMs() { return this.value; } }; const market = new MarketProjection({ clock: now });
+  market.updateInstrument({ instId: "BTC-USDT", ts: 1, state: "live", tickSz: "0.1", lotSz: "0.1", minSz: "0.1", base: "BTC" }); market.updateTicker({ instId: "BTC-USDT", ts: 2, last: "89", bidPx: "89" });
+  const waiting = { account_id: "a", inst_id: "BTC-USDT", base_ccy: "BTC", trade_id: "coordinator", side: "BUY", fill_size: "1", disposed_size: "0", sell_time: 1, sell_state: "WAITING", version: 1, protection_price: "90" };
+  const triggered = { ...waiting, sell_state: "SELL_TRIGGERED", version: 2 }; let durable = waiting; let marks = 0; let accepts = false;
+  const sell = new SellService({ market, clock: now, coordinator: { enqueue: () => accepts }, loadFill: async () => durable, state: { markSellTriggered: async () => { marks += 1; durable = triggered; return { rowCount: 1, rows: [triggered] }; } } });
+  sell.rebuild([waiting]); const engine = new (await import("../src/application/trading-engine.js")).TradingEngine({ projection: market, clock: now, sellService: sell }); engine.enqueueSellEvents(sell.observeTicker("BTC-USDT"));
+  assert.equal((await engine.consumeOne()).reason, "COORDINATOR_REJECTED"); accepts = true; now.value += 100;
+  assert.equal((await engine.consumeOne()).reason, "SELL_TRIGGERED"); assert.equal(marks, 1, "retry does not rewrite durable trigger state");
+});
+
 test("P3 stale candle preserves protection, warns when unarmed, and REST refresh re-enters candle evaluation", async () => {
   const now = { value: 720_000, nowMs() { return this.value; } }; const market = new MarketProjection({ clock: now }); const events = []; let refreshes = 0;
   market.updateInstrument({ instId: "BTC-USDT", ts: 1, state: "live", tickSz: "0.1", lotSz: "0.1", minSz: "0.1", base: "BTC" });

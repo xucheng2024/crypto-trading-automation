@@ -63,7 +63,11 @@ export class BoundedPriorityQueue {
     if (target.length >= this.capacity) return false;
     target.push(event); return true;
   }
-  take() { return this.critical.shift() ?? this.normal.shift() ?? this.#takeTicker(); }
+  take(nowMs = Infinity) { return this.#takeReady(this.critical, nowMs) ?? this.#takeReady(this.normal, nowMs) ?? this.#takeTicker(); }
+  #takeReady(rows, nowMs) {
+    const index = rows.findIndex((event) => !Number.isFinite(event.notBefore) || event.notBefore <= nowMs);
+    return index < 0 ? null : rows.splice(index, 1)[0];
+  }
   #takeTicker() { const first = this.tickers.keys().next(); if (first.done) return null; const value = this.tickers.get(first.value); this.tickers.delete(first.value); return value; }
   get size() { return this.critical.length + this.normal.length + this.tickers.size; }
 }
@@ -77,7 +81,7 @@ export class TradingEngine {
     const result = this.projection.updateTicker(row);
     if (result.accepted) {
       this.queue.enqueue({ type: "ticker", instId: row.instId, enqueuedAt: this.clock.nowMs() });
-      for (const event of this.sellService?.observeTicker(row.instId) ?? []) if (!this.queue.enqueue({ ...event, enqueuedAt: this.clock.nowMs() })) this.slo?.increment("queue_dropped_sell");
+      this.enqueueSellEvents(this.sellService?.observeTicker(row.instId) ?? []);
     }
     // Ingress SLO boundary: normalized WS event through projection and into
     // the bounded consumer queue. Keep the old metric for dashboard continuity.
@@ -89,16 +93,49 @@ export class TradingEngine {
     const result = this.projection.updateCandle(row);
     if (result.accepted) {
       if (!this.queue.enqueue({ type: "market-recheck", instId: row.instId, priority: "normal", enqueuedAt: this.clock.nowMs() })) this.slo?.increment("queue_dropped_recheck");
-      for (const event of this.sellService?.observeCandle(row.instId) ?? []) if (!this.queue.enqueue({ ...event, enqueuedAt: this.clock.nowMs() })) this.slo?.increment("queue_dropped_sell");
+      this.enqueueSellEvents(this.sellService?.observeCandle(row.instId) ?? []);
     }
     return result;
   }
   receiveOrder(row) { const accepted = this.queue.enqueue({ type: "ORDER_UPDATE", priority: "critical", order: row, enqueuedAt: this.clock.nowMs() }); if (!accepted) this.slo?.increment("queue_dropped_order"); return accepted; }
   rebuildExitWatches(fills) { this.sellService?.rebuild(fills); }
+  enqueueSellEvents(events) {
+    let accepted = 0;
+    for (const event of events) {
+      const queued = { ...event, enqueuedAt: event.enqueuedAt ?? this.clock.nowMs() };
+      if (this.queue.enqueue(queued)) accepted += 1;
+      else {
+        this.sellService?.releaseLatch?.(event, "QUEUE_FULL");
+        this.slo?.increment("queue_dropped_sell");
+      }
+    }
+    return accepted;
+  }
+  _retrySellEvent(event, reason) {
+    const retryCount = Number(event.retryCount ?? 0) + 1;
+    const delayMs = Math.min(30_000, 100 * (2 ** Math.min(retryCount - 1, 8)));
+    const retry = { ...event, retryCount, notBefore: this.clock.nowMs() + delayMs, enqueuedAt: this.clock.nowMs() };
+    if (this.queue.enqueue(retry)) {
+      this.sellService?.noteRetry?.(retry, reason, delayMs);
+      return true;
+    }
+    this.sellService?.releaseLatch?.(event, "RETRY_QUEUE_FULL");
+    this.slo?.increment("queue_dropped_sell");
+    return false;
+  }
   async consumeOne() {
-    const event = this.queue.take(); if (!event) return null;
+    const event = this.queue.take(this.clock.nowMs()); if (!event) return null;
     if (Number.isFinite(event.enqueuedAt)) this.slo?.record("queue_wait", event.enqueuedAt);
-    if (event.type === "SELL_BREACH" || event.type === "SELL_PROTECTION") return this.sellService.consume(event);
+    if (event.type === "SELL_BREACH" || event.type === "SELL_PROTECTION") {
+      try {
+        const result = await this.sellService.consume(event);
+        if (result?.retryable) this._retrySellEvent(event, result.reason);
+        return result;
+      } catch (error) {
+        this._retrySellEvent(event, error?.message ?? "SELL_CONSUME_FAILED");
+        throw error;
+      }
+    }
     if (event.type === "ORDER_UPDATE") return this.onOrderEvent(event.order);
     if (event.type === "ticker" || event.type === "market-recheck") return this.onMarketEvent(event);
     return event;
