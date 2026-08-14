@@ -76,11 +76,18 @@ OKX_PREFLIGHT_INST_ID=<ENABLED_INST_ID> \
 npm run read-only-preflight -- --real
 ```
 
-Build/push is a human-gated operation; do not substitute a tag for the recorded digest:
+Build/push is a human-gated operation; do not substitute a tag for the recorded digest.
+Container Apps in this environment run `linux/amd64`; builds made on an Apple
+Silicon workstation must therefore declare the platform explicitly. Before
+deploying, inspect the pushed digest and confirm it contains `linux/amd64`.
+An `arm64`-only image can surface in Container Apps as misleading
+`ImagePullBackOff` or unauthorized-pull diagnostics even when `AcrPull` is
+configured correctly:
 
 ```sh
-docker build --tag <LOCAL_CANDIDATE_IMAGE> .
-# After authorized ACR push, record <ACR>/<REPOSITORY>@sha256:<DIGEST> in parameters.
+docker buildx build --platform linux/amd64 --push --tag <ACR>/<REPOSITORY>:<COMMIT> .
+docker buildx imagetools inspect <ACR>/<REPOSITORY>:<COMMIT>
+# Record and deploy only <ACR>/<REPOSITORY>@sha256:<DIGEST>.
 ```
 
 ## Safe OFF deployment and health
@@ -102,6 +109,12 @@ insufficient. If the new process attempted startup while the old owner still
 held the lock, let it restart or restart only the final revision after all old
 replicas have stopped.
 
+If a new migration causes `POSTGRES_MIGRATIONS_MISSING`, do not weaken the
+startup check. Keep the revision `OFF`, apply the reviewed SQL as the Entra
+database administrator, remove any temporary operator firewall rule immediately,
+then restart the final OFF revision. A migration is complete only when the
+startup gate and readiness probe both pass.
+
 Every deployment must finish with all of the following evidence:
 
 - the deployed image exactly matches the recorded immutable digest and tested
@@ -121,6 +134,23 @@ the service `OFF` and report the evidence before any proposed mode change.
 ## FULL gate (not authorized here)
 
 Before separately authorized `FULL`: inventory legacy mutation schedulers, then manually verify old scheduler/API-key/pending-algo cleanup; use ownership filters only. `FULL` needs new explicit authorization. Observe the first order and ledger state. Never scan positions, pending algo, bills or unrelated shared-account assets.
+
+## Recommended automation
+
+Use a GitHub Actions workflow with GitHub-to-Azure OIDC federation rather than
+long-lived Azure credentials or an IDE deployment plugin. The workflow should:
+
+1. run the local test, container, IaC and migration-rehearsal gates;
+2. use Buildx to build and push `linux/amd64`, then inspect the pushed manifest;
+3. deploy the immutable digest in `OFF` mode and wait for one healthy revision;
+4. apply reviewed migrations through a dedicated, least-privileged migration
+   runner; and
+5. require a protected-environment approval before changing to `FULL`, then
+   explicitly deactivate all older revisions and verify the final owner lock.
+
+The Azure Container Apps deploy action can perform the image update, but the
+guarded `az containerapp` steps remain necessary for the migration, revision
+inventory, and OFF-to-FULL approval boundary.
 
 ## Incident and rollback
 
