@@ -248,12 +248,13 @@ test("P4 default WS composition refuses an empty instrument baseline", async () 
   }), /OKX_INSTRUMENTS_REQUIRED/);
 });
 
-test("P4 Engine recurring work serializes announcement/reconcile timers and stops cleanly", async () => {
+test("P4 Engine recurring work serializes remote timers but never phase-starves metrics", async () => {
   const intervals = new Map(); let next = 0; const timers = { setInterval(fn, delay) { const id = ++next; intervals.set(id, { fn, delay }); return id; }, clearInterval(id) { intervals.delete(id); } };
   const events = []; let release; const blocked = new Promise((resolve) => { release = resolve; });
-  const work = new EngineRecurringWork({ timers, telemetry: (event) => events.push(event), announcementMs: 11, reconcileMs: 13, routeMs: 15, weeklyMs: 17, announcements: async () => blocked });
+  let metricReports = 0; const work = new EngineRecurringWork({ timers, telemetry: (event) => events.push(event), announcementMs: 11, reconcileMs: 13, routeMs: 15, weeklyMs: 17, announcements: async () => blocked, reportMetrics: async () => { metricReports += 1; } });
   work.start(); assert.deepEqual([...intervals.values()].map((row) => row.delay).sort((a, b) => a - b), [11, 13, 15, 17, 60_000]);
   const first = work.run('ANNOUNCEMENT', work.announcements); assert.deepEqual(await work.run('RECONCILE', async () => { throw new Error('must not run'); }), { skipped: true, reason: 'RECURRING_WORK_BUSY' });
+  const metricTimer = [...intervals.values()].find((row) => row.delay === 60_000); assert.deepEqual(await metricTimer.fn(), { ok: true }); assert.equal(metricReports, 1);
   release(); assert.deepEqual(await first, { ok: true }); assert.deepEqual(await work.run('WEEKLY_RECONCILE', async () => { throw new Error('offline'); }), { ok: false });
   assert.equal(events[0].reason, 'WEEKLY_RECONCILE_FAILED'); work.stop(); assert.equal(intervals.size, 0);
 });
