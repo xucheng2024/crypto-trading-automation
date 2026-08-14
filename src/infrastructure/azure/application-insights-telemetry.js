@@ -19,6 +19,7 @@ function messageFor(event) {
 
 export function isImportantTelemetry(event) {
   if (!event || typeof event !== "object") return false;
+  if (["trading_decision", "order_lifecycle", "trade_lifecycle", "sell_watch_armed", "metric_snapshot", "strategy_baseline"].includes(event.type)) return true;
   if (event.error || event.event === "OFF_SAFE_DEGRADED" || event?.event?.startsWith("MAINTENANCE_") || event.type === "recovery_loaded") return true;
   return IMPORTANT.test([event.reason, event.outcome, ...(event.reasons ?? [])].filter(Boolean).join(" "));
 }
@@ -44,6 +45,7 @@ export function createApplicationInsightsTelemetry({
       const message = messageFor(event);
       const severe = Boolean(event.error) || /(FAILED|ERROR|UNKNOWN|LOST|HALT|SHORTFALL)/.test(message);
       telemetryClient.trackTrace({ message, severity: severe ? 3 : 2, properties: safeProperties(event) });
+      if (event.type === "metric_snapshot") for (const [name, value] of Object.entries(event)) if (name !== "type" && name !== "reason" && Number.isFinite(value)) telemetryClient.trackMetric?.({ name, value });
     } catch { /* telemetry must never change trading behavior */ }
   };
   telemetry.flush = async () => { try { await telemetryClient?.flush?.(); } catch {} };

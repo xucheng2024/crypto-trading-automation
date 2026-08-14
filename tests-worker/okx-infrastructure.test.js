@@ -148,9 +148,9 @@ test("P1 Private WS retains backoff until login and every subscription succeeds;
   assert.equal(privateClient.retry, 0); assert.equal(privateEvents[0].ts, 41); assert.equal(typeof privateEvents[0].ts, "number");
   const businessSockets = [];
   const business = new OkxBusinessWsClient({ instIds: ["BTC-USDT"], socketFactory: () => { const socket = new FakeSocket(); businessSockets.push(socket); return socket; }, timers, onObservation: (event) => candles.push(event) });
-  business.connect(); businessSockets[0].emit("open"); businessSockets[0].emit("message", JSON.stringify({ event: "subscribe", code: "0", arg: { channel: "candle5m", instId: "BTC-USDT" } }));
-  businessSockets[0].emit("message", JSON.stringify({ arg: { channel: "candle5m", instId: "BTC-USDT" }, data: [["10", "1", "2", "0.5", "1.5", "0", "0", "0", "0"], ["11", "1", "2", "0.5", "1.5", "0", "0", "0", "1"]] }));
-  business.reconnect(); timers.runTimeouts(); businessSockets[0].emit("message", JSON.stringify({ arg: { channel: "candle5m", instId: "BTC-USDT" }, data: [["12", "1", "2", "0.5", "1.5", "0", "0", "0", "1"]] }));
+  business.connect(); businessSockets[0].emit("open"); businessSockets[0].emit("message", JSON.stringify({ event: "subscribe", code: "0", arg: { channel: "candle3m", instId: "BTC-USDT" } }));
+  businessSockets[0].emit("message", JSON.stringify({ arg: { channel: "candle3m", instId: "BTC-USDT" }, data: [["10", "1", "2", "0.5", "1.5", "0", "0", "0", "0"], ["11", "1", "2", "0.5", "1.5", "0", "0", "0", "1"]] }));
+  business.reconnect(); timers.runTimeouts(); businessSockets[0].emit("message", JSON.stringify({ arg: { channel: "candle3m", instId: "BTC-USDT" }, data: [["12", "1", "2", "0.5", "1.5", "0", "0", "0", "1"]] }));
   assert.equal(candles.length, 1); assert.equal(candles[0].confirm, true);
 });
 

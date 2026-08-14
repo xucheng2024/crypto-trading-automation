@@ -16,14 +16,14 @@
 PostgreSQL 运行时保留或新建：
 
 - daily_limit_cache；
-- filled_orders（统一保存管理起点之后配置交易对的 SPOT/MARGIN BUY/SELL fills，并保存 fillTime/billId、实际 `execution_mode` 与语义 `execution_route=margin|spot`；`source=SYSTEM|ACCOUNT`。managed BUY 保存 fill_size、disposed_size、hold_hours、strategy_config_hash、sell_time、protection_price、sell_state 和 version；ACCOUNT SELL 保存 `allocation_state=PENDING|APPLIED` 与 allocated_size。remaining/generation/breach latch 不持久化，不保存实际手续费或借款利息）；
+- filled_orders（统一保存管理起点之后配置交易对的 SPOT/MARGIN BUY/SELL fills，并保存 fillTime/billId、fill price、实际 fee/feeCcy、实际 `execution_mode` 与语义 `execution_route=margin|spot`；`source=SYSTEM|ACCOUNT`。managed BUY 另保存 source attempt、fill_size、disposed_size、hold_hours、strategy_config_hash、sell_time、protection_price、sell_state、成交后最低价/最大不利幅度和 version；ACCOUNT SELL 保存 `allocation_state=PENDING|APPLIED` 与 allocated_size。实际 fee 仅用于审计，不进入规划公式；remaining/generation/breach latch 和借款利息不持久化）；
 - instrument_protection（仅在被保护时存在；保存 BLACKLISTED/EXITING/EXITED/DELIST_DUST 单状态、退市元数据、version 和错误）；
 
 新增：
 
 | Aggregate | 关键内容 |
 |---|---|
-| order_attempts | 全部 BUY/SELL/DELIST 的 intent、instId、clOrdId、ordId、payload hash、source_buy_trade_id/strategy_day/generation、planned_size、状态、exchange_state、错误/failure fingerprint、`reserved_exposure_usd` 或 `reserved_base_size` 及 reservation 状态；BUY 额外保存冻结目标资金、decision_quote_ts/quote hash/decision_candle_ts/candle hash/decision_market_key、execution_limit_price、instrument version、hold_hours/config hash 和准入使用的 equity/exposure/snapshot version 摘要 |
+| order_attempts | 全部 BUY/SELL/DELIST 的 intent、instId、clOrdId、ordId、payload hash、source_buy_trade_id/strategy_day/generation、planned_size、状态、exchange_state、错误/failure fingerprint、触发价/参考价/决策原因、`reserved_exposure_usd` 或 `reserved_base_size` 及 reservation 状态；BUY 额外保存冻结目标资金、decision_quote_ts/quote hash/decision_candle_ts/candle hash/decision_market_key、execution_limit_price、instrument version、hold_hours/config hash 和准入使用的 equity/exposure/snapshot version 摘要 |
 | sync_watermarks | 按 account/instType/endpoint 分开的 orders/fills/history 连续水位、重叠窗口与健康状态，以及首次启动原子冻结的 `managed_fill_start_time`；不能用某一 SPOT 水位代表 MARGIN 已覆盖 |
 
 关键唯一约束：
@@ -133,7 +133,7 @@ VIP4 fills WS 不作为首版依赖。
 5. 仅当匹配本系统 `clOrdId/tag` 的 OKX 订单在数据库中不存在时标记 ORPHANED；不匹配所有权的订单生命周期忽略，但管理起点之后配置交易对且模式可确认的外部 SPOT/MARGIN BUY/SELL fills 仍按 ACCOUNT fill 纳管。
 6. 数据库有而 OKX 无：查询 `orders-history`、`orders-history-archive` 和重叠 `fills/fills-history` 后决定终态。
 7. 恢复 PREPARED/SUBMITTED/UNKNOWN orders 和未完成逐 fill sell attempts；PREPARED 与 UNKNOWN 一样先查询。
-8. 恢复 candle5m 基线。
+8. 恢复 candle3m 基线。
 9. 所有必需快照新鲜且无未处理矛盾后设置 READY=true；当天未完成 BUY 轮次只有在最新信号重新合格时才继续下一 generation。
 
 RECOVERING/READY=false 时只允许 WS/REST baseline、只读 reconciliation 和既有订单状态恢复，不得创建或提交新的 BUY、SELL、DELIST attempt。进入 READY 后才恢复业务意图消费；已经提交的订单始终可以继续只读对账。

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { normalizeInstrument } from "../src/domain/instrument.js";
 import { assertAttemptState, createClOrdId, payloadHash } from "../src/domain/order.js";
-import { assessLeverage, buySignal, dailyLimit, delistPlan, normalizeHoldHours, strategyDay } from "../src/domain/rules.js";
+import { assessLeverage, buySignal, dailyLimit, delistPlan, normalizeHoldHours, sellBreakdownPrice, strategyDay } from "../src/domain/rules.js";
 
 test("domain instrument and order contracts normalize deterministically", async () => {
   assert.deepEqual(normalizeInstrument({ instId: "btc-usdt", tickSz: "0.1", lotSz: "0.001", state: "live" }), { instId: "BTC-USDT", base: "BTC", quote: "USDT", tickSz: "0.1", lotSz: "0.001", minSz: "0.001", state: "live", expTime: null });
@@ -20,8 +20,10 @@ test("daily, duration, clock, buy, leverage and exit boundaries are pure", () =>
   assert.throws(() => normalizeHoldHours("2"));
   assert.equal(dailyLimit({ todayOpen: "100", yesterdayOpen: "100", yesterdayClose: "110", bestLimit: "90", tickSz: "0.1" }).skipped, false);
   assert.equal(dailyLimit({ todayOpen: "100", yesterdayOpen: "100", yesterdayClose: "110.01", bestLimit: "90", tickSz: "0.1" }).skipped, true);
-  assert.equal(buySignal({ last: "90", askPx: "90", limitPrice: "90", previousClosedOpen: "89" }).eligible, true);
-  assert.equal(buySignal({ last: "90", askPx: "90.1", limitPrice: "90", previousClosedOpen: "89" }).reason, "ASK_ABOVE_LIMIT");
+  assert.equal(buySignal({ last: "90", askPx: "90", limitPrice: "90", previousClosedHigh: "89" }).eligible, true);
+  assert.equal(buySignal({ last: "89.267", askPx: "89.267", limitPrice: "90", previousClosedHigh: "89" }).reason, "BREAKOUT_NOT_CONFIRMED");
+  assert.equal(buySignal({ last: "90", askPx: "90.1", limitPrice: "90", previousClosedHigh: "89" }).reason, "ASK_ABOVE_LIMIT");
+  assert.equal(sellBreakdownPrice("100"), "99.7");
   assert.equal(assessLeverage({ committedExposure: "295", candidateCost: "0", totalEq: "100", adjEq: "100" }).admitted, true);
   assert.equal(assessLeverage({ committedExposure: "295", candidateCost: "0.01", totalEq: "100", adjEq: "100" }).admitted, false);
   assert.equal(assessLeverage({ committedExposure: "300", totalEq: "100", adjEq: "100" }).hardStopped, true);

@@ -9,7 +9,7 @@ sell_time = fill_ts + hold_hours * 3,600,000 ms
 remaining_size = fill_size - disposed_size
 ~~~
 
-不保存或分摊 OKX 实际手续费。每次成交统一使用 `estimated_fee = fill_notional * 0.0005`；该值只用于成本估算，不参与 base 数量账本。实际下单始终受账户当前可售 base 限制，因此不会为手续费差异借入 base。
+保存 OKX 返回的实际 fill price、fee 和 feeCcy 供事后审计，但不把实际手续费分摊进 base 数量或风险公式。资金规划仍统一使用 `estimated_fee = fill_notional * 0.0005`；实际下单始终受账户当前可售 base 限制，因此不会为手续费差异借入 base。
 
 不创建 `managed_position`、`sell_group`、`sell_group_items` 或固定金额批次，也不把多个 fills 聚合成一张卖单。一个 BUY order 若产生三条 tradeId，就产生三条独立卖出任务。
 
@@ -40,21 +40,21 @@ fill_remaining_value_usdt=remaining_size * fresh_bid_px
 
 ## SELL_WATCH
 
-每条 fill 到达 `sell_time` 后读取最近一根 `confirm=1` 的完整 5m K 线：
+每条 fill 到达 `sell_time` 后读取最近一根 `confirm=1` 的 OKX 原生 3m K 线：
 
 ~~~text
-protection_price=roundToStep(last_closed_candle.low,tickSz,up)
+protection_price=last_closed_candle.low * 0.997
 ~~~
 
-每根新的确认 K 线满足 `candle.low > protection_price` 时，只上调该 fill 的保护价。完全相同的重复 candle 忽略；同 instId+ts 但 OHLC payload 不同视为修正并告警，只重新应用 `max(existing protection, corrected low rounded up)`，绝不能因修正下调保护价。更新后立即用该 instId 最新且仍新鲜的已接收 ticker 检查一次 breach；这样 ticker 先到、candle 后到时不会漏掉已经满足的退出条件。ticker 已过期则等待下一条实际 ticker。倒序或 `confirm=0` 不修改状态。
+每根新的确认 K 线都以其 `low * 0.997` 替换该 fill 的阈值，阈值可以上移或下移；完全相同的重复 candle 忽略，同 instId+ts 但 OHLC payload 不同的修正也以修正后的 low 为准。更新后立即用该 instId 最新且仍新鲜的已接收 ticker 检查一次 breach；这样 ticker 先到、candle 后到时不会漏判。ticker 已过期则等待下一条实际 ticker。倒序或 `confirm=0` 不修改状态。
 
 每次收到该 instId 的新鲜 ticker，遍历内存中该币种已到期的 SELL_WATCH fills：
 
 ~~~text
-last <= protection_price
+last < protection_price
 ~~~
 
-相等也触发。观察到命中时，Market Projection 必须先原子设置该 fill 的 `breach_latched=true`，再将高优先级 SELL_BREACH 事件放入关键队列。ticker callback 不等待数据库。
+相等不触发。观察到严格跌破时，Market Projection 必须先原子设置该 fill 的 `breach_latched=true`，再将高优先级 SELL_BREACH 事件放入关键队列。ticker callback 不等待数据库。
 
 锁存不可逆：后续价格反弹不能回到 SELL_WATCH。消费者先持久化 `SELL_TRIGGERED` 并排入高优先级内存队列；取得 mutation slot 后重新校验并在短事务内创建 PREPARED attempt 与 reservation，随后立即提交 market sell。提交失败、部分成交或 UNKNOWN 只进入订单对账/恢复，不重新等待价格，也不要求下一条 ticker 再次命中。
 

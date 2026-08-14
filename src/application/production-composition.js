@@ -14,6 +14,7 @@ import { OkxPublicWsClient, OkxPrivateWsClient, OkxBusinessWsClient } from "../i
 import { VirtualSloMetrics } from "./slo-metrics.js";
 import { EngineRecurringWork } from "./engine-recurring-work.js";
 import { EngineWorkLoop } from "./engine-work-loop.js";
+import { BuySignalPlanner } from "./buy-signal-planner.js";
 import { ManagedIdentityCredential } from "@azure/identity";
 
 const noop = () => {};
@@ -72,22 +73,32 @@ export async function composeProductionRuntime(env, injected = {}) {
   const pool = injected.pool ?? new EntraPostgresPool({ connectionString: config.postgresUrl, credential, logger: telemetry, onUnavailable: (reason) => { readyGate.set("database", false); telemetry({ reason }); } });
   const ownerClient = injected.ownerClient ?? await pool.connect();
   const ownerGuard = injected.ownerGuard ?? new PostgresOwnerGuard(ownerClient);
-  const market = injected.market ?? new MarketProjection({ clock: runtime.clock }); const account = injected.account ?? new AccountCapitalSnapshot({ clock: runtime.clock });
+  const market = injected.market ?? new MarketProjection({ clock: runtime.clock }); market.quoteFreshMs ??= config.quote_max_age_ms; const account = injected.account ?? new AccountCapitalSnapshot({ clock: runtime.clock });
   const orders = injected.orders ?? new OrderRepository(); const state = injected.state ?? new TradingStateRepository();
-  const transaction = injected.transaction ?? asTransaction(pool); const profile = OKX_PROFILES[config.entityProfile]; const rest = injected.rest ?? new OkxRestClient({ credentials, profile, clock: runtime.clock, timeoutMs: config.http_timeout_ms });
+  const transaction = injected.transaction ?? asTransaction(pool); const profile = OKX_PROFILES[config.entityProfile]; const rest = injected.rest ?? new OkxRestClient({ credentials, profile, clock: runtime.clock, timeoutMs: config.http_timeout_ms, requestGapMs: injected.requestGapMs ?? 60 });
   const instIds = injected.instIds ?? config.instrumentIds;
   const executionRoutes = injected.executionRoutes ?? new Map();
   const quoteCurrencies = injected.quoteCurrencies ?? new Map();
   const slo = injected.slo ?? new VirtualSloMetrics(runtime.clock);
-  const coordinator = injected.coordinator ?? new OrderCoordinator({ transaction, orders, state, transport: rest, ownerGuard, readyGate, market, account, mode: () => config.tradingMode, executionRoute: (instId) => executionRoutes.get(instId), tradeQuoteCurrency: (instId) => quoteCurrencies.get(instId), clock: runtime.clock, config: injected.orderConfig ?? { accountId: config.accountId, strategyTag: config.strategyTag, orderVersion: config.orderVersion, accountFreshMs: config.account_max_age_ms, quoteFreshMs: config.quote_max_age_ms, orderExpiryMs: config.order_expiry_ms }, telemetry, slo });
+  let buyPlanner;
+  const coordinator = injected.coordinator ?? new OrderCoordinator({ transaction, orders, state, transport: rest, ownerGuard, readyGate, market, account, mode: () => config.tradingMode, executionRoute: (instId) => executionRoutes.get(instId), tradeQuoteCurrency: (instId) => quoteCurrencies.get(instId), isBuyAllowed: (instId) => !buyPlanner?.protected?.has(instId), clock: runtime.clock, config: injected.orderConfig ?? { accountId: config.accountId, strategyTag: config.strategyTag, orderVersion: config.orderVersion, accountFreshMs: config.account_max_age_ms, quoteFreshMs: config.quote_max_age_ms, orderExpiryMs: config.order_expiry_ms }, telemetry, slo,
+    onBuySettled: async () => { if (!buyPlanner) return; const ledger = await buyPlanner.reloadLedger(); sellService.rebuild(ledger); },
+  });
   const sellService = injected.sellService ?? new SellService({ state, transaction, coordinator, market, clock: runtime.clock, telemetry });
   const delist = injected.delist ?? new DelistOrchestrator({ transaction, state, orders, coordinator, accountId: config.accountId, market, telemetry }).bind();
-  const protection = injected.protection ?? new InstrumentProtectionService({ state, transaction, telemetry, onExit: (p) => delist.drive(p.instId) });
+  const protection = injected.protection ?? new InstrumentProtectionService({ state, transaction, telemetry, onProtect: (p) => buyPlanner?.protected?.add(p.instId), onExit: (p) => delist.drive(p.instId) });
   const holdHoursByInst = Object.fromEntries(Object.entries(config.strategyConfig.rows).map(([instId, row]) => [instId, row.holdHours]));
+  buyPlanner = injected.buyPlanner ?? new BuySignalPlanner({ accountId: config.accountId, instIds, strategyConfig: config.strategyConfig, market, account, coordinator, state, orders, transaction, rest, readyGate, clock: runtime.clock, quoteFreshMs: config.quote_max_age_ms, telemetry, slo });
   const reconciliation = injected.reconciliation ?? new ReconciliationService({ orders, state, transport: rest, ownerGuard, readyGate, clock: runtime.clock, safetyWaitMs: config.owner_safety_wait_ms, transaction, telemetry,
     ownership: { accountId: config.accountId, managedAfter: config.managedFillStartMs, enabledInstIds: instIds, systemClOrdIdPrefix: config.orderVersion, strategyTag: config.strategyTag, holdHoursByInst, configHash: config.strategyConfig.contentHash },
-    onAccountBuy: (instId) => engine?.protectInstrument(instId), onRecovery: ({ ledger, protection: rows }) => { sellService.rebuild(ledger); return delist.recover(rows); } });
-  const engine = injected.engine ?? new TradingEngine({ projection: market, account, readyGate, clock: runtime.clock, coordinator, sellService, onWatchdog: injected.onWatchdog ?? telemetry, slo });
+    onAccountBuy: (instId) => engine?.protectInstrument(instId), onRecovery: ({ ledger, protection: rows, daily, buyAttempts }) => { sellService.rebuild(ledger); buyPlanner.restore?.({ ledger, protection: rows, daily, buyAttempts }); return delist.recover(rows); },
+    onTerminal: async ({ attempt, order, fills, exchangeState, accFillSz }) => {
+      const result = attempt.intent === "BUY" ? await coordinator.settleBuy({ attempt, fills, exchangeState, accFillSz }) : await coordinator.settleExit({ attempt, fills, exchangeState, accFillSz });
+      if (result?.settled) { const ledger = await buyPlanner.reloadLedger?.(); if (ledger) sellService.rebuild(ledger); }
+      return result;
+    },
+  });
+  const engine = injected.engine ?? new TradingEngine({ projection: market, account, readyGate, clock: runtime.clock, coordinator, sellService, onMarketEvent: (event) => buyPlanner.observe?.(event), onOrderEvent: (order) => reconciliation.observeOrder?.(order), onWatchdog: injected.onWatchdog ?? telemetry, slo });
   const workLoop = injected.workLoop ?? new EngineWorkLoop({ engine, coordinator, timers: injected.timers ?? globalThis, telemetry });
   const socketFactory = injected.socketFactory ?? ((url) => { if (typeof WebSocket !== "function") throw new Error("WEBSOCKET_FACTORY_UNAVAILABLE"); return new WebSocket(url); });
   if (!injected.ws && !instIds.length) throw new Error("OKX_INSTRUMENTS_REQUIRED");
@@ -104,8 +115,8 @@ export async function composeProductionRuntime(env, injected = {}) {
       if (instrumentBaseline.size === instIds.length) readyGate.set("instruments", true);
     }
   };
-  const observePrivate = (row) => { if (row.type === "account" && account.update(row)) readyGate.set("account", true); };
-  const observeBusiness = (row) => { if (row.type === "candle5m") engine.receiveCandle(row); };
+  const observePrivate = (row) => { if (row.type === "account" && account.update(row)) readyGate.set("account", true); else if (row.type === "orders") engine.receiveOrder(row); };
+  const observeBusiness = (row) => { if (row.type === "candle3m") engine.receiveCandle(row); };
   const ws = injected.ws ?? { public: new OkxPublicWsClient({ instIds, socketFactory, profile, clock: runtime.clock, onObservation: observePublic, onState: (s) => readyGate.set("public", s.fresh) }), private: new OkxPrivateWsClient({ socketFactory, credentials, profile, clock: runtime.clock, onObservation: observePrivate, onState: (s) => readyGate.set("private", s.fresh) }), business: new OkxBusinessWsClient({ instIds, socketFactory, profile, clock: runtime.clock, onObservation: observeBusiness, onState: (s) => readyGate.set("business", s.fresh) }) };
   const migrationCheck = injected.migrationCheck ?? (async () => {
     const result = await pool.query(`SELECT to_regclass('public.order_attempts') AS attempts, to_regclass('public.filled_orders') AS fills,
@@ -113,7 +124,9 @@ export async function composeProductionRuntime(env, injected = {}) {
       EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='order_attempts' AND column_name='execution_mode') AS attempt_mode,
       EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='filled_orders' AND column_name='execution_mode') AS fill_mode,
       EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='order_attempts' AND column_name='execution_route') AS attempt_route,
-      EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='filled_orders' AND column_name='execution_route') AS fill_route`);
+      EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='filled_orders' AND column_name='execution_route') AS fill_route,
+      EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='filled_orders' AND column_name='fill_price') AS fill_price,
+      EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='daily_limit_cache' AND column_name='today_open') AS daily_inputs`);
     if (!result.rows?.[0] || Object.values(result.rows[0]).some((value) => value === null || value === false)) throw new Error("POSTGRES_MIGRATIONS_MISSING");
   });
   const reconcile = async () => {
@@ -131,11 +144,17 @@ export async function composeProductionRuntime(env, injected = {}) {
         return counts;
       } catch (error) { readyGate.set("account", false); throw error; }
     }, weeklyReconcile: injected.weeklyReconcile ?? reconcile,
+    reportMetrics: () => { const snapshot = engine.snapshot(); telemetry({ type: "metric_snapshot", reason: "RUNTIME_METRICS", ...slo.snapshot({ reset: true }), ready: snapshot.ready.ready ? 1 : 0, queue_depth_current: snapshot.queue, pending_buy_current: coordinator.pending?.BUY?.size ?? 0, active_buy_current: snapshot.activeBuy }); },
   });
-  return { runtime, keyVault, credentials, pool, ownerClient, ownerGuard, orders, state, transaction, market, account, readyGate, coordinator, reconciliation, sellService, protection, delist, rest, ws, engine, workLoop, slo, recurring, executionRoutes, quoteCurrencies, offline: false,
+  return { runtime, keyVault, credentials, pool, ownerClient, ownerGuard, orders, state, transaction, market, account, readyGate, coordinator, reconciliation, buyPlanner, sellService, protection, delist, rest, ws, engine, workLoop, slo, recurring, executionRoutes, quoteCurrencies, offline: false,
     async start() { // fixed startup order: config -> secrets -> DB -> migration -> owner -> recovery -> REST baseline -> WS -> timers
       readyGate.set("database", false); await migrationCheck(); readyGate.set("database", true); if (!await ownerGuard.acquire()) throw new Error("OWNER_UNAVAILABLE");
-      try { await reconciliation.recover({ accountId: config.accountId }); await baseline(); for (const client of Object.values(ws)) client.connect?.(); engine.startWatchdog(); workLoop.start?.(); recurring.start?.(); }
+      try {
+        await reconciliation.recover({ accountId: config.accountId }); await baseline();
+        if (injected.baseline && !injected.buyPlanner) readyGate.set("strategy", true); else await buyPlanner.prime();
+        for (const instId of instIds) for (const event of sellService.observeCandle?.(instId) ?? []) engine.queue.enqueue({ ...event, enqueuedAt: runtime.clock.nowMs() });
+        for (const client of Object.values(ws)) client.connect?.(); engine.startWatchdog(); workLoop.start?.(); recurring.start?.();
+      }
       catch (error) { readyGate.set("owner", false); for (const client of Object.values(ws)) client.stop?.(); recurring.stop?.(); workLoop.stop?.(); engine.stopWatchdog?.(); await ownerGuard.release(); throw error; }
     },
     async stopIntake() { coordinator.stopNewMutations(); }, async stopTimers() { recurring.stop?.(); workLoop.stop?.(); engine.stopWatchdog(); }, async stopNewMutations() { coordinator.stopNewMutations(); }, async closeWebSockets() { for (const client of Object.values(ws)) client.stop?.(); }, async finishInFlight() { await coordinator.finishInFlight(); }, async releaseOwner() { await ownerGuard.release(); }, async closeDatabase() { ownerClient.release?.(); ownerClient.end?.(); await pool.end?.(); },

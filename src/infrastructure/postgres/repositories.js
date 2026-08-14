@@ -12,6 +12,18 @@ export class TradingStateRepository {
       version=instrument_protection.version+1,updated_at=now()`, [row.instId, row.baseCcy, row.state, row.reason, row.announcement?.url ?? null, row.announcement?.pTime ?? null, row.expTime ?? null]);
   }
   async listDaily(tx) { return (await tx.query("SELECT * FROM daily_limit_cache ORDER BY inst_id,strategy_day")).rows; }
+  async findDaily(tx, instId, strategyDay) { return (await tx.query("SELECT * FROM daily_limit_cache WHERE inst_id=$1 AND strategy_day=$2", [instId, strategyDay])).rows[0] ?? null; }
+  async claimDaily(tx, row) {
+    await tx.query(`INSERT INTO daily_limit_cache(
+      inst_id,strategy_day,status,daily_limit_price,input_hash,today_candle_ts,today_open,
+      yesterday_candle_ts,yesterday_open,yesterday_close,best_limit,tick_sz,strategy_config_hash
+    ) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) ON CONFLICT(inst_id,strategy_day) DO NOTHING`, [
+      row.instId, row.strategyDay, row.status, row.dailyLimitPrice ?? null, row.inputHash,
+      row.todayCandleTs, row.todayOpen, row.yesterdayCandleTs, row.yesterdayOpen,
+      row.yesterdayClose, row.bestLimit, row.tickSz, row.strategyConfigHash,
+    ]);
+    return this.findDaily(tx, row.instId, row.strategyDay);
+  }
   async listManagedFills(tx, accountId) { return (await tx.query("SELECT * FROM filled_orders WHERE account_id=$1 ORDER BY fill_time,bill_id,trade_id", [accountId])).rows; }
   async listDelistCandidates(tx, { accountId, instId }) {
     return (await tx.query(`SELECT f.*, (f.fill_size-f.disposed_size)::text AS remaining_size,
@@ -36,14 +48,26 @@ export class TradingStateRepository {
   async insertFill(tx, fill) {
     return tx.query(`INSERT INTO filled_orders(
       account_id,inst_id,base_ccy,trade_id,bill_id,source,side,fill_size,fill_time,
-      hold_hours,strategy_config_hash,sell_time,protection_price,sell_state,allocation_state,execution_mode,execution_route
-    ) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
+      hold_hours,strategy_config_hash,sell_time,protection_price,sell_state,allocation_state,execution_mode,execution_route,
+      source_attempt_cl_ord_id,fill_price,fee,fee_ccy,min_price_after_fill,max_adverse_pct
+    ) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23)
     ON CONFLICT(inst_id,trade_id) DO NOTHING`, [
       fill.accountId, fill.instId, fill.baseCcy, fill.tradeId, fill.billId ?? null,
       fill.source, fill.side, fill.fillSize, fill.fillTime, fill.holdHours ?? null,
       fill.strategyConfigHash ?? null, fill.sellTime ?? null, fill.protectionPrice ?? null,
       fill.sellState ?? null, fill.allocationState ?? null, fill.executionMode ?? "cross", fill.executionRoute ?? "margin",
+      fill.sourceAttemptClOrdId ?? null, fill.fillPrice ?? null, fill.fee ?? null, fill.feeCcy ?? null,
+      fill.fillPrice ?? null, fill.fillPrice ? "0" : null,
     ]);
+  }
+
+  async recordAdversePrice(tx, { accountId, instId, price }) {
+    return tx.query(`UPDATE filled_orders SET
+      min_price_after_fill=LEAST(COALESCE(min_price_after_fill,fill_price),$3::numeric),
+      max_adverse_pct=GREATEST(COALESCE(max_adverse_pct,0),GREATEST(0,(fill_price-$3::numeric)/fill_price*100)),
+      version=version+1
+      WHERE account_id=$1 AND inst_id=$2 AND side='BUY' AND disposed_size<fill_size
+        AND fill_price IS NOT NULL AND (min_price_after_fill IS NULL OR $3::numeric<min_price_after_fill)`, [accountId, instId, price]);
   }
 
   async compareAndSetFill(tx, id, version, disposedSize) {
@@ -63,13 +87,13 @@ export class TradingStateRepository {
 
   async markSellTriggered(tx, { accountId, instId, tradeId, version, protectionPrice }) {
     return tx.query(`UPDATE filled_orders SET sell_state='SELL_TRIGGERED',
-      protection_price=GREATEST(COALESCE(protection_price,0),$5::numeric),version=version+1
+      protection_price=$5::numeric,version=version+1
       WHERE account_id=$1 AND inst_id=$2 AND trade_id=$3 AND side='BUY' AND version=$4
       AND sell_state IN ('WAITING','SELL_TRIGGERED','DUST_PENDING') RETURNING *`, [accountId, instId, tradeId, version, protectionPrice]);
   }
 
   async raiseProtection(tx, { accountId, instId, tradeId, version, protectionPrice }) {
-    return tx.query(`UPDATE filled_orders SET protection_price=GREATEST(COALESCE(protection_price,0),$5::numeric),version=version+1
+    return tx.query(`UPDATE filled_orders SET protection_price=$5::numeric,version=version+1
       WHERE account_id=$1 AND inst_id=$2 AND trade_id=$3 AND side='BUY' AND version=$4
       AND sell_state IN ('WAITING','SELL_TRIGGERED','DUST_PENDING') RETURNING *`, [accountId, instId, tradeId, version, protectionPrice]);
   }
@@ -89,8 +113,8 @@ export class TradingStateRepository {
     return row;
   }
 
-  async recordSystemSell(tx, { accountId, instId, baseCcy, tradeId, fillSize, fillTime, sourceBuyTradeId, executionMode = "cross", executionRoute = "margin" }) {
-    const inserted = await this.insertFill(tx, { accountId, instId, baseCcy, tradeId, source: "SYSTEM", side: "SELL", fillSize, fillTime, allocationState: "APPLIED", executionMode, executionRoute });
+  async recordSystemSell(tx, { accountId, instId, baseCcy, tradeId, fillSize, fillTime, fillPrice, fee, feeCcy, sourceBuyTradeId, sourceAttemptClOrdId, executionMode = "cross", executionRoute = "margin" }) {
+    const inserted = await this.insertFill(tx, { accountId, instId, baseCcy, tradeId, source: "SYSTEM", side: "SELL", fillSize, fillTime, fillPrice, fee, feeCcy, sourceAttemptClOrdId, allocationState: "APPLIED", executionMode, executionRoute });
     if (inserted.rowCount === 0) return { applied: false, reason: "DUPLICATE_TRADE" };
     const source = await this.applySystemSell(tx, { accountId, sourceBuyTradeId, fillSize });
     return { applied: true, source };
@@ -146,6 +170,15 @@ export class OrderRepository {
   }
   async listNonTerminal(tx, accountId) { return (await tx.query("SELECT * FROM order_attempts WHERE account_id=$1 AND state IN ('PREPARED','SUBMITTED','UNKNOWN') ORDER BY id", [accountId])).rows; }
   async listTodayBuys(tx, accountId, strategyDay) { return (await tx.query("SELECT * FROM order_attempts WHERE account_id=$1 AND intent='BUY' AND ($2::date IS NULL OR strategy_day=$2::date) ORDER BY inst_id,generation", [accountId, strategyDay ?? null])).rows; }
+  async listBuyCycle(tx, accountId, instId, strategyDay) {
+    const attempts = (await tx.query("SELECT * FROM order_attempts WHERE account_id=$1 AND inst_id=$2 AND intent='BUY' AND strategy_day=$3 ORDER BY generation", [accountId, instId, strategyDay])).rows;
+    if (!attempts.length) return { attempts, consumedUsd: "0" };
+    const ids = attempts.map((row) => row.cl_ord_id);
+    const consumed = await tx.query(`SELECT COALESCE(sum(fill_size*fill_price*1.0005),0)::text AS consumed
+      FROM filled_orders WHERE account_id=$1 AND side='BUY' AND source='SYSTEM'
+      AND source_attempt_cl_ord_id=ANY($2::text[])`, [accountId, ids]);
+    return { attempts, consumedUsd: consumed.rows[0].consumed };
+  }
   async listWatermarks(tx, accountId) { return (await tx.query("SELECT * FROM sync_watermarks WHERE account_id=$1 ORDER BY inst_type,endpoint", [accountId])).rows; }
   async listActiveExitForBase(tx, accountId, baseCcy) { return (await tx.query("SELECT * FROM order_attempts WHERE account_id=$1 AND base_ccy=$2 AND intent IN ('SELL','DELIST') AND state IN ('PREPARED','SUBMITTED','UNKNOWN')", [accountId, baseCcy])).rows; }
   async releasePreparedExitsForBase(tx, accountId, baseCcy, reason = "ACCOUNT_SELL_BEFORE_HTTP") {
@@ -192,10 +225,11 @@ export class OrderRepository {
       reservation_state,frozen_target_usd,decision_quote_ts,decision_quote_hash,
       decision_candle_ts,decision_candle_hash,decision_market_key,execution_limit_price,
       instrument_version,hold_hours,strategy_config_hash,admission_equity,
-      admission_exposure,account_snapshot_version,execution_mode,execution_route
+      admission_exposure,account_snapshot_version,execution_mode,execution_route,
+      decision_trigger_price,decision_reference_price,decision_reason
     ) VALUES(
       $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'PREPARED',$11,$12,'ACTIVE',$13,$14,$15,$16,$17,
-      $18,$19,$20,$21,$22,$23,$24,$25,$26,$27
+      $18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30
     )`, [
       attempt.accountId, attempt.intent, attempt.instId, attempt.baseCcy, attempt.clOrdId,
       attempt.payloadHash, attempt.sourceBuyTradeId ?? null, attempt.strategyDay ?? null,
@@ -208,6 +242,7 @@ export class OrderRepository {
       attempt.holdHours ?? null, attempt.strategyConfigHash ?? null,
       attempt.admissionEquity ?? null, attempt.admissionExposure ?? null,
       attempt.accountSnapshotVersion ?? null, attempt.executionMode ?? "cross", attempt.executionRoute ?? "margin",
+      attempt.decisionTriggerPrice ?? null, attempt.decisionReferencePrice ?? null, attempt.decisionReason ?? null,
     ]);
   }
 

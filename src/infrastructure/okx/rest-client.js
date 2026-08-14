@@ -172,14 +172,14 @@ export class OkxRestClient {
   systemStatus() { return this.read("/api/v5/system/status", {}, false); }
   publicInstruments(instType = "SPOT") { return this.read("/api/v5/public/instruments", { instType }, false); }
   tickers(instType = "SPOT") { return this.read("/api/v5/market/tickers", { instType }, false); }
-  candles(instId, { bar = "5m", limit, after, before } = {}) { return this.read("/api/v5/market/candles", { instId, bar, limit, after, before }, false); }
+  candles(instId, { bar = "3m", limit, after, before } = {}) { return this.read("/api/v5/market/candles", { instId, bar, limit, after, before }, false); }
   announcements(page) { return this.read("/api/v5/support/announcements", { annType: "announcements-delistings", page }, false); }
   accountInstruments(instType) { return this.read("/api/v5/account/instruments", { instType }); }
   accountConfig() { return this.read("/api/v5/account/config"); }
   balance(ccy) { return this.read("/api/v5/account/balance", ccy ? { ccy } : {}); }
   leverageInfo(instId) { return this.read("/api/v5/account/leverage-info", { instId, mgnMode: "cross" }); }
   maxAvailSize(instId, { tdMode = "cross", reduceOnly } = {}) { return this.read("/api/v5/account/max-avail-size", { instId, tdMode, reduceOnly }); }
-  order({ instId, ordId, clOrdId }) { return this.read("/api/v5/trade/order", { instId, ordId, clOrdId }); }
+  async order({ instId, ordId, clOrdId }) { return (await this.read("/api/v5/trade/order", { instId, ordId, clOrdId }))[0] ?? { state: "NOT_FOUND", instId, ordId, clOrdId }; }
   ordersPending(instType, params = {}) { return this.read("/api/v5/trade/orders-pending", { ...params, instType }); }
   ordersHistory(instType, params = {}) { return this.read("/api/v5/trade/orders-history", { ...params, instType }); }
   ordersHistoryArchive(instType, params = {}) { return this.read("/api/v5/trade/orders-history-archive", { ...params, instType }); }

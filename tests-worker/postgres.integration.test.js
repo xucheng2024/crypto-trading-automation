@@ -68,7 +68,7 @@ async function startPostgres() {
     await run("pg_ctl", ["-D", dir, "-l", logPath, "-o", `-p ${port} -h 127.0.0.1`, "-w", "start"]);
     started = true;
     let admin = await connect();
-    const migrations = ["0001_p1_core.sql", "0002_p3_exit.sql", "0003_p4_import.sql", "0004_hybrid_execution.sql", "0005_execution_route.sql"];
+    const migrations = ["0001_p1_core.sql", "0002_p3_exit.sql", "0003_p4_import.sql", "0004_hybrid_execution.sql", "0005_execution_route.sql", "0006_decision_observability.sql"];
     for (const migration of migrations) {
       const sql = await readFile(new URL(`../migrations/postgres/${migration}`, import.meta.url), "utf8");
       await admin.query(sql); await admin.query(sql);
@@ -136,8 +136,8 @@ test("temporary PostgreSQL enforces P1-B invariants", { timeout: 60_000 }, async
       for (const forbidden of ["system_control", "crypto_limits", "buy_cycles", "managed_positions", "sell_groups", "sell_items"]) assert.equal(names.has(forbidden), false);
       const columns = await db.admin.query("SELECT column_name FROM information_schema.columns WHERE table_name IN ('filled_orders','order_attempts')");
       const columnNames = new Set(columns.rows.map((row) => row.column_name));
-      for (const forbidden of ["active_attempt_id", "remaining_size", "sell_generation", "breach_latched", "exit_mode", "confirmed_sold_size", "external_disposed_size", "fee", "fee_ccy", "interest", "debt"]) assert.equal(columnNames.has(forbidden), false);
-      for (const required of ["reservation_state", "decision_market_key", "failure_fingerprint", "account_snapshot_version", "execution_mode", "execution_route"]) assert.equal(columnNames.has(required), true);
+      for (const forbidden of ["active_attempt_id", "remaining_size", "sell_generation", "breach_latched", "exit_mode", "confirmed_sold_size", "external_disposed_size", "interest", "debt"]) assert.equal(columnNames.has(forbidden), false);
+      for (const required of ["reservation_state", "decision_market_key", "failure_fingerprint", "account_snapshot_version", "execution_mode", "execution_route", "fill_price", "fee", "fee_ccy", "max_adverse_pct", "decision_trigger_price", "decision_reference_price"]) assert.equal(columnNames.has(required), true);
       await tx(db.admin, (client) => orders.reserveBuy(client, buy("cash-mode", { accountId: "mode", executionMode: "cash", executionRoute: "spot" }), admission("100")));
       await tx(db.admin, (client) => state.insertFill(client, { accountId: "mode", instId: "BTC-USDT", baseCcy: "BTC", tradeId: "cash-fill", source: "SYSTEM", side: "BUY", fillSize: "1", fillTime: 1, holdHours: "24", strategyConfigHash: "cfg", sellTime: 2, sellState: "WAITING", executionMode: "cash", executionRoute: "spot" }));
       assert.equal((await db.admin.query("SELECT execution_mode FROM order_attempts WHERE cl_ord_id='cash-mode'")).rows[0].execution_mode, "cash");
@@ -201,6 +201,14 @@ test("temporary PostgreSQL enforces P1-B invariants", { timeout: 60_000 }, async
       assert.equal((await tx(db.admin, (client) => state.compareAndSetFill(client, row.id, row.version, "1.5"))).rowCount, 0);
       const currentVersion = (BigInt(row.version) + 1n).toString();
       await assert.rejects(tx(db.admin, (client) => state.compareAndSetFill(client, row.id, currentVersion, "3")), (error) => error.code === "23514");
+    });
+
+    await t.test("latest confirmed 3m SELL threshold may move down and keeps CAS versions current", async () => {
+      await tx(db.admin, (client) => state.insertFill(client, { accountId: "threshold", instId: "BTC-USDT", baseCcy: "BTC", tradeId: "threshold-buy", source: "SYSTEM", side: "BUY", fillSize: "1", fillTime: 1, holdHours: "24", strategyConfigHash: "cfg", sellTime: 2, sellState: "WAITING", protectionPrice: "90" }));
+      const first = await tx(db.admin, (client) => state.raiseProtection(client, { accountId: "threshold", instId: "BTC-USDT", tradeId: "threshold-buy", version: 1, protectionPrice: "94.715" }));
+      assert.equal(first.rowCount, 1); assert.equal(first.rows[0].protection_price, "94.715");
+      const second = await tx(db.admin, (client) => state.raiseProtection(client, { accountId: "threshold", instId: "BTC-USDT", tradeId: "threshold-buy", version: first.rows[0].version, protectionPrice: "79.76" }));
+      assert.equal(second.rowCount, 1); assert.equal(second.rows[0].protection_price, "79.76"); assert.equal(BigInt(second.rows[0].version), 3n);
     });
 
     await t.test("attempt and reservation roll back together", async () => {
@@ -360,7 +368,7 @@ test("temporary PostgreSQL enforces P1-B invariants", { timeout: 60_000 }, async
       for (let index = 1; index <= 50; index += 1) {
         const instId = `C${String(index).padStart(2, "0")}-USDT`; const base = `C${String(index).padStart(2, "0")}`;
         market.updateInstrument({ instId, ts: 1, state: "live", tickSz: "0.1", lotSz: "0.001", minSz: "0.001", base, version: 1 });
-        market.updateTicker({ instId, ts: 2, last: "95", askPx: "95", bidPx: "94" }); market.updateCandle({ instId, ts: 1, open: "90", low: "89", confirm: true });
+        market.updateTicker({ instId, ts: 2, last: "95", askPx: "95", bidPx: "94" }); market.updateCandle({ instId, ts: 1, open: "90", high: "90", low: "89", confirm: true });
       }
       const batches = []; let batchNo = 0;
       const coordinator = new OrderCoordinator({ transaction: (fn) => tx(db.admin, fn), orders, state, market, account, readyGate: gate, ownerGuard: { isHeld: () => true }, mode: () => "FULL", clock: now,

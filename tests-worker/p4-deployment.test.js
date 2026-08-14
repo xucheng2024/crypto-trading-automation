@@ -110,14 +110,17 @@ test("P4 OFF remains operational for the explicitly known account-profile prereq
 });
 
 test("P5 telemetry sends only important structured traces and strips secrets", async () => {
-  const traces = []; let flushed = 0; let stopped = 0;
-  const client = { config: {}, commonProperties: {}, trackTrace: (trace) => traces.push(trace), flush: async () => { flushed += 1; }, shutdown: async () => { stopped += 1; } };
+  const traces = []; const metrics = []; let flushed = 0; let stopped = 0;
+  const client = { config: {}, commonProperties: {}, trackTrace: (trace) => traces.push(trace), trackMetric: (metric) => metrics.push(metric), flush: async () => { flushed += 1; }, shutdown: async () => { stopped += 1; } };
   const telemetry = createApplicationInsightsTelemetry({ client, serviceName: "engine", tradingMode: "OFF" });
   telemetry({ type: "ticker", instId: "BTC-USDT" });
   telemetry({ type: "reconcile_attempt", reason: "UNKNOWN_ORDER", instId: "BTC-USDT", apiKey: "forbidden", token: "forbidden" });
-  assert.equal(isImportantTelemetry({ type: "ticker" }), false); assert.equal(traces.length, 1);
+  telemetry({ type: "trading_decision", reason: "BREAKOUT_NOT_CONFIRMED", instId: "ETH-USDT", last: "1" });
+  telemetry({ type: "metric_snapshot", reason: "RUNTIME_METRICS", queue_wait_p99_ms: 4, ready: 1 });
+  assert.equal(isImportantTelemetry({ type: "ticker" }), false); assert.equal(traces.length, 3);
   assert.match(traces[0].message, /UNKNOWN_ORDER/); assert.equal(traces[0].properties.instId, "BTC-USDT");
   assert.equal(traces[0].properties.apiKey, undefined); assert.equal(traces[0].properties.token, undefined);
+  assert.match(traces[1].message, /BREAKOUT_NOT_CONFIRMED/); assert.deepEqual(metrics, [{ name: "queue_wait_p99_ms", value: 4 }, { name: "ready", value: 1 }]);
   assert.deepEqual(client.commonProperties, { service: "engine", environment: "p5", tradingMode: "OFF" });
   await telemetry.flush(); await telemetry.shutdown(); assert.equal(flushed, 1); assert.equal(stopped, 1);
 });
@@ -207,13 +210,14 @@ test("P4 baseline failure releases the owner and never starts WS", async () => {
 
 test("P4 production composition routes fake WS baselines into projections and keeps account fail-closed", async () => {
   const readyGate = new ReadyGate();
+  const marketEvents = []; const buyPlanner = { protected: new Set(), restore: () => {}, prime: async () => readyGate.set('strategy', true), observe: async (event) => marketEvents.push(event) };
   const sockets = []; const socketFactory = () => {
     const listeners = new Map(); const socket = { sent: [], addEventListener(name, fn) { listeners.set(name, fn); }, send(value) { this.sent.push(JSON.parse(value)); }, close() { listeners.get('close')?.(); }, emit(name, data) { listeners.get(name)?.(name === 'message' ? { data: JSON.stringify(data) } : {}); } };
     sockets.push(socket); return socket;
   };
   const ownerGuard = { held: false, isHeld() { return this.held; }, onLost: () => () => {}, acquire: async () => (ownerGuard.held = true), release: async () => { ownerGuard.held = false; } };
   const composed = await composeProductionRuntime({ TRADING_MODE: 'EXIT_ONLY', OKX_INSTRUMENTS: 'BTC-USDT', KEY_VAULT_URI: 'https://vault.example', POSTGRES_URL: 'postgresql://host/db' }, {
-    socketFactory, ownerGuard, ownerClient: {}, readyGate, keyVault: { readOkxCredentials: async () => ({ apiKey: 'a', secretKey: 'b', passphrase: 'c' }) },
+    socketFactory, ownerGuard, ownerClient: {}, readyGate, buyPlanner, keyVault: { readOkxCredentials: async () => ({ apiKey: 'a', secretKey: 'b', passphrase: 'c' }) },
     pool: { query: async () => ({ rows: [{ attempts: 'order_attempts', fills: 'filled_orders', watermarks: 'sync_watermarks' }] }), transaction: async (fn) => fn({}), end: async () => {} },
     reconciliation: { recover: async () => ({ ready: false }) }, baseline: async () => readyGate.set('instruments', true), orderConfig: { strategyTag: 'azure', orderVersion: 'v1' },
   });
@@ -225,11 +229,13 @@ test("P4 production composition routes fake WS baselines into projections and ke
     for (const arg of [{ channel: 'tickers', instId: 'BTC-USDT' }, { channel: 'instruments', instType: 'SPOT' }, { channel: 'status' }]) sockets[0].emit('message', { event: 'subscribe', code: '0', arg });
     sockets[1].emit('message', { event: 'login', code: '0' });
     for (const arg of [{ channel: 'account' }, { channel: 'balance_and_position' }, { channel: 'orders', instType: 'ANY' }]) sockets[1].emit('message', { event: 'subscribe', code: '0', arg });
-    sockets[2].emit('message', { event: 'subscribe', code: '0', arg: { channel: 'candle5m', instId: 'BTC-USDT' } });
+    sockets[2].emit('message', { event: 'subscribe', code: '0', arg: { channel: 'candle3m', instId: 'BTC-USDT' } });
     sockets[0].emit('message', { arg: { channel: 'tickers', instId: 'BTC-USDT' }, data: [{ instId: 'BTC-USDT', ts: '1', last: '100', askPx: '101', bidPx: '99' }] });
     sockets[0].emit('message', { arg: { channel: 'instruments', instType: 'SPOT' }, data: [{ instId: 'BTC-USDT', uTime: '1', state: 'live', tickSz: '0.1', lotSz: '0.001', minSz: '0.001' }] });
-    sockets[2].emit('message', { arg: { channel: 'candle5m', instId: 'BTC-USDT' }, data: [['1', '100', '101', '99', '100', '1', '1', '1', '1']] });
+    sockets[2].emit('message', { arg: { channel: 'candle3m', instId: 'BTC-USDT' }, data: [['1', '100', '101', '99', '100', '1', '1', '1', '1']] });
+    await new Promise((resolve) => setTimeout(resolve, 20));
     assert.equal(composed.market.ticker('BTC-USDT').last, '100'); assert.equal(composed.market.instrument('BTC-USDT').state, 'live'); assert.equal(composed.market.candle('BTC-USDT').open, '100');
+    assert.ok(marketEvents.some((event) => event.type === 'ticker')); assert.ok(marketEvents.some((event) => event.type === 'market-recheck'));
     assert.equal(composed.readyGate.snapshot().dependencies.account, false);
     sockets[1].emit('message', { arg: { channel: 'account' }, data: [{ totalEq: '10', adjEq: '9', uTime: '2' }] });
     assert.equal(composed.readyGate.snapshot().dependencies.account, true); assert.equal(composed.slo.samples.get('event_enqueue').length, 1);
@@ -246,7 +252,7 @@ test("P4 Engine recurring work serializes announcement/reconcile timers and stop
   const intervals = new Map(); let next = 0; const timers = { setInterval(fn, delay) { const id = ++next; intervals.set(id, { fn, delay }); return id; }, clearInterval(id) { intervals.delete(id); } };
   const events = []; let release; const blocked = new Promise((resolve) => { release = resolve; });
   const work = new EngineRecurringWork({ timers, telemetry: (event) => events.push(event), announcementMs: 11, reconcileMs: 13, routeMs: 15, weeklyMs: 17, announcements: async () => blocked });
-  work.start(); assert.deepEqual([...intervals.values()].map((row) => row.delay).sort((a, b) => a - b), [11, 13, 15, 17]);
+  work.start(); assert.deepEqual([...intervals.values()].map((row) => row.delay).sort((a, b) => a - b), [11, 13, 15, 17, 60_000]);
   const first = work.run('ANNOUNCEMENT', work.announcements); assert.deepEqual(await work.run('RECONCILE', async () => { throw new Error('must not run'); }), { skipped: true, reason: 'RECURRING_WORK_BUSY' });
   release(); assert.deepEqual(await first, { ok: true }); assert.deepEqual(await work.run('WEEKLY_RECONCILE', async () => { throw new Error('offline'); }), { ok: false });
   assert.equal(events[0].reason, 'WEEKLY_RECONCILE_FAILED'); work.stop(); assert.equal(intervals.size, 0);

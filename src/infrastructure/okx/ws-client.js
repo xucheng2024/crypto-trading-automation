@@ -6,7 +6,7 @@ function base64(bytes) { let text = ""; for (const byte of new Uint8Array(bytes)
 const subscriptions = {
   public: (instIds) => [...instIds.map((instId) => ({ channel: "tickers", instId })), { channel: "instruments", instType: "SPOT" }, { channel: "status" }],
   private: () => [{ channel: "account" }, { channel: "balance_and_position" }, { channel: "orders", instType: "ANY" }],
-  business: (instIds) => instIds.map((instId) => ({ channel: "candle5m", instId })),
+  business: (instIds) => instIds.map((instId) => ({ channel: "candle3m", instId })),
 };
 
 function key(arg, row = {}) { return `${arg.channel}:${row.instId || row.ccy || arg.instId || arg.instType || ""}`; }
@@ -15,10 +15,10 @@ function normalize(kind, arg, row) {
   if (kind === "public" && arg.channel === "instruments") return { type: "instrument", instId: row.instId, ts: Number(row.uTime || row.ts || 0), state: row.state, tickSz: row.tickSz, lotSz: row.lotSz, minSz: row.minSz, expTime: row.expTime, base: row.baseCcy ?? row.instId?.split("-")[0], quote: row.quoteCcy ?? row.instId?.split("-")[1], version: row.uTime ?? row.ts ?? "1" };
   if (kind === "public" && arg.channel === "status") return { ...row, type: "status", ts: Number(row.ts || 0) };
   if (kind === "private") return { ...row, type: arg.channel, ts: Number(row.pTime || row.uTime || row.ts || 0) };
-  if (kind === "business" && arg.channel === "candle5m") {
+  if (kind === "business" && arg.channel === "candle3m") {
     const [ts, open, high, low, close, volume, volumeCcy, volumeCcyQuote, confirm] = row;
     if (String(confirm) !== "1") return null;
-    return { type: "candle5m", instId: arg.instId, ts: Number(ts), open, high, low, close, volume, volumeCcy, volumeCcyQuote, confirm: true };
+    return { type: "candle3m", instId: arg.instId, ts: Number(ts), open, high, low, close, volume, volumeCcy, volumeCcyQuote, confirm: true };
   }
   return null;
 }

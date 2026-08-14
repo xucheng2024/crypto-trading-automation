@@ -15,7 +15,7 @@ function setupMarket(now) {
   const market = new MarketProjection({ clock: now });
   market.updateInstrument({ instId: "BTC-USDT", ts: 1, state: "live", tickSz: "0.1", lotSz: "0.001", minSz: "0.001", base: "BTC", version: 1 });
   market.updateTicker({ instId: "BTC-USDT", ts: 2, last: "95", askPx: "95", bidPx: "94" });
-  market.updateCandle({ instId: "BTC-USDT", ts: 1, open: "90", low: "89", confirm: true });
+  market.updateCandle({ instId: "BTC-USDT", ts: 1, open: "90", high: "90", low: "89", confirm: true });
   return market;
 }
 
@@ -62,7 +62,7 @@ test("P2 BUY coordinator uses one fake batch, persists item-independent outcomes
     submitBatchOrders: async (payload) => { sends += 1; assert.equal(payload.length, 3); assert.ok(payload.filter((item) => item.instId !== "SOL-USDT").every((item) => item.tdMode === "cross" && item.ordType === "ioc" && item.tradeQuoteCcy === "USDT")); const spotOrder = payload.find((item) => item.instId === "SOL-USDT"); assert.equal(spotOrder.tdMode, "cross"); assert.equal("tradeQuoteCcy" in spotOrder, false); return [{ clOrdId: payload[0].clOrdId, status: "SUBMITTED", ordId: "1" }, { clOrdId: payload[1].clOrdId, status: "NOT_CREATED", reason: "rejected" }, { clOrdId: payload[2].clOrdId, status: "UNKNOWN", reason: "timeout" }]; },
   } });
   for (const instId of ["BTC-USDT", "ETH-USDT", "SOL-USDT"]) {
-    if (instId !== "BTC-USDT") { market.updateInstrument({ instId, ts: 1, state: "live", tickSz: "0.1", lotSz: "0.001", minSz: "0.001", base: instId.split("-")[0], version: 1 }); market.updateTicker({ instId, ts: 2, last: "95", askPx: "95", bidPx: "94" }); market.updateCandle({ instId, ts: 1, open: "90", low: "89", confirm: true }); }
+    if (instId !== "BTC-USDT") { market.updateInstrument({ instId, ts: 1, state: "live", tickSz: "0.1", lotSz: "0.001", minSz: "0.001", base: instId.split("-")[0], version: 1 }); market.updateTicker({ instId, ts: 2, last: "95", askPx: "95", bidPx: "94" }); market.updateCandle({ instId, ts: 1, open: "90", high: "90", low: "89", confirm: true }); }
     coordinator.enqueue({ intent: "BUY", instId, generation: 0, eligibleSince: 1, strategyDay: "2026-08-14", dailyLimitPrice: "100", holdHours: "24", configHash: "cfg", tradeQuoteCcy: "USDT", managedExposure: "0" });
   }
   const result = await coordinator.drainOnce();

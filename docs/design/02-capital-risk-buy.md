@@ -104,7 +104,7 @@ daily_limit_price = roundToStep(raw_limit_price, tickSz, down)
 
 `GET /api/v5/market/candles?instId=<instId>&bar=1D` 返回数组 `[ts,o,h,l,c,vol,volCcy,volCcyQuote,confirm]` 且通常按时间倒序。按时间戳选择新加坡当日 K 的 `o` 作为 `today_open`，该 K 在日内通常为 `confirm=0`；其前一交易日 K 必须 `confirm=1`，再读取 `o/c`。目标 o/c 必须是正数 Decimal；缺失、零或非法时重试并 BUY HALT，不能靠数组固定下标或沿用前一天 today_open。strategy_day 使用最近一次可信 OKX server-time offset 计算；校时过期、跳变超阈值或新日 cache 尚未生成时 BUY HALT，禁止沿用前一天 limit。`daily_limit_cache(inst_id, strategy_day)` 唯一且 first-writer-wins，同时保存输入 K 线时间、价格、best_limit、tickSz、配置版本、skip 状态和计算哈希；当天已存在的有效记录不得因配置变化或并发补算被覆盖。
 
-daily_limit_price 当天固定，不因 5m K 线、当前价格或 IOC 结果改变。
+daily_limit_price 当天固定，不因 3m K 线、当前价格或 IOC 结果改变。
 
 instrument 的 tickSz 日内可能变化。缓存的 daily_limit_price 不改写；每张新 attempt 使用 `execution_limit_price=roundToStep(daily_limit_price,current_tickSz,down)`，并以该价格执行 askPx 检查、数量计算和 payload；结果必须为正且满足当前规则，否则 BUY HALT。若 PREPARED 后 tickSz/version 改变，旧 attempt 置 NOT_CREATED，再按最新规则和新的市场观察创建 generation；禁止用已经失效的 tickSz 下单。
 
@@ -126,8 +126,8 @@ Ticker 规则：
 
 1. last <= daily_limit_price：进入或保持 BUY_WATCH。
 2. last > daily_limit_price：立即退出；该 ticker 不得买入。
-3. 读取最近一根 confirm=1 的 5m candle open。
-4. 只有 last > previous_closed_open 才满足回升条件。
+3. 读取最近一根 `confirm=1` 的 OKX 原生 3m candle high。
+4. 只有 `last > previous_closed_high * 1.003` 才满足突破条件；严格大于，相等不触发。
 5. 同一新鲜 quote 必须满足 askPx <= execution_limit_price。
 6. 不满足第 5 条时不得调用 max-avail-size，也不得提交必然零成交的 IOC。
 
@@ -139,11 +139,11 @@ Ticker 规则：
 2. Order Coordinator 按 `(generation, eligible_since, instId)` 立即选当前最多 5 个不同 instId；不等待凑批。这个只读准备阶段不占不可抢占的 mutation submit slot，并逐项重新校验 READY、quote、account risk freshness、instrument/protection 和业务状态。
 3. 对仍合格项固定以 `tdMode=cross` 调用一次 `GET /api/v5/account/max-avail-size`；调用前冻结每个交易对的 `execution_route`，刷新不能改变当前批次。Margin 路由的 `availBuy` 已反映自有 USDT、自动借贷额度和 OKX 风控，Spot-only 路由只反映自有资金；返回零或下单失败都不会用另一条路由重试。每项响应的 `availBuy` 是 quote currency（本策略为 USDT），先与计划资金和剩余杠杆空间取最小值，再除以 `1.0005 * execution_limit_price` 得到 base `sz`；不能把 `availBuy` 直接当 base 数量。
 4. max-avail 返回后才申请 mutation submit slot；若此时出现 DELIST/SELL，BUY 释放申请并回队列，不能挡住退出。取得 slot 后在同一短事务内取得 account-scoped transaction advisory lock，重新汇总 active BUY reservations，并按上述确定顺序逐项扣减剩余杠杆容量、创建最多 5 个唯一 BUY `PREPARED` attempt。容量不足的后续项不创建 attempt，保持 RISK_HALTED 等待账户状态变化。每个 attempt 写入 exposure reservation、本轮 `strategy_day`、generation、首次 generation 冻结的目标资金、`decision_quote_ts`、规范化 quote payload hash、`decision_candle_ts/candle_hash`、instrument version/execution_limit_price、hold_hours/config hash 和本次准入使用的 equity/exposure/version 摘要。后续 generation 继承同一冻结目标。
-5. 事务结束后重新校验 TRADING_MODE=FULL、owner lock、READY、当前最新的新鲜 quote/account risk 和 instrument/protection；quote version 变新本身不导致失败，只要 last/askPx/5m 条件仍成立即可立即提交。若已不安全或 instrument/config 被移除，将 PREPARED 置为 NOT_CREATED 并原子释放 reservation。
+5. 事务结束后重新校验 TRADING_MODE=FULL、owner lock、READY、当前最新的新鲜 quote/account risk 和 instrument/protection；quote version 变新本身不导致失败，只要 last/askPx/3m 条件仍成立即可立即提交。若已不安全或 instrument/config 被移除，将 PREPARED 置为 NOT_CREATED 并原子释放 reservation。
 
 本轮已消费资金只按该轮 SYSTEM BUY fills 计算：`sum(fillSz * fillPx * 1.0005)`；剩余目标为首次冻结目标减去该值，活动 attempt 的 reservation 另行占用，不能重复使用。后续 SYSTEM/ACCOUNT SELL 只改变 managed remaining，不返还或重新打开本轮 BUY 预算，避免买卖循环。跨日后才回补到的 SYSTEM BUY fill 仍按其 BUY attempt 的旧 strategy_day、冻结目标和配置归属，不能计入新一天。
 
-`decision_market_key = hash(quote.ts,last,askPx,bidPx,previous_closed_candle_ts,closed_candle_hash)`。同一 instId 最多一条 pending BUY 意图，只保留最新市场投影。除首次 generation 外，新 attempt 必须满足 quote/candle 时间不倒退且 decision_market_key 与上一 generation 不同；因此同毫秒但价格不同的 ticker、新 ticker、新 closed 5m candle或同 ts 的 candle 修正都可触发重新判断，完全重复/倒序事件不能重发。closed candle 到达或被修正时也用最新新鲜 quote 重评，避免 ticker 先到、candle 后到造成漏判。IOC 在途或集中限频器等待期间到达的事件全部合并，attempt 原子结算后直接用最新且已变化的 market key 重新判断。只要仍是同一 strategy_day、信号与全部准入条件成立且剩余目标不低于最小下单量，就可串行创建下一 generation；不设置额外 cooldown，也不并发提交。
+`decision_market_key = hash(quote.ts,last,askPx,bidPx,previous_closed_candle_ts,closed_candle_hash)`。同一 instId 最多一条 pending BUY 意图，只保留最新市场投影。除首次 generation 外，新 attempt 必须满足 quote/candle 时间不倒退且 decision_market_key 与上一 generation 不同；因此同毫秒但价格不同的 ticker、新 ticker、新 closed 3m candle 或同 ts 的 candle 修正都可触发重新判断，完全重复/倒序事件不能重发。closed candle 到达或被修正时也用最新新鲜 quote 重评，避免 ticker 先到、candle 后到造成漏判。IOC 在途或集中限频器等待期间到达的事件全部合并，attempt 原子结算后直接用最新且已变化的 market key 重新判断。只要仍是同一 strategy_day、信号与全部准入条件成立且剩余目标不低于最小下单量，就可串行创建下一 generation；不设置额外 cooldown，也不并发提交。
 
 首版不调用 `order-precheck`。它不能替代实际下单时的新鲜 quote、max-avail、账户风险和最终 OKX 校验，却会引入“每个部署/配置版本首单”的额外状态；相同 payload 契约由 fake transport、只读账户预检和首单正常 UNKNOWN/失败处理覆盖。
 
@@ -183,7 +183,7 @@ NOT_CREATED，或 exchange terminal 且 fills 完整后，在原子结算事务�
 
 - BTC 和大量币同时触发时，不平均切碎资金，也不突破 2.95 准入线。系统按 `generation -> 首次合格时间 -> instId` 确定顺序，单币默认冻结目标等于当时 `2.95 * adjusted equity`，因此最先合格的单币可以使用全部账户级安全容量；实际规模仍取该目标、OKX `max-avail-size` 和剩余容量的最小值。原子 reservation 会拒绝后续重复占用，资金不足的候选保留观察，待容量或账户状态变化后重评。
 - generation 0 永远排在任何 generation 1+ 前，避免某个币的连续 IOC 抢占所有提交机会；这只提供一次公平尝试，不承诺为每个币预留资金。
-- 买入后价格继续下跌且 `last <= previous_closed_open` 时，不满足回升条件，暂停该币后续 IOC，不在下跌途中自动摊平。之后出现新的合格回升市场投影时，只能继续首次冻结目标的剩余部分；目标用完后不因再跌而追加。
+- 买入后价格不再严格高于 `previous_closed_high * 1.003` 时，不满足突破条件，暂停该币后续 IOC，不在下跌途中自动摊平。之后出现新的合格突破市场投影时，只能继续首次冻结目标的剩余部分；目标用完后不因再跌而追加。
 - 多币下跌使 `adjEq/mgnRatio/max-avail-size` 恶化时，所有新 BUY 立即 fail closed；已成交仓位仍按各自 sell_time/保护价管理，SELL/DELIST 不被 BUY halt 阻塞。
 - 若人工先买入系统此前零成交或尚未买到的配置币种，非尘埃 ACCOUNT cross BUY fill 立即纳管并终止该 instId 当前 SYSTEM BUY 轮次；若系统 IOC 已发出则只对账其结果，两边真实 fills 都纳管，但不再创建下一 generation。处于 EXITING/BLACKLISTED 的币则直接进入退出路径，不重新进入正常持有。
 
@@ -191,11 +191,11 @@ NOT_CREATED，或 exchange terminal 且 fills 完整后，在原子结算事务�
 
 - 130 + 20 = 150；固定费用只用于 0.05% 留量，借款利息不建模，净值直接采用 OKX `totalEq/adjEq`。
 - totalEq 已反映负债时不重复扣减；adjEq 更低时使用更保守分母。
-- ticker 等于 limit 时仍需要 last > previous_closed_open。
+- ticker 等于 daily limit 时仍必须严格满足 `last > previous_closed_high * 1.003`。
 - askPx 大于 limit 时不调用下单专用 REST。
 - 完全重复/倒序 ticker+candle 不产生新 generation；同毫秒但 payload 不同的 ticker或新 closed candle 可以重评。IOC 在途或限频等待时只合并保留最新市场投影，上一 attempt 原子结算后才允许串行创建下一 generation。
 - IOC 部分成交累计不超过冻结计划量。
-- 同一 BUY 轮次可在同一根 closed 5m candle 内连续 IOC；最新信号/风控失效时暂停，当天恢复后继续，累计不超过冻结目标。
+- 同一 BUY 轮次可在同一根 closed 3m candle 内连续 IOC；最新信号/风控失效时暂停，当天恢复后继续，累计不超过冻结目标。
 - 两个币种并发候选无法重复使用同一杠杆空间。
 - BUY fill 与其未成交 reservation 在转换期间不会对同一数量重复计算 exposure。
 - attempt 的 SETTLED、真实 fills、reservation 转换/释放在同一事务完成；崩溃不能暴露“已结算但 fills 尚未计入”的窗口。

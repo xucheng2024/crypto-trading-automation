@@ -24,11 +24,20 @@ export function dailyLimit({ todayOpen, yesterdayOpen, yesterdayClose, bestLimit
   return { skipped: false, price: roundToStep(divideDecimal(multiplyDecimal(todayOpen, bestLimit), "100"), tickSz, "down") };
 }
 
-export function buySignal({ last, askPx, limitPrice, previousClosedOpen }) {
+export const BUY_BREAKOUT_MULTIPLIER = "1.003";
+export const SELL_BREAKDOWN_MULTIPLIER = "0.997";
+
+export function buySignal({ last, askPx, limitPrice, previousClosedHigh }) {
   if (compareDecimal(last, limitPrice) > 0) return { eligible: false, reason: "PRICE_OUTSIDE" };
-  if (compareDecimal(last, previousClosedOpen) <= 0) return { eligible: false, reason: "NOT_REBOUNDING" };
+  const breakoutPrice = multiplyDecimal(previousClosedHigh, BUY_BREAKOUT_MULTIPLIER);
+  if (compareDecimal(last, breakoutPrice) <= 0) return { eligible: false, reason: "BREAKOUT_NOT_CONFIRMED", breakoutPrice };
   if (compareDecimal(askPx, limitPrice) > 0) return { eligible: false, reason: "ASK_ABOVE_LIMIT" };
-  return { eligible: true, reason: "ELIGIBLE" };
+  return { eligible: true, reason: "ELIGIBLE", breakoutPrice };
+}
+
+export function sellBreakdownPrice(previousClosedLow) {
+  if (compareDecimal(previousClosedLow, "0") <= 0) throw new Error("previous closed low must be positive");
+  return multiplyDecimal(previousClosedLow, SELL_BREAKDOWN_MULTIPLIER);
 }
 
 export function adjustedEquity({ totalEq, adjEq }) {

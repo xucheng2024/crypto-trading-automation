@@ -11,10 +11,16 @@ export async function startTradingEngine(env = process.env, dependencies = {}) {
     environment: env.DEPLOYMENT_ENVIRONMENT ?? "p5",
     tradingMode: String(env.TRADING_MODE ?? "OFF").toUpperCase(),
   });
+  // Bring liveness up before remote baseline work. Readiness remains false
+  // until the fully composed runtime has completed recovery and baselines.
+  let healthDelegate = null; let healthServer = null;
+  if (dependencies.health?.enabled) healthServer = createHealthServer({ liveness: () => true, readiness: () => healthDelegate?.readiness?.() ?? false, readinessDetails: () => healthDelegate?.readinessDetails?.() ?? { ready: false, bootstrap: true } }, dependencies.health);
   // `lifecycle` remains a narrow test seam.  The normal command constructs
   // its own production graph instead of requiring an externally injected one.
-  const composed = dependencies.lifecycle ? { runtime: createAzureRuntime(env, dependencies), ...(dependencies.composed ?? {}) } : await composeProductionRuntime(env, { ...dependencies, telemetry });
-  const runtime = composed.runtime; const lifecycle = dependencies.lifecycle ?? composed; let healthServer = null;
+  let composed;
+  try { composed = dependencies.lifecycle ? { runtime: createAzureRuntime(env, dependencies), ...(dependencies.composed ?? {}) } : await composeProductionRuntime(env, { ...dependencies, telemetry }); }
+  catch (error) { if (healthServer) await new Promise((resolve) => healthServer.close(resolve)); throw error; }
+  const runtime = composed.runtime; const lifecycle = dependencies.lifecycle ?? composed;
   let stopping = false;
   const shutdown = async (signal = "SIGTERM") => {
     if (stopping) return;
@@ -44,7 +50,7 @@ export async function startTradingEngine(env = process.env, dependencies = {}) {
     // been switched to the profile required for future trading.  The
     // production lifecycle has already released ownership before this error,
     // and OFF still prevents every mutation path.
-    if (runtime.config.tradingMode !== "OFF" || error?.message !== "OKX_BASELINE_ACCOUNT_PROFILE") throw error;
+    if (runtime.config.tradingMode !== "OFF" || error?.message !== "OKX_BASELINE_ACCOUNT_PROFILE") { if (healthServer) await new Promise((resolve) => healthServer.close(resolve)); throw error; }
     offSafeDegraded = error.message;
     telemetry({ event: "OFF_SAFE_DEGRADED", reason: offSafeDegraded });
   }
@@ -54,7 +60,7 @@ export async function startTradingEngine(env = process.env, dependencies = {}) {
     readiness: () => Boolean(offSafeDegraded) || (composed.readyGate?.ready ?? runtime.recoveryState.isReady()),
     readinessDetails: () => offSafeDegraded ? { ready: true, degraded: offSafeDegraded } : (composed.readyGate?.snapshot?.() ?? { ready: runtime.recoveryState.isReady() }),
   };
-  if (dependencies.health?.enabled) healthServer = createHealthServer(engine, dependencies.health);
+  healthDelegate = engine;
   return Object.freeze(engine);
 }
 

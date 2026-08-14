@@ -15,13 +15,13 @@
 2. 交易开关统一为 `TRADING_MODE=OFF|EXIT_ONLY|FULL`，默认 `OFF`。`OFF` 禁止新 mutation，`EXIT_ONLY` 只允许既有订单恢复和新的 SELL/DELIST，`FULL` 才允许 BUY。生产部署显式设为 `FULL` 后，启动、重启、升级和故障恢复自动完成 owner 获取、RECOVERING、对账和 READY；异常时优先降为 `EXIT_ONLY`，彻底停机才使用 `OFF`。
 3. 不建设 Shadow 交易路径，不使用 OKX 模拟盘，也不使用 cash 小额过渡。
 4. 生产使用共享 Multi-currency Margin 账户（`acctLv=3`、`autoLoan=true`）。所有新订单固定使用 `tdMode=cross`；每小时按账户 instruments 刷新能力分类：MARGIN/USDT 路由先用自有 USDT、不足时由 OKX 自动借贷，SPOT-only 路由只用自有资金。它们不是同一订单的优先级或失败回退路径。每笔 attempt/fill 同时持久化实际 `execution_mode` 与语义 `execution_route=margin|spot`，退出沿用原 BUY 路由；Margin 退出发送 `reduceOnly=true`，Spot-only 退出省略。订单生命周期只管理本系统 `clOrdId/tag/attempt`；管理起点之后配置交易对的 SPOT/MARGIN BUY/SELL fills 统一进入 managed fill ledger，只以 `source=SYSTEM|ACCOUNT` 区分。BUY 直接形成任务；ACCOUNT SELL 先 PENDING，等 SPOT/MARGIN 连续 fills watermarks 安全后才按时间顺序增加统一 `disposed_size`，期间阻止同 base 新系统退出。FUTURES/SWAP/OPTION fills 忽略。已提交系统订单与同时发生的人工卖单无法在共享账户内原子互斥，这是不使用独立子账户的明确剩余风险。
-5. 净资产直接使用 OKX `totalEq`，BUY 分母使用 `min(totalEq, adjEq)`；交易成本统一按每次成交 0.05% 做保守估算，不读取或分摊实际 feeCcy；不单独计算借款利息，也不使用自定义固定 100 USDT。
+5. 净资产直接使用 OKX `totalEq`，BUY 分母使用 `min(totalEq, adjEq)`；交易成本统一按每次成交 0.05% 做保守估算。OKX 返回的实际 fill price、fee/feeCcy 仅持久化供审计，不参与规划或 base 分摊；不单独计算借款利息，也不使用自定义固定 100 USDT。
 6. 本策略有效杠杆 = 全部 managed BUY fills（SYSTEM 及管理起点后的 ACCOUNT）未卖完部分的保守市值 + 本系统未成交 BUY reservation，再除以调整后净权益；同一敞口只计一次。默认按 2.95 做 BUY 准入、3.0 做本策略硬停止线；这不宣称控制共享账户的总杠杆，其他活动造成的账户级风险由新鲜 `mgnRatio` 和 `max-avail-size` 自然压缩或阻止本次 BUY。
 7. 不设置持仓币种名额或 position slot；BUY 数量只受本策略杠杆、OKX 可用额度、账户级风险快照和本策略同币种不重复买入约束。
 8. BUY 使用 Cross Margin limit IOC；首次满足信号时冻结当日该币目标资金，只按本轮 SYSTEM BUY fills 扣减，SELL 不返还预算。每张 IOC 的 fills、reservation 和 SETTLED 原子落库后，只由非重复、不倒退的 ticker+candle 市场投影继续下一 generation；同毫秒不同价格和新 closed candle 可重评。条件暂时失效只暂停，当天恢复后继续，直至目标基本用完或出现跨日/配置移除/保护/非尘埃 ACCOUNT BUY 等终止条件。在途和限频等待期间 ticker/BUY intent 均按 instId 合并，不并发、不等待新 K 线。多币同时触发按 generation、首次合格时间、instId 排序，generation 0 优先于任何重试；继续下跌而不满足回升条件时不补仓。
 9. 每条 managed BUY `tradeId` 独立保存来源、该币种 limit 配置的 `hold_hours`/配置 hash、`sell_time=fill_ts+hold_hours*3,600,000`、fill_size、disposed_size、保护价和卖出资格状态；配置更新不重算旧 fill。实际卖出量取 remaining、账户可售量与 cross reduce-only `availSell` 的较小值，统一使用 `tdMode=cross, reduceOnly=true`。`reduceOnly` 只防止建立反向保证金仓位，不保证隔离共享账户现货；真正的数量边界仍是 managed remaining、可售量和 reservation。永续成交和管理起点前余额/fills 不倒灌。
 10. 所有 `POST /trade/batch-orders` 经 Order Coordinator 的单一优先级通道串行提交：`DELIST > SELL > BUY`；每批即时提交当前 1 至 5 个同类、不同 instId/base 的订单。行情、只读检查和 reconciliation 仍并发；请求得到响应或超时后释放提交通道，逐项 UNKNOWN 保留 reservation 并后台对账。同一 `(accountId, baseCcy)` 仍只允许一张非终态退出单。
-11. SELL_WATCH 一旦观察到 `last <= protection_price` 就对该 fill 在内存单调锁存并排入关键队列；之后反弹不能取消本次卖出，也不重新等待行情。
+11. 每条 fill 到达独立 `sell_time` 后，以最近一根已确认原生 3m K 线计算 `protection_price=low*0.997`；SELL_WATCH 仅在 `last < protection_price` 时在内存单调锁存并排入关键队列。相等不触发，锁存后的反弹不能取消本次卖出。
 12. 单 fill 剩余价值低于 0.1 USDT 或数量低于 minSz 时进入可恢复的 `DUST_PENDING`，不重复产生卖出噪音；价格或 instrument 规则变化后由每日低频复核决定是否恢复，尘埃仍由 OKX `totalEq` 和实际余额自然计入风险。
 13. 每 5 分钟分页轮询最近 24 小时的 delist announcements，直到越过时间窗口或空页，最多 20 页；按 spot 标题和边界安全的币种匹配识别影响，拉取失败或未在页数上限内越界时告警重试。instruments 的 `state != live` 只由 Market Projection 临时冻结 BUY，不写数据库保护状态；expTime/公告确认退市后将 `instrument_protection.state` 原子置为 EXITING，该状态天然禁止 BUY，并在当前同 base SELL/DELIST attempt 终态后清理持仓。冻结会阻止新 BUY_WATCH，并在创建 PREPARED attempt 前和 IOC 最终提交前再次拦截。已提交 IOC 只对账实际成交。status 只做系统维护 BUY HALT。
 14. 确认 `BASE-USDT` 退市后，只退出 managed BUY fills 未卖完的剩余数量，并复用逐 fill SELL 状态机；数量仍受账户当前可售余额约束。不会清空共享账户未纳管的额外 BASE，也不寻找备用交易对；不可交易或不可售时保持 EXITING，等待后续余额或 instrument 更新。
@@ -105,7 +105,7 @@ Azure 运行层使用以下真实生产服务。Milestone 3 按独立 Azure 服�
 | Auto Borrow 账户校验及先用自有 USDT | 已覆盖 | 02 |
 | OKX 账户净权益、本策略有效杠杆和策略级 exposure reservation | 已覆盖 | 02、05 |
 | WS/内存热路径、REST 预热/恢复、数据库不阻塞 callback | 已覆盖 | 01、05 |
-| BUY_WATCH、5m open 回升、ask 可成交检查 | 已覆盖 | 02 |
+| BUY_WATCH、上一根已确认 3m 前高突破、ask 可成交检查 | 已覆盖 | 02 |
 | 逐 BUY/SELL tradeId 成交与本系统 UNKNOWN 订单恢复 | 已覆盖 | 03、05 |
 | 每个 managed BUY tradeId 独立卖出、同 base 非终态互斥、全局单请求/五单批量提交 | 已覆盖 | 03 |
 | 0.1 USDT/minSz 尘埃与无重复噪音 | 已覆盖 | 03、04 |

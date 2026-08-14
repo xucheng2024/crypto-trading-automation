@@ -24,7 +24,7 @@ test("P4 system harness persists a real PostgreSQL lifecycle across restart", { 
   const stop = async () => { await client?.end(); client = null; if (running) { await run("pg_ctl", ["-D", dir, "-m", "immediate", "-w", "stop"]); running = false; } };
   try {
     await run("initdb", ["-D", dir, "--no-locale", "-E", "UTF8", "-A", "trust"]); await start();
-    for (const name of ["0001_p1_core.sql", "0002_p3_exit.sql", "0003_p4_import.sql", "0004_hybrid_execution.sql", "0005_execution_route.sql"]) await client.query(await readFile(new URL(`../migrations/postgres/${name}`, import.meta.url), "utf8"));
+    for (const name of ["0001_p1_core.sql", "0002_p3_exit.sql", "0003_p4_import.sql", "0004_hybrid_execution.sql", "0005_execution_route.sql", "0006_decision_observability.sql"]) await client.query(await readFile(new URL(`../migrations/postgres/${name}`, import.meta.url), "utf8"));
     const harness = new P4SystemHarness({ postgres: { stop, start } });
     await client.query("INSERT INTO daily_limit_cache(inst_id,strategy_day,status,input_hash) VALUES('P4-USDT','2026-01-01','READY','p4')");
     const orders = new OrderRepository(); await transaction(client, (tx) => orders.reserveBuy(tx, buy("p4-restart-attempt"), { managedExposure: "0", maxExposure: "100" }));
@@ -48,8 +48,9 @@ test("P4 full runtime uses one PostgreSQL, fake OKX WS/REST, five-order Coordina
   };
   try {
     await run("initdb", ["-D", dir, "--no-locale", "-E", "UTF8", "-A", "trust"]); await start();
-    for (const name of ["0001_p1_core.sql", "0002_p3_exit.sql", "0003_p4_import.sql", "0004_hybrid_execution.sql", "0005_execution_route.sql"]) await client.query(await readFile(new URL(`../migrations/postgres/${name}`, import.meta.url), "utf8"));
+    for (const name of ["0001_p1_core.sql", "0002_p3_exit.sql", "0003_p4_import.sql", "0004_hybrid_execution.sql", "0005_execution_route.sql", "0006_decision_observability.sql"]) await client.query(await readFile(new URL(`../migrations/postgres/${name}`, import.meta.url), "utf8"));
     const ids = Array.from({ length: 50 }, (_, index) => `Q${index}-USDT`); const owner = new PostgresOwnerGuard(client, "p4-real-runtime");
+    const day = new Date(Date.now() + 8 * 3_600_000).toISOString().slice(0, 10); const dayStart = Date.parse(`${day}T00:00:00+08:00`); const priorStart = dayStart - 86_400_000;
     let submitted = []; const rest = {
       syncServerTime: async () => 1, systemStatus: async () => [],
       publicInstruments: async () => ids.map((instId) => ({ instId, state: "live", tickSz: "0.1", lotSz: "0.001", minSz: "0.001", baseCcy: instId.split("-")[0], quoteCcy: "USDT", uTime: "1" })),
@@ -57,10 +58,11 @@ test("P4 full runtime uses one PostgreSQL, fake OKX WS/REST, five-order Coordina
       accountConfig: async () => [{ acctLv: "3", autoLoan: "true" }],
       accountInstruments: async (type) => ids.map((instId) => ({ instId, state: "live", tradeQuoteCcyList: type === "MARGIN" ? "USDT" : "" })),
       leverageInfo: async () => ids.map((instId) => ({ instId, lever: "3" })), balance: async () => [{ totalEq: "100", adjEq: "100", uTime: "1" }],
-      maxAvailSize: async (joined) => joined.split(",").map((instId) => ({ instId, availBuy: "100", availSell: "100" })),
+      maxAvailSize: async (joined) => joined.split(",").map((instId) => ({ instId, availBuy: "10", availSell: "100" })),
+      candles: async (_instId, options) => options.bar === "1D" ? [[String(dayStart), "100", "101", "90", "95", "1", "1", "1", "0"], [String(priorStart), "100", "101", "90", "100", "1", "1", "1", "1"]] : [[String(dayStart), "94", "94.5", "93", "94.4", "1", "1", "1", "1"]],
       submitBatchOrders: async (payloads) => { submitted.push(...payloads); return payloads.map((payload, index) => ({ clOrdId: payload.clOrdId, status: "SUBMITTED", ordId: `p4-${index}` })); },
     };
-    const composed = await composeProductionRuntime({ TRADING_MODE: "FULL", OKX_INSTRUMENTS: ids.join(","), KEY_VAULT_URI: "https://vault.example", POSTGRES_URL: "postgresql://local/postgres" }, {
+    const composed = await composeProductionRuntime({ TRADING_MODE: "FULL", OKX_INSTRUMENTS: ids.join(","), STRATEGY_CONFIG_JSON: JSON.stringify({ content_hash: "a".repeat(64), config: ids.map((inst_id) => ({ inst_id, best_limit: "95", hold_hours: "24" })) }), KEY_VAULT_URI: "https://vault.example", POSTGRES_URL: "postgresql://local/postgres" }, {
       socketFactory, ownerGuard: owner, ownerClient: client,
       keyVault: { readOkxCredentials: async () => ({ apiKey: "a", secretKey: "b", passphrase: "c" }) },
       pool: { query: (...args) => client.query(...args), transaction: (fn) => transaction(client, fn), end: async () => {} },
@@ -70,19 +72,20 @@ test("P4 full runtime uses one PostgreSQL, fake OKX WS/REST, five-order Coordina
       await composed.start(); sockets.forEach((socket) => socket.emit("open")); await new Promise((resolve) => setImmediate(resolve));
       for (const arg of [...ids.map((instId) => ({ channel: "tickers", instId })), { channel: "instruments", instType: "SPOT" }, { channel: "status" }]) sockets[0].emit("message", { event: "subscribe", code: "0", arg });
       sockets[1].emit("message", { event: "login", code: "0" }); for (const arg of [{ channel: "account" }, { channel: "balance_and_position" }, { channel: "orders", instType: "ANY" }]) sockets[1].emit("message", { event: "subscribe", code: "0", arg });
-      for (const arg of ids.map((instId) => ({ channel: "candle5m", instId }))) sockets[2].emit("message", { event: "subscribe", code: "0", arg });
+      for (const arg of ids.map((instId) => ({ channel: "candle3m", instId }))) sockets[2].emit("message", { event: "subscribe", code: "0", arg });
       sockets[1].emit("message", { arg: { channel: "account" }, data: [{ totalEq: "100", adjEq: "100", uTime: "1" }] });
       for (const [index, instId] of ids.entries()) {
         sockets[0].emit("message", { arg: { channel: "instruments", instType: "SPOT" }, data: [{ instId, uTime: "1", state: "live", tickSz: "0.1", lotSz: "0.001", minSz: "0.001" }] });
-        sockets[0].emit("message", { arg: { channel: "tickers", instId }, data: [{ instId, ts: "1", last: "100", askPx: "101", bidPx: "99" }] });
-        if (index < 5) sockets[2].emit("message", { arg: { channel: "candle5m", instId }, data: [["1", "90", "101", "89", "100", "1", "1", "1", "1"]] });
+        sockets[0].emit("message", { arg: { channel: "tickers", instId }, data: [{ instId, ts: "1", last: index < 5 ? "94.9" : "100", askPx: index < 5 ? "94.9" : "101", bidPx: index < 5 ? "94.8" : "99" }] });
+        if (index < 5) sockets[2].emit("message", { arg: { channel: "candle3m", instId }, data: [[String(dayStart + 180_000), "94", "94.5", "93", "94.4", "1", "1", "1", "1"]] });
         assert.equal(composed.market.ticker(instId).instId, instId, `ticker ${index}`);
       }
       composed.engine.queue.enqueue({ type: "SELL_BREACH", priority: "critical", instId: ids[0] });
       const first = composed.engine.queue.take();
       assert.equal(first.type, "SELL_BREACH"); assert.equal(composed.engine.queue.size, 55); assert.equal(composed.readyGate.ready, true, JSON.stringify(composed.readyGate.snapshot()));
       assert.equal(composed.slo.samples.get("event_enqueue").length, 50);
-      for (const [index, instId] of ids.slice(0, 5).entries()) composed.coordinator.enqueue({ intent: "BUY", instId, generation: 0, eligibleSince: index, signalAt: Date.now(), strategyDay: "2026-08-14", dailyLimitPrice: "101", holdHours: "24", configHash: "p4", managedExposure: "0", frozenTargetUsd: "10" });
+      while (composed.engine.queue.size) await composed.engine.consumeOne();
+      assert.equal(composed.coordinator.pending.BUY.size, 5, "production market events create five BUY intents without test injection");
       const batch = await composed.coordinator.drainOnce(); assert.equal(batch.count, 5); assert.equal(submitted.length, 5); assert.ok(submitted.every((row) => row.side === "buy" && row.tdMode === "cross"));
       assert.equal((await client.query("SELECT count(*)::int AS count FROM order_attempts WHERE account_id='default' AND intent='BUY' AND state='SUBMITTED'")).rows[0].count, 5);
       assert.deepEqual(composed.slo.assertInvariants(), { maxBatchSize: 5, maxMutationConcurrency: 1, unknownCount: 0 });

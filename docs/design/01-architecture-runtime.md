@@ -56,7 +56,7 @@ owner lock 必须由不参与连接池复用的专用 PostgreSQL session 持有�
 
 - Public：`tickers`、`instruments`、`status`。
 - Private：`orders(instType=ANY)`、`account`、`balance_and_position`。account 订阅省略 `extraParams`，接收事件和 OKX 定期推送但不假定精确周期；orders 正常处理本系统订单，另观察管理起点之后配置交易对且 `tdMode=cross` 的外部 SPOT/MARGIN BUY/SELL fills；其余忽略。不订阅 `positions`，也不为外部仓位建立 REST baseline。
-- Business：首版订阅“全部启用交易对 ∪ 存在未完成 managed fill 的交易对 ∪ EXITING 交易对”的 `candle5m`，只接受 `confirm=1`。配置删除不能让既有退出任务失去行情。
+- Business：首版订阅“全部启用交易对 ∪ 存在未完成 managed fill 的交易对 ∪ EXITING 交易对”的 `candle3m`，只接受 `confirm=1`。配置删除不能让既有退出任务失去行情。
 
 每条连接独立维护：
 
@@ -71,14 +71,14 @@ owner lock 必须由不参与连接池复用的专用 PostgreSQL session 持有�
 
 系统只有一个全局 READY。启动执行一次完整 baseline；任一 mutation 必需通道断开或 freshness 失效时立即 `READY=false`。单条 WS 重连只恢复受影响范围：Public 恢复 ticker/instrument/status，Business 恢复启用交易对 candle，Private 恢复 account/pending/history/fills；恢复完成后统一重算全局 READY，不建立通道级 READY 状态机。
 
-首版默认一次订阅上述完整集合的 candle5m，避免维护 PREWARM、动态订阅和冷却状态。只有实际交易对数量或 OKX 订阅限制证明该方式不可用时，才升级为活动集合动态订阅；这不是首版必做项。
+首版默认一次订阅上述完整集合的 candle3m，避免维护 PREWARM、动态订阅和冷却状态。只有实际交易对数量或 OKX 订阅限制证明该方式不可用时，才升级为活动集合动态订阅；这不是首版必做项。
 
 ## 内存、PostgreSQL 与 REST
 
 内存保存：
 
 - 最新 quote、instrument rules 和系统状态；
-- 最新 closed 5m candle；
+- 最新一根已确认的原生 3m candle；
 - BUY/SELL watch 索引；BUY watch 仅在内存存在；
 - AccountCapitalSnapshot；
 - 非终态订单及其已预留数量投影；
@@ -95,7 +95,7 @@ CLOCK_SKEW_ALLOWANCE_MS=500
 OWNER_SAFETY_WAIT_MS=6000
 ~~~
 
-Private `account` 依赖事件和 OKX 定期推送，不把任意 `updateInterval` 值解释为毫秒级 SLA。quote 以收到时的单调时钟计龄；BUY 超过 1500ms fail closed，SELL 只由实际收到的新 ticker 触发。account 超过 5000ms 时停止 BUY，并在 SELL 规划数量前恢复可售量。closed candle 不用“距现在多久”判断，而必须严格匹配预期上一完整 5 分钟桶且 `confirm=1`。instrument 规则以 Public 连接 generation + baseline version 判断有效性，不因长时间没有规则更新自然过期。`OWNER_SAFETY_WAIT_MS` 必须不少于 `ORDER_EXPIRY_MS + HTTP_TIMEOUT_MS + CLOCK_SKEW_ALLOWANCE_MS`。
+Private `account` 依赖事件和 OKX 定期推送，不把任意 `updateInterval` 值解释为毫秒级 SLA。quote 以收到时的单调时钟计龄；BUY 候选或任一 managed position quote 超过 1500ms 均 fail closed。managed position 缺少新鲜 WS quote 时后台单飞获取一次只读 SPOT tickers 快照，成功后刷新内存并自动重评；超时、429 或缺项继续禁止新 BUY，不能把缺失价格按零敞口处理。SELL 仍只由实际收到的新 ticker 触发。account 超过 5000ms 时停止 BUY，并在 SELL 规划数量前恢复可售量。closed candle 必须来自 OKX 原生 `candle3m` 且 `confirm=1`；倒序、未确认或旧连接 generation 的 candle 不参与判断。instrument 规则以 Public 连接 generation + baseline version 判断有效性，不因长时间没有规则更新自然过期。`OWNER_SAFETY_WAIT_MS` 必须不少于 `ORDER_EXPIRY_MS + HTTP_TIMEOUT_MS + CLOCK_SKEW_ALLOWANCE_MS`。
 
 使用交易所 UTC 时间做跨服务关联、进程单调时钟计算本地延迟；超过阈值即按业务文档 fail closed/恢复。
 
@@ -129,7 +129,7 @@ Daily Limit 只由 Trading Engine 使用纯函数按需计算并原子持久化�
 |---|---|---|
 | 规则/退市 | `GET /api/v5/public/instruments?instType=SPOT`; Public `instruments` | `state=live` 才可买；`tickSz/lotSz/minSz/expTime` 增量更新 |
 | 账户可交易合约 | `GET /api/v5/account/instruments?instType=SPOT` 与 `instType=MARGIN` | 启动时确认 SPOT 可交易并将 MARGIN/USDT 能力分类为 `margin`，其余 SPOT-only 分类为 `spot`；两类新单均为 `tdMode=cross`，不存在失败回退 |
-| 行情/K 线 | Public `tickers`; Business `candle5m` | ticker 用 `last/askPx/bidPx`; candle 只收 `confirm=1` |
+| 行情/K 线 | Public `tickers`; Business `candle3m` | ticker 用 `last/askPx/bidPx`; candle 只收 `confirm=1` |
 | 新加坡日线 | `GET /api/v5/market/candles?...&bar=1D` | `1D` 是 UTC+8，不要误用 `1Dutc`；数组按 `[ts,o,h,l,c,vol,volCcy,volCcyQuote,confirm]` 解析，当日 K 可为 `confirm=0`，昨日 K 必须为 `confirm=1` |
 | 维护 | `GET /api/v5/system/status`; Public `status` | 仅系统维护，不能推导具体币种退市 |
 | 账户风险/余额 | `GET /api/v5/account/config`, `GET /api/v5/account/balance`; Private `account`, `balance_and_position` | `acctLv`、`autoLoan`、`totalEq/adjEq/mgnRatio`、币种实际余额和可售量；不盘点或归因共享账户其他持仓 |

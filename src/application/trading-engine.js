@@ -10,6 +10,15 @@ function stable(value) {
 export class MarketProjection {
   constructor({ clock = { nowMs: () => Date.now() } } = {}) { this.clock = clock; this.tickers = new Map(); this.candles = new Map(); this.instruments = new Map(); }
   updateTicker(row) { return this.#update(this.tickers, row.instId, row, "ticker"); }
+  refreshTicker(row) {
+    const result = this.updateTicker(row);
+    if (result.reason === "DUPLICATE") {
+      const entry = this.tickers.get(row.instId);
+      if (entry) entry.receivedAt = this.clock.nowMs();
+      return { ...result, refreshed: true };
+    }
+    return result;
+  }
   updateCandle(row) { if (!row.confirm) return { accepted: false, reason: "UNCONFIRMED" }; return this.#update(this.candles, row.instId, row, "candle"); }
   updateInstrument(row) { return this.#update(this.instruments, row.instId, row, "instrument"); }
   ticker(instId) { return this.tickers.get(instId)?.value; }
@@ -40,7 +49,7 @@ export class AccountCapitalSnapshot {
 }
 
 export class ReadyGate {
-  constructor(required = ["owner", "database", "public", "private", "business", "account", "instruments"]) { this.required = new Set(required); this.states = new Map([...this.required].map((name) => [name, false])); }
+  constructor(required = ["owner", "database", "public", "private", "business", "account", "instruments", "strategy"]) { this.required = new Set(required); this.states = new Map([...this.required].map((name) => [name, false])); }
   set(name, healthy) { this.states.set(name, healthy === true); }
   get ready() { return [...this.required].every((name) => this.states.get(name) === true); }
   snapshot() { return { ready: this.ready, dependencies: Object.fromEntries(this.states) }; }
@@ -60,27 +69,32 @@ export class BoundedPriorityQueue {
 }
 
 export class TradingEngine {
-  constructor({ projection = new MarketProjection(), account = new AccountCapitalSnapshot(), readyGate = new ReadyGate(), queue = new BoundedPriorityQueue(), clock = { nowMs: () => Date.now() }, timers = globalThis, watchdogMs = 5_000, onWatchdog = () => {}, sellService = null, coordinator = null, slo = null } = {}) {
-    Object.assign(this, { projection, account, readyGate, queue, clock, timers, watchdogMs, onWatchdog, sellService, coordinator, slo }); this.pendingBuy = new Map(); this.activeBuy = new Set(); this.watchdog = null;
+  constructor({ projection = new MarketProjection(), account = new AccountCapitalSnapshot(), readyGate = new ReadyGate(), queue = new BoundedPriorityQueue(), clock = { nowMs: () => Date.now() }, timers = globalThis, watchdogMs = 5_000, onWatchdog = () => {}, onMarketEvent = async (event) => event, onOrderEvent = async (event) => event, sellService = null, coordinator = null, slo = null } = {}) {
+    Object.assign(this, { projection, account, readyGate, queue, clock, timers, watchdogMs, onWatchdog, onMarketEvent, onOrderEvent, sellService, coordinator, slo }); this.pendingBuy = new Map(); this.activeBuy = new Set(); this.watchdog = null;
   }
   receiveTicker(row) {
     const started = this.clock.nowMs();
     const result = this.projection.updateTicker(row);
-    if (result.accepted) { this.queue.enqueue({ type: "ticker", instId: row.instId }); for (const event of this.sellService?.observeTicker(row.instId) ?? []) this.queue.enqueue(event); }
+    if (result.accepted) { this.queue.enqueue({ type: "ticker", instId: row.instId, enqueuedAt: this.clock.nowMs() }); for (const event of this.sellService?.observeTicker(row.instId) ?? []) this.queue.enqueue({ ...event, enqueuedAt: this.clock.nowMs() }); }
     // Ingress SLO boundary: normalized WS event through projection and into
     // the bounded consumer queue. Keep the old metric for dashboard continuity.
     this.slo?.record("event_enqueue", started); this.slo?.record("ws_projection_enqueue", started); this.slo?.observe("queue_depth", this.queue.size);
+    if (Number.isFinite(Number(row.ts)) && this.clock.nowMs() >= Number(row.ts)) this.slo?.observe("market_source_lag", this.clock.nowMs() - Number(row.ts));
     return result;
   }
   receiveCandle(row) {
     const result = this.projection.updateCandle(row);
-    if (result.accepted) { this.queue.enqueue({ type: "market-recheck", instId: row.instId, priority: "normal" }); for (const event of this.sellService?.observeCandle(row.instId) ?? []) this.queue.enqueue(event); }
+    if (result.accepted) { this.queue.enqueue({ type: "market-recheck", instId: row.instId, priority: "normal", enqueuedAt: this.clock.nowMs() }); for (const event of this.sellService?.observeCandle(row.instId) ?? []) this.queue.enqueue({ ...event, enqueuedAt: this.clock.nowMs() }); }
     return result;
   }
+  receiveOrder(row) { return this.queue.enqueue({ type: "ORDER_UPDATE", priority: "critical", order: row, enqueuedAt: this.clock.nowMs() }); }
   rebuildExitWatches(fills) { this.sellService?.rebuild(fills); }
   async consumeOne() {
     const event = this.queue.take(); if (!event) return null;
+    if (Number.isFinite(event.enqueuedAt)) this.slo?.record("queue_wait", event.enqueuedAt);
     if (event.type === "SELL_BREACH" || event.type === "SELL_PROTECTION") return this.sellService.consume(event);
+    if (event.type === "ORDER_UPDATE") return this.onOrderEvent(event.order);
+    if (event.type === "ticker" || event.type === "market-recheck") return this.onMarketEvent(event);
     return event;
   }
   protectInstrument(instId) { this.pendingBuy.delete(instId); return this.activeBuy.has(instId); }

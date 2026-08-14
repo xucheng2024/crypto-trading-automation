@@ -161,14 +161,14 @@ recovery 作为 reconciliation-service 的一组用例，不再建立独立服�
 - advisory lock 保证的唯一自动 mutation owner、订单 ledger 和 recovery。
 - AccountCapitalSnapshot、Auto Loan/Cross 校验和本策略 exposure reservation；strategy exposure 包含全部 managed fill remaining 和按固定 0.05% 费用放大的 SYSTEM BUY reservation。ACCOUNT BUY 不创建 reservation，成交纳管后直接增加 exposure。共享账户安全只依赖新鲜 `totalEq/adjEq/mgnRatio/max-avail-size`；不计算借款利息。
 - BUY 意图排队时不调用 max-avail；只读准备阶段对当前最多 5 个候选只调用一次 max-avail且不占 submit slot，更高优先级退出可抢先。随后取得 submit slot，通过 account-scoped transaction advisory lock 按确定顺序原子重算 reservation 和写入各自准入风险摘要。首版不实现 order-precheck 状态。
-- BUY_WATCH、5m open 回升、ask 过滤和 limit IOC；generation 0 冻结当日目标，部分/零成交后只以非重复、不倒退的最新 `decision_market_key` 串行继续；ticker、新 closed candle 或同 ts candle payload 修正均可用最新新鲜投影重评，同毫秒不同 payload 不漏判。IOC 在途或限频等待期间只 coalesce 最新市场投影/intent，不设置额外 cooldown。SYSTEM/ACCOUNT SELL 不返还已消费 BUY 预算；tickSz 变化只派生向下取整的 execution_limit_price，不改写 daily cache。
+- BUY_WATCH、严格高于上一根已确认原生 3m high × 1.003、ask 过滤和 limit IOC；generation 0 冻结当日目标，部分/零成交后只以非重复、不倒退的最新 `decision_market_key` 串行继续；ticker、新 closed candle 或同 ts candle payload 修正均可用最新新鲜投影重评，同毫秒不同 payload 不漏判。IOC 在途或限频等待期间只 coalesce 最新市场投影/intent，不设置额外 cooldown。SYSTEM/ACCOUNT SELL 不返还已消费 BUY 预算；tickSz 变化只派生向下取整的 execution_limit_price，不改写 daily cache。
 - 禁止 BUY service 自己签名、重试 mutation 或实现第二套订单状态转换。
 
 验收：130+20=150；本策略并发币种合计不超过 2.95 准入线，3.0 为本策略运行时硬停止线；管理起点后的配置交易对 ACCOUNT cross BUY/SELL fills 在启动、重连和实时路径按规则进入 ledger，其余共享账户外部对象不进入 ledger 或阻塞 READY；全成/部分/零成交累计不超过冻结目标，重复 quote、上一 attempt 未原子 SETTLED 或 UNKNOWN 时不创建下一 generation。
 
 ### T6 逐 fill SELL 与债务观察
 
-- 每个 managed BUY tradeId 保存 source、实际 `execution_mode`、语义 `execution_route`、fill_size、disposed_size、hold_hours、strategy_config_hash、sell_time、保护价和 sell_state。SYSTEM fill 继承 BUY attempt 的冻结配置与路由，ACCOUNT fill 使用首次纳管时确认的模式/路由，sell_time 以后不重算。remaining 读取时计算，不保存实际 fee/feeCcy。generation 只存在于 order_attempts，breach latch 只在内存；不聚合。
+- 每个 managed BUY tradeId 保存 source/source attempt、实际 `execution_mode`、语义 `execution_route`、fill price、fee/feeCcy、fill_size、disposed_size、hold_hours、strategy_config_hash、sell_time、保护价、成交后最低价/最大不利幅度和 sell_state。SYSTEM fill 继承 BUY attempt 的冻结配置与路由，ACCOUNT fill 使用首次纳管时确认的模式/路由，sell_time 以后不重算。remaining 读取时计算；实际 fee 仅审计，不进入规划公式。generation 只存在于 order_attempts，breach latch 只在内存；不聚合。
 - ticker 跌破条件按 fill 在 Market Projection 中单调锁存，防止 coalescing 覆盖瞬时命中。
 - 每个 fill 按自己的确认剩余 base 数量提交 market sell，不按固定金额拆单。
 - 所有 mutation HTTP 请求经 Order Coordinator 单通道串行提交，每次即时携带当前 1 至 5 个同类、不同 instId/base 的订单；同一 `(accountId, baseCcy)` 的非终态 attempt 继续阻止替代退出单。

@@ -26,7 +26,7 @@ test("P3 exits submit immediate five-base batches with DELIST priority and no sh
   for (let index = 0; index < 20; index += 1) {
     const base = `C${String(index).padStart(2, "0")}`; const instId = `${base}-USDT`;
     market.updateInstrument({ instId, ts: 1, state: "live", tickSz: "0.1", lotSz: "0.1", minSz: "0.1", base });
-    coordinator.enqueue({ intent: "SELL", instId, baseCcy: base, sourceBuyTradeId: `buy-${base}`, remainingSize: "1", availableBase: "100", bidPx: "10", fillVersion: 1, sellTime: 1, ...(index === 0 ? { executionRoute: "spot" } : {}) });
+    coordinator.enqueue({ intent: "SELL", instId, baseCcy: base, sourceBuyTradeId: `buy-${base}`, remainingSize: "1", bidPx: "10", fillVersion: 1, sellTime: 1, ...(index === 0 ? { executionRoute: "spot" } : {}) });
   }
   coordinator.enqueue({ intent: "DELIST", instId: "C19-USDT", baseCcy: "C19", sourceBuyTradeId: "delist-buy", remainingSize: "1", availableBase: "100", bidPx: "10", fillVersion: 1, sellTime: 1 });
   assert.equal((await coordinator.drainOnce()).count, 1, "DELIST preempts queued SELL");
@@ -56,9 +56,21 @@ test("P3 engine latches breach in the callback and persists only from its critic
   engine.queue.enqueue(events[0]); await engine.consumeOne(); assert.equal(writes, 1); assert.equal(queued.length, 1);
   assert.equal(sell.observeTicker("BTC-USDT").length, 0, "latch survives a price bounce and duplicate tick");
   market.updateCandle({ instId: "BTC-USDT", ts: 10, low: "95", confirm: true });
-  assert.equal(sell.observeCandle("BTC-USDT").find((event) => event.type === "SELL_PROTECTION").protection, "95");
+  assert.equal(sell.observeCandle("BTC-USDT").find((event) => event.type === "SELL_PROTECTION").protection, "94.715");
   market.updateCandle({ instId: "BTC-USDT", ts: 10, low: "80", confirm: true });
-  assert.equal(sell.observeCandle("BTC-USDT").some((event) => event.type === "SELL_PROTECTION"), false, "same-ts correction never lowers protection");
+  assert.equal(sell.observeCandle("BTC-USDT").find((event) => event.type === "SELL_PROTECTION").protection, "79.76", "the latest corrected 3m low is authoritative");
+});
+
+test("P3 SELL uses a strict 3m breakdown: equality does not trigger", () => {
+  const now = clock(); const market = new MarketProjection({ clock: now });
+  market.updateInstrument({ instId: "BTC-USDT", ts: 1, state: "live", tickSz: "0.1", lotSz: "0.1", minSz: "0.1", base: "BTC" });
+  const fill = { account_id: "a", inst_id: "BTC-USDT", base_ccy: "BTC", trade_id: "strict", side: "BUY", fill_size: "1", disposed_size: "0", sell_time: 1, sell_state: "WAITING", version: 1 };
+  const sell = new SellService({ market, clock: now, coordinator: { enqueue: () => true }, state: {} });
+  sell.rebuild([fill]); market.updateCandle({ instId: "BTC-USDT", ts: 10, low: "100", confirm: true }); sell.observeCandle("BTC-USDT");
+  market.updateTicker({ instId: "BTC-USDT", ts: 11, last: "99.7", bidPx: "99.7" });
+  assert.equal(sell.observeTicker("BTC-USDT").length, 0);
+  market.updateTicker({ instId: "BTC-USDT", ts: 12, last: "99.699", bidPx: "99.699" });
+  assert.equal(sell.observeTicker("BTC-USDT").length, 1);
 });
 
 test("P3 recovery retains PREPARED and UNKNOWN after every consistency source misses, and rebuilds durable watches", async () => {

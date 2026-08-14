@@ -2,7 +2,7 @@ const boundary = (base) => new RegExp(`(^|[^A-Z0-9])${base}(?:-USDT)?([^A-Z0-9]|
 function emit(port, event) { try { Promise.resolve(port(event)).catch(() => {}); } catch { /* non-blocking port */ } }
 
 export class InstrumentProtectionService {
-  constructor({ state, transaction = async (fn) => fn(null), onExit = () => {}, telemetry = () => {}, nowMs = () => Date.now() }) { Object.assign(this, { state, transaction, onExit, telemetry, nowMs }); }
+  constructor({ state, transaction = async (fn) => fn(null), onExit = () => {}, onProtect = () => {}, telemetry = () => {}, nowMs = () => Date.now() }) { Object.assign(this, { state, transaction, onExit, onProtect, telemetry, nowMs }); }
   async scanAnnouncements(fetchPage, instruments) {
     let crossedWindow = false;
     for (let page = 1; page <= 20; page += 1) {
@@ -37,7 +37,7 @@ export class InstrumentProtectionService {
     }
     emit(this.telemetry, { type: "protection", reason: "ANNOUNCEMENT_PAGE_LIMIT" }); return { retry: true, pages: 20 };
   }
-  async _notifyExit(protection) { try { await this.onExit(protection); } catch (error) { emit(this.telemetry, { type: "protection", reason: "PROTECTION_ORCHESTRATION_DEFERRED", instId: protection.instId, error: error?.message }); } emit(this.telemetry, { type: "protection", reason: "EXITING", instId: protection.instId }); }
+  async _notifyExit(protection) { this.onProtect(protection); try { await this.onExit(protection); } catch (error) { emit(this.telemetry, { type: "protection", reason: "PROTECTION_ORCHESTRATION_DEFERRED", instId: protection.instId, error: error?.message }); } emit(this.telemetry, { type: "protection", reason: "EXITING", instId: protection.instId }); }
   async confirm(protection) {
     await this.transaction((tx) => this.state.upsertProtection?.(tx, { ...protection, state: "EXITING" }));
     await this._notifyExit(protection);

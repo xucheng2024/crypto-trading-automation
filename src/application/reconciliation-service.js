@@ -1,4 +1,5 @@
 import { classifyManagedFill } from "../infrastructure/okx/rest-client.js";
+import { addDecimal, compareDecimal } from "../decimal.js";
 
 // Observability must never become part of the reconciliation correctness path.
 // Ports are intentionally fire-and-forget: both a synchronous throw and a
@@ -11,8 +12,8 @@ function normalizePage(value) { return Array.isArray(value) ? { rows: value, cur
 
 /** Read-only reconciliation and ACCOUNT fill ingestion; it never invokes mutation transport. */
 export class ReconciliationService {
-  constructor({ orders, state, transport, ownerGuard, readyGate, clock = { nowMs: () => Date.now() }, sleep = async () => {}, safetyWaitMs, telemetry = () => {}, transaction = async (fn) => fn(null), ownership = {}, onAccountBuy = () => {}, onRecovery = async () => {} }) {
-    Object.assign(this, { orders, state, transport, ownerGuard, readyGate, clock, sleep, safetyWaitMs, telemetry, transaction, ownership, onAccountBuy, onRecovery });
+  constructor({ orders, state, transport, ownerGuard, readyGate, clock = { nowMs: () => Date.now() }, sleep = async () => {}, safetyWaitMs, telemetry = () => {}, transaction = async (fn) => fn(null), ownership = {}, onAccountBuy = () => {}, onRecovery = async () => {}, onTerminal = async () => {} }) {
+    Object.assign(this, { orders, state, transport, ownerGuard, readyGate, clock, sleep, safetyWaitMs, telemetry, transaction, ownership, onAccountBuy, onRecovery, onTerminal });
     if (!Number.isFinite(safetyWaitMs) || safetyWaitMs < 0) throw new TypeError("safetyWaitMs is required");
     // Session advisory locks disappear with their connection. READY must disappear in the
     // same turn; reacquisition always goes through recover() and its safety wait.
@@ -79,7 +80,13 @@ export class ReconciliationService {
       emit(this.telemetry, { type: "reconcile_attempt", clOrdId, outcome: "RETAIN_UNKNOWN", reason: "ORDER_LOOKUP_FAILED", error: error?.message });
       return { clOrdId, outcome: "RETAIN_UNKNOWN" };
     }
-    if (direct?.state && direct.state !== "NOT_FOUND") { emit(this.telemetry, { type: "reconcile_attempt", clOrdId, outcome: "FOUND" }); return { clOrdId, outcome: "FOUND", direct }; }
+    if (direct?.state && direct.state !== "NOT_FOUND") {
+      const terminal = ["filled", "canceled", "mmp_canceled"].includes(String(direct.state).toLowerCase());
+      const settlement = terminal ? await this.settleTerminal(attempt, direct) : null;
+      const outcome = !terminal ? "FOUND" : settlement?.settled ? "TERMINAL_SETTLED" : "TERMINAL_PENDING_FILLS";
+      emit(this.telemetry, { type: "reconcile_attempt", clOrdId, outcome, state: direct.state, reason: settlement?.reason });
+      return { clOrdId, outcome, direct };
+    }
     // A single NOT_FOUND is deliberately insufficient. Query every required consistency source and retain reservation.
     const methods = ["ordersPending", "ordersHistory", "ordersHistoryArchive", "fills", "fillsHistory"];
     const tasks = [];
@@ -92,6 +99,31 @@ export class ReconciliationService {
     const found = reads.flat().some((row) => row?.clOrdId === clOrdId || row?.ordId === attempt.ord_id);
     emit(this.telemetry, { type: "reconcile_attempt", clOrdId, outcome: found ? "FOUND_BY_CONSISTENCY" : "RETAIN_UNKNOWN" });
     return { clOrdId, outcome: found ? "FOUND_BY_CONSISTENCY" : "RETAIN_UNKNOWN" };
+  }
+  async fillsForOrder(attempt, order) {
+    const ordId = order.ordId ?? attempt.ord_id ?? attempt.ordId; const clOrdId = order.clOrdId ?? attempt.cl_ord_id ?? attempt.clOrdId;
+    const expected = order.accFillSz;
+    if (expected !== undefined && compareDecimal(expected, "0") === 0) return [];
+    const rows = []; const unique = () => [...new Map(rows.filter((row) => (!ordId || row.ordId === ordId) && (!clOrdId || !row.clOrdId || row.clOrdId === clOrdId)).map((row) => [`${row.instId}:${row.tradeId}`, row])).values()];
+    for (const method of ["fills", "fillsHistory"]) {
+      for (const instType of ["SPOT", "MARGIN"]) if (typeof this.transport[method] === "function") {
+        try { rows.push(...await this.pages((cursor) => this.transport[method](instType, { ...cursor, ordId }))); }
+        catch (error) { emit(this.telemetry, { type: "reconcile_attempt", reason: "ORDER_FILLS_READ_FAILED", clOrdId, instType, endpoint: method, error: error?.message }); throw error; }
+      }
+      const found = unique();
+      if (expected !== undefined && compareDecimal(found.reduce((sum, fill) => addDecimal(sum, fill.fillSz), "0"), expected) === 0) return found;
+    }
+    return unique();
+  }
+  async settleTerminal(attempt, order) {
+    const fills = await this.fillsForOrder(attempt, order);
+    return this.onTerminal({ attempt, order, fills, exchangeState: order.state, accFillSz: order.accFillSz ?? "0" });
+  }
+  async observeOrder(order) {
+    const clOrdId = order?.clOrdId; if (!clOrdId || !["filled", "canceled", "mmp_canceled"].includes(String(order.state).toLowerCase())) return { handled: false };
+    const attempt = await this.transaction((tx) => this.orders.findByClOrdId(tx, clOrdId));
+    if (!attempt) return { handled: false };
+    await this.settleTerminal(attempt, order); return { handled: true };
   }
   async ingestFill(tx, fill, order) {
     const managed = classifyManagedFill(fill, order, this.ownership);
@@ -106,7 +138,7 @@ export class ReconciliationService {
     if (managed.source === "ACCOUNT" && !isBuy) await this.orders.lockExitBase?.(tx, this.ownership.accountId, baseCcy);
     const inserted = await this.state.insertFill(tx, {
       accountId: this.ownership.accountId, instId: managed.instId, baseCcy, tradeId: managed.tradeId, billId: managed.billId,
-      source: managed.source, side: isBuy ? "BUY" : "SELL", fillSize: managed.sz, fillTime: managed.fillTime,
+      source: managed.source, side: isBuy ? "BUY" : "SELL", fillSize: managed.sz, fillTime: managed.fillTime, fillPrice: fill.fillPx, fee: fill.fee, feeCcy: fill.feeCcy,
       executionMode: managed.executionMode,
       executionRoute: managed.executionRoute,
       ...(isBuy ? { holdHours: this.ownership.holdHoursByInst?.[managed.instId], strategyConfigHash: this.ownership.configHash, sellTime: Number(managed.fillTime) + Number(this.ownership.holdHoursByInst?.[managed.instId] ?? 0) * 3_600_000, sellState: "WAITING" } : { allocationState: "PENDING" }),
