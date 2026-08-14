@@ -82,10 +82,11 @@ export class OrderCoordinator {
         const instrument = this.market.instrument(intent.instId); const quote = this.market.ticker(intent.instId); const candle = this.market.candle(intent.instId);
         const executionPrice = roundToStep(intent.dailyLimitPrice, instrument.tickSz, "down");
         if (compareDecimal(quote.askPx, executionPrice) > 0) continue;
-        const frozenTarget = intent.frozenTargetUsd ?? this.account.value.totalEq;
+        const frozenTarget = intent.frozenTargetUsd ?? multiplyDecimal(BUY_ADMISSION_LEVERAGE, adjustedEquity(this.account.value));
         const remainingTarget = intent.remainingTargetUsd ?? frozenTarget;
         const maxNotional = min(remainingTarget, intent.availBuy, this._remainingCapacity());
-        const size = roundToStep(divideDecimal(maxNotional, multiplyDecimal(executionPrice, `1${TRADE_FEE_RATE}`)), instrument.lotSz, "down");
+        const feeMultiplier = add("1", TRADE_FEE_RATE);
+        const size = roundToStep(divideDecimal(maxNotional, multiplyDecimal(executionPrice, feeMultiplier)), instrument.lotSz, "down");
         if (compareDecimal(size, instrument.minSz) < 0) continue;
         const executionRoute = this._executionRoute(intent);
         const executionMode = executionRoute ? "cross" : null;
@@ -97,7 +98,7 @@ export class OrderCoordinator {
         const hash = await payloadHash(payload); const marketKey = await payloadHash({ quote, candle });
         const attempt = {
           accountId: this.config.accountId, intent: "BUY", instId: intent.instId, baseCcy: instrument.base, clOrdId, payloadHash: hash,
-          strategyDay: intent.strategyDay, generation: intent.generation, plannedSize: size, reservedExposureUsd: multiplyDecimal(multiplyDecimal(size, executionPrice), `1${TRADE_FEE_RATE}`),
+          strategyDay: intent.strategyDay, generation: intent.generation, plannedSize: size, reservedExposureUsd: multiplyDecimal(multiplyDecimal(size, executionPrice), feeMultiplier),
           frozenTargetUsd: frozenTarget, decisionQuoteTs: quote.ts, decisionQuoteHash: await payloadHash(quote), decisionCandleTs: candle.ts, decisionCandleHash: await payloadHash(candle), decisionMarketKey: marketKey,
           executionLimitPrice: executionPrice, instrumentVersion: String(instrument.version ?? "1"), holdHours: intent.holdHours, strategyConfigHash: intent.configHash,
           admissionEquity: adjustedEquity(this.account.value), admissionExposure: intent.managedExposure ?? "0", accountSnapshotVersion: String(this.account.value.version), executionMode, executionRoute,

@@ -102,6 +102,20 @@ test("P5 zero margin-route availability never retries the same instrument as a s
   assert.equal((await coordinator.drainOnce()).reason, "NO_ELIGIBLE"); assert.deepEqual(modes, ["cross"]); assert.equal(submissions, 0);
 });
 
+test("P5 one eligible margin instrument can consume the full 2.95 account capacity", async () => {
+  const now = clock(10); const market = setupMarket(now); const account = new AccountCapitalSnapshot({ clock: now }); account.update({ ts: 1, totalEq: "100", adjEq: "100" });
+  let attempt;
+  const coordinator = new OrderCoordinator({ transaction: async (fn) => fn({}), state: {}, ownerGuard: { isHeld: () => true }, readyGate: ready(), market, account, mode: () => "FULL", executionRoute: () => "margin", tradeQuoteCurrency: () => "USDT", clock: now, config,
+    orders: { reserveBuy: async (_tx, row) => { attempt = row; return { authorized: true }; }, markSubmitted: async () => {} },
+    transport: { maxAvailSize: async () => [{ instId: "BTC-USDT", availBuy: "1000" }], submitBatchOrders: async (rows) => rows.map((row) => ({ clOrdId: row.clOrdId, status: "SUBMITTED", ordId: "one" })) },
+  });
+  coordinator.enqueue({ intent: "BUY", instId: "BTC-USDT", generation: 0, eligibleSince: 1, strategyDay: "2026-08-14", dailyLimitPrice: "100", holdHours: "24", configHash: "cfg", managedExposure: "0" });
+  assert.equal((await coordinator.drainOnce()).submitted, true);
+  assert.equal(attempt.frozenTargetUsd, "295");
+  assert.equal(attempt.plannedSize, "2.948");
+  assert.equal(attempt.reservedExposureUsd, "294.9474");
+});
+
 test("P2 recovery paginates fills/history, deduplicates tradeId, persists watermarks, and keeps a lone NOT_FOUND UNKNOWN", async () => {
   const stored = []; const watermarks = []; const calls = [];
   const page = (name) => async (instType, params = {}) => {
