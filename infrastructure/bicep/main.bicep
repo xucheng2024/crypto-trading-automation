@@ -26,6 +26,8 @@ param appInsightsDailyCapGb int = 1
 param entraAdministratorObjectId string
 param entraAdministratorPrincipalName string
 param entraAdministratorPrincipalType string
+@description('Set false after the Entra administrator has been bootstrapped to avoid an unnecessary control-plane PUT on routine deployments.')
+param reconcileEntraAdministrator bool = true
 param tenantId string = subscription().tenantId
 param postgresDatabase string = 'trading'
 param okxAccountId string = 'default'
@@ -77,6 +79,7 @@ module postgres 'modules/postgres.bicep' = {
     entraAdministratorObjectId: entraAdministratorObjectId
     entraAdministratorPrincipalName: entraAdministratorPrincipalName
     entraAdministratorPrincipalType: entraAdministratorPrincipalType
+    reconcileEntraAdministrator: reconcileEntraAdministrator
     tenantId: tenantId
     databaseName: postgresDatabase
     tags: tags

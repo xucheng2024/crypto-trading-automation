@@ -18,6 +18,7 @@
     "entraAdministratorObjectId": { "value": "<ENTRA_OBJECT_ID>" },
     "entraAdministratorPrincipalName": { "value": "<ENTRA_PRINCIPAL_NAME>" },
     "entraAdministratorPrincipalType": { "value": "Group" }
+    ,"reconcileEntraAdministrator": { "value": true }
     ,"postgresDatabase": { "value": "trading" }
     ,"okxAccountId": { "value": "<OKX_ACCOUNT_ALIAS>" }
     ,"okxInstruments": { "value": "BTC-USDT,ETH-USDT" }

@@ -13,6 +13,7 @@ param entraAdministratorObjectId string
 param entraAdministratorPrincipalName string
 @allowed(['User', 'Group', 'ServicePrincipal'])
 param entraAdministratorPrincipalType string
+param reconcileEntraAdministrator bool = true
 param tenantId string
 param databaseName string
 resource server 'Microsoft.DBforPostgreSQL/flexibleServers@2024-08-01' = {
@@ -29,7 +30,7 @@ resource server 'Microsoft.DBforPostgreSQL/flexibleServers@2024-08-01' = {
   }
   tags: tags
 }
-resource administrator 'Microsoft.DBforPostgreSQL/flexibleServers/administrators@2024-08-01' = {
+resource administrator 'Microsoft.DBforPostgreSQL/flexibleServers/administrators@2024-08-01' = if (reconcileEntraAdministrator) {
   parent: server
   name: entraAdministratorObjectId
   properties: {
