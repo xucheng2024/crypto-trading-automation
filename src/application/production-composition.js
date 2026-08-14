@@ -28,7 +28,7 @@ export async function runRestBaseline({ rest, instIds, market, account, readyGat
   const status = await rest.systemStatus();
   if (!serviceAvailable(status, clock.nowMs())) throw new Error("OKX_SERVICE_UNAVAILABLE");
   const [publicRows, tickers, accountConfig, spotRows, marginRows, leverage, balances] = await Promise.all([
-    rest.publicInstruments("SPOT"), rest.tickers("SPOT"), rest.accountConfig(), rest.accountInstruments("SPOT"), rest.accountInstruments("MARGIN"), rest.leverageInfo(), rest.balance(),
+    rest.publicInstruments("SPOT"), rest.tickers("SPOT"), rest.accountConfig(), rest.accountInstruments("SPOT"), rest.accountInstruments("MARGIN"), rest.leverageInfo(instIds[0]), rest.balance(),
   ]);
   const profile = validateAccountProfile({ config: accountConfig, spotInstruments: spotRows, marginInstruments: marginRows, enabledInstIds: instIds });
   if (!profile.ready) throw new Error(`OKX_BASELINE_${profile.reason}${profile.instId ? `:${profile.instId}` : ""}`);

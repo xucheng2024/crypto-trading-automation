@@ -2,12 +2,15 @@
 
 ## Status
 
-**阻塞**。本地候选已收敛，但 P4 验收门尚未通过：缺少经授权的 Azure Bicep build/validate/what-if 与真实 OKX 账户只读 preflight。P5 未进入，也没有访问外部服务。
+**通过（2026-08-14）**。经 operator 明确授权，Azure Bicep build、resource-group validate、what-if 与真实账户 GET-only preflight 均已通过。P5 仍未授权，未部署 Container Apps、PostgreSQL、ACR、NAT 或交易 mutation。
 
-仅存 blocker：
+外部验收证据：
 
-- 本机没有 Azure CLI/Bicep CLI；静态检查不能替代 provider schema 编译与 Azure validate/what-if。
-- 未获得真实 Azure subscription/resource group、Entra principal、Key Vault/PostgreSQL 与真实 OKX 只读授权；没有运行真实账户 preflight。
+- Azure CLI 2.89.1 / Bicep 0.46.1 warning-free build；Azure validate 返回 `Succeeded`。
+- 初始 what-if 为 37 个 `Create`、无修改/删除；P4 Key Vault 创建后为 36 个 `Create` + 1 个既有 Vault `Deploy`、无删除。
+- D1 只读查询确认 26 个 active blacklist；153 个 limit 配置排除 7 个重合项后启用 146 个交易对，配置 hash 为 `cacb9fcac8928a2230374fc0cee0228c12f1cef2f9b9a6d14e5d42b5ad390a8c`。
+- `crp4e24c-kv` 启用 RBAC、purge protection 与 90 天 soft delete；真实 preflight 从 Vault 取值，依次通过 public time、account config、SPOT/MARGIN instruments、BTC-USDT cross leverage 与 system status。
+- Operator 明确接受现有 OKX Key 具有 Trade、无 Withdraw 权限的例外；本次 runner 仍由代码强制为 GET-only，未调用任何 mutation。该例外不得被描述为凭据本身只读。
 
 ## Delivered
 
@@ -24,10 +27,10 @@
 
 ## Verification
 
-最终结果：`npm test` 130 passed；`npm run test:postgres` 24 passed；`python3.11 -m pytest tests` 29 passed；`npm run test:p4` 22 passed；`npm run test:p4-replay` 76 passed；`npm run test:p4-slo` 3 passed。`npm run check` dry-run、container static、migration/import rehearsal、offline read-only preflight、`npm audit --omit=dev`（0 vulnerabilities）与 `git diff --check` 全部通过。
+本地候选原始结果：`npm test` 130 passed；`npm run test:postgres` 24 passed；`python3.11 -m pytest tests` 29 passed；`npm run test:p4` 22 passed；`npm run test:p4-replay` 76 passed；`npm run test:p4-slo` 3 passed。外部验收修复后再次确认 `npm test` 130 passed、`npm run test:p4` 22 passed、GET 参数回归 31 passed、Bicep warning-free build、Azure validate/what-if 与 `git diff --check` 全部通过。
 
-`test:iac` 必须明确输出 `BICEP_CLI_UNAVAILABLE`，不能被记录为已编译。未执行 Docker push、部署、真实 Azure/Key Vault/OKX/远端 PostgreSQL 请求。
+未执行 Docker push、Container Apps/PostgreSQL/ACR/NAT 部署或任何 OKX mutation。唯一创建的 Azure workload resource 是 P4 凭据落点 Key Vault；provider registration、RBAC 和 GET-only preflight 已完成。
 
 ## External gate and P5 risk
 
-P4 只能在获得单独授权后运行 Azure build/validate/what-if 与真实 OKX GET-only preflight；两者通过前保持“阻塞”，不能标记“已通过”。P5 还需要新的显式授权，才能部署、处理旧调度器/API key/pending ownership、启用 `FULL` 或进行真实 mutation。
+P4 已通过。P5 仍需要新的显式授权，才能 push 镜像、部署 OFF、处理旧调度器/API key/pending ownership、启用 `FULL` 或进行真实 mutation。

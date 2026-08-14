@@ -37,11 +37,27 @@ test("P4 REST baseline validates server, account, leverage and configured instru
   await assert.rejects(runRestBaseline({ rest: { ...rest, systemStatus: async () => [{ state: "ongoing" }] }, instIds: ["BTC-USDT"], market: {}, account: {}, readyGate: {}, clock: { nowMs: () => 3 } }), /OKX_SERVICE_UNAVAILABLE/);
 });
 
-test("P4 preflight is fixture-only and endpoint allowlist is GET-only", async () => {
+test("P4 preflight requires authorization, supplies required GET params and rejects mutations", async () => {
   const result = await runReadOnlyPreflight({ mode: "offline", fixture: { acctLv: "3" } });
   assert.equal(result.ok, true);
   assert.throws(() => assertReadOnlyRequest("POST", "/api/v5/trade/batch-orders"));
   await assert.rejects(runReadOnlyPreflight({ mode: "real" }), /authorization/);
+  const calls = [];
+  const real = await runReadOnlyPreflight({
+    mode: "real",
+    realAuthorized: true,
+    instId: "BTC-USDT",
+    client: { read: async (...args) => { calls.push(args); return []; } },
+  });
+  assert.equal(real.ok, true);
+  assert.deepEqual(calls, [
+    ["/api/v5/public/time", {}, false],
+    ["/api/v5/account/config", {}, true],
+    ["/api/v5/account/instruments", { instType: "SPOT" }, true],
+    ["/api/v5/account/instruments", { instType: "MARGIN" }, true],
+    ["/api/v5/account/leverage-info", { instId: "BTC-USDT", mgnMode: "cross" }, true],
+    ["/api/v5/system/status", {}, false],
+  ]);
 });
 
 test("P4 maintenance has no mutation port and remains idempotent", async () => {

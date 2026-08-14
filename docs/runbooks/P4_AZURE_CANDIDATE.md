@@ -18,11 +18,10 @@ npm run migrate:rehearsal
 npm run read-only-preflight
 ```
 
-`az` and `bicep` are not installed in this workstation. This is the explicit
-`BICEP_CLI_UNAVAILABLE` blocker: static IaC checks are not a Bicep compile.
-The Azure SDK production dependencies are installed and locally exercised.
-After an authorized operator installs Azure CLI/Bicep, run the build, lint,
-validate and what-if commands below. Do not download tooling from this repository workflow.
+Azure CLI 2.89.1 and Bicep 0.46.1 were installed by the authorized operator.
+The 2026-08-14 external gate completed a warning-free build, Azure validate,
+and what-if. Repeat these checks after every IaC change; static checks never
+replace provider-schema compilation or the Azure service-side checks.
 
 Review-only Azure commands (do not run without separate authorization):
 
@@ -31,6 +30,17 @@ az bicep build --file infrastructure/bicep/main.bicep
 az deployment group validate --resource-group <RESOURCE_GROUP> --template-file infrastructure/bicep/main.bicep --parameters infrastructure/bicep/parameters.example.json
 az deployment group what-if --resource-group <RESOURCE_GROUP> --template-file infrastructure/bicep/main.bicep --parameters infrastructure/bicep/parameters.example.json
 az deployment group create --resource-group <RESOURCE_GROUP> --confirm-with-what-if --template-file infrastructure/bicep/main.bicep --parameters infrastructure/bicep/parameters.example.json
+```
+
+The separately authorized real preflight reads OKX credentials from Key Vault
+through the logged-in Azure CLI identity and permits only its hard-coded GET
+allowlist. It never accepts credential values from environment variables:
+
+```sh
+P4_REAL_PREFLIGHT_AUTHORIZED=true \
+KEY_VAULT_URI=https://<KEY_VAULT_NAME>.vault.azure.net \
+OKX_PREFLIGHT_INST_ID=<ENABLED_INST_ID> \
+npm run read-only-preflight -- --real
 ```
 
 Build/push is a human-gated operation; do not substitute a tag for the recorded digest:

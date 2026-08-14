@@ -8,11 +8,22 @@ export function assertReadOnlyRequest(method, path) {
   if (method !== "GET" || !READ_ONLY_PATHS.has(path)) throw new Error(`Preflight rejected non-read-only endpoint: ${method} ${path}`);
 }
 
-export async function runReadOnlyPreflight({ mode = "offline", fixture, client, realAuthorized = false } = {}) {
+export async function runReadOnlyPreflight({ mode = "offline", fixture, client, instId, realAuthorized = false } = {}) {
   if (mode === "offline") return { mode, ok: true, results: fixture ?? {} };
   if (mode !== "real" || !realAuthorized) throw new Error("Real preflight requires explicit read-only authorization");
-  const calls = [["/api/v5/public/time", false], ["/api/v5/account/config", true], ["/api/v5/account/instruments", true], ["/api/v5/account/leverage-info", true], ["/api/v5/system/status", false]];
+  if (!/^[A-Z0-9]+-[A-Z0-9]+$/.test(instId ?? "")) throw new Error("Real preflight requires a configured instrument");
+  const calls = [
+    ["public-time", "/api/v5/public/time", {}, false],
+    ["account-config", "/api/v5/account/config", {}, true],
+    ["account-instruments-spot", "/api/v5/account/instruments", { instType: "SPOT" }, true],
+    ["account-instruments-margin", "/api/v5/account/instruments", { instType: "MARGIN" }, true],
+    ["account-leverage-cross", "/api/v5/account/leverage-info", { instId, mgnMode: "cross" }, true],
+    ["system-status", "/api/v5/system/status", {}, false],
+  ];
   const results = {};
-  for (const [path, authenticated] of calls) { assertReadOnlyRequest("GET", path); results[path] = await client.read(path, {}, authenticated); }
+  for (const [key, path, params, authenticated] of calls) {
+    assertReadOnlyRequest("GET", path);
+    results[key] = await client.read(path, params, authenticated);
+  }
   return { mode, ok: true, results: Object.fromEntries(Object.keys(results).map((key) => [key, "checked"])) };
 }
