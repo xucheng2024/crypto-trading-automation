@@ -37,7 +37,13 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install --yes postgresql
-          pg_config --bindir >> "$GITHUB_PATH"
+          pg_bin="$(pg_config --bindir)"
+          wrapper_dir="$RUNNER_TEMP/postgres-bin"
+          mkdir --parents "$wrapper_dir"
+          printf '%s\n' '#!/usr/bin/env bash' 'set -euo pipefail' 'args=("$@")' 'data_dir=""' 'for ((i=0; i<${#args[@]}; i++)); do if [ "${args[$i]}" = "-D" ]; then data_dir="${args[$((i+1))]}"; fi; done' "\"$pg_bin/initdb\" \"\${args[@]}\"" 'printf "\nunix_socket_directories = '\''/tmp'\''\n" >> "$data_dir/postgresql.conf"' > "$wrapper_dir/initdb"
+          chmod +x "$wrapper_dir/initdb"
+          echo "$pg_bin" >> "$GITHUB_PATH"
+          echo "$wrapper_dir" >> "$GITHUB_PATH"
       - name: Verify PostgreSQL can start as the runner user
         shell: bash
         run: |
