@@ -99,6 +99,7 @@ jspm_packages/
 .npm
 .wrangler/
 migration-export*.sql
+infrastructure/bicep/parameters.p5.json
 
 # Optional eslint cache
 .eslintcache

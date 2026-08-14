@@ -10,9 +10,11 @@ ENV NODE_ENV=production TRADING_MODE=OFF
 RUN addgroup -S trading && adduser -S trading -G trading
 COPY --from=deps /app/node_modules ./node_modules
 COPY package.json ./
+COPY src/decimal.js ./src/decimal.js
 COPY src/azure ./src/azure
 COPY src/domain ./src/domain
 COPY src/application ./src/application
+COPY src/infrastructure/azure ./src/infrastructure/azure
 COPY src/infrastructure/okx ./src/infrastructure/okx
 COPY src/infrastructure/postgres ./src/infrastructure/postgres
 COPY src/entrypoints/azure ./src/entrypoints/azure
