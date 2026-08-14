@@ -4,6 +4,8 @@ A comprehensive automated crypto trading system with OKX exchange integration, f
 
 Cloudflare Workers run all high-frequency trading protection. GitHub Actions performs the low-frequency daily buy-trigger cancellation and reconciliation, while D1 remains the shared strategy-state database.
 
+The proposed Azure/OKX WebSocket migration targets Azure East Asia (Hong Kong), with a margin risk gate, `BUY_WATCH` candle tracking, limit IOC buying, and batched market selling documented in [`AZURE_WS_TRADING_DESIGN.md`](AZURE_WS_TRADING_DESIGN.md).
+
 ## 🚀 Quick Start
 
 ```bash

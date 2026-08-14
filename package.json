@@ -4,10 +4,14 @@
   "type": "module",
   "scripts": {
     "test": "node --test tests-worker/*.test.js",
+    "test:postgres": "node --test tests-worker/postgres.integration.test.js",
     "check": "wrangler deploy --dry-run",
     "deploy": "wrangler deploy"
   },
   "devDependencies": {
     "wrangler": "4.118.0"
+  },
+  "dependencies": {
+    "pg": "^8.16.3"
   }
 }

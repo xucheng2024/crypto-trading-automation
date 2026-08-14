@@ -86,3 +86,20 @@ test("new Azure modules contain no direct OKX mutation bypass", async () => {
     assert.doesNotMatch(source, /OKXClient|placeOrder|placeAlgo|\/api\/v5\/trade\//, file);
   }
 });
+
+test("P1 dependency boundary keeps transport code in the designated OKX infrastructure", async () => {
+  for (const directory of ["../src/azure/", "../src/domain/"]) {
+    const files = await readdir(new URL(directory, import.meta.url));
+    for (const file of files) {
+      const source = await readFile(new URL(`${directory}${file}`, import.meta.url), "utf8");
+      assert.doesNotMatch(source, /https?:\/\/|wss?:\/\/|\bfetch\b|\bWebSocket\b|\/api\/v5\//, `${directory}${file}`);
+      assert.doesNotMatch(source, /process\.env/, `${directory}${file}`);
+      if (directory.includes("domain")) assert.doesNotMatch(source, /Date\.now\(/, `${directory}${file}`);
+    }
+  }
+  const rest = await readFile(new URL("../src/infrastructure/okx/rest-client.js", import.meta.url), "utf8");
+  const ws = await readFile(new URL("../src/infrastructure/okx/ws-client.js", import.meta.url), "utf8");
+  assert.match(rest, /\/api\/v5\/trade\/batch-orders/);
+  assert.match(rest, /wss:\/\//);
+  assert.match(ws, /socketFactory/);
+});
