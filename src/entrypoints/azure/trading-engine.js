@@ -48,7 +48,12 @@ export async function startTradingEngine(env = process.env, dependencies = {}) {
     offSafeDegraded = error.message;
     telemetry({ event: "OFF_SAFE_DEGRADED", reason: offSafeDegraded });
   }
-  const engine = { runtime, composed, shutdown, startupDegraded: offSafeDegraded, liveness: () => true, readiness: () => Boolean(offSafeDegraded) || (composed.readyGate?.ready ?? runtime.recoveryState.isReady()) };
+  const engine = {
+    runtime, composed, shutdown, startupDegraded: offSafeDegraded,
+    liveness: () => true,
+    readiness: () => Boolean(offSafeDegraded) || (composed.readyGate?.ready ?? runtime.recoveryState.isReady()),
+    readinessDetails: () => offSafeDegraded ? { ready: true, degraded: offSafeDegraded } : (composed.readyGate?.snapshot?.() ?? { ready: runtime.recoveryState.isReady() }),
+  };
   if (dependencies.health?.enabled) healthServer = createHealthServer(engine, dependencies.health);
   return Object.freeze(engine);
 }
@@ -56,7 +61,10 @@ export async function startTradingEngine(env = process.env, dependencies = {}) {
 export function createHealthServer(engine, { port = Number(process.env.PORT ?? 8080) } = {}) {
   return http.createServer((request, response) => {
     if (request.url === "/health/live") { response.writeHead(engine.liveness() ? 200 : 503); return response.end("live"); }
-    if (request.url === "/health/ready") { response.writeHead(engine.readiness() ? 200 : 503); return response.end("ready"); }
+    if (request.url === "/health/ready") {
+      const ready = engine.readiness(); response.writeHead(ready ? 200 : 503, { "Content-Type": ready ? "text/plain" : "application/json" });
+      return response.end(ready ? "ready" : JSON.stringify(engine.readinessDetails?.() ?? { ready: false }));
+    }
     response.writeHead(404); return response.end();
   }).listen(port, "0.0.0.0");
 }

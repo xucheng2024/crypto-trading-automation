@@ -82,12 +82,13 @@ test("P4 production roots and container have no legacy D1 runtime", async () => 
 });
 
 test("P4 health endpoints distinguish liveness from global readiness", async () => {
-  const server = createHealthServer({ liveness: () => true, readiness: () => false }, { port: 0 });
+  const server = createHealthServer({ liveness: () => true, readiness: () => false, readinessDetails: () => ({ ready: false, dependencies: { private: false } }) }, { port: 0 });
   await new Promise((resolve) => server.once("listening", resolve));
   const port = server.address().port;
   try {
     assert.equal((await fetch(`http://127.0.0.1:${port}/health/live`)).status, 200);
-    assert.equal((await fetch(`http://127.0.0.1:${port}/health/ready`)).status, 503);
+    const response = await fetch(`http://127.0.0.1:${port}/health/ready`); assert.equal(response.status, 503);
+    assert.deepEqual(await response.json(), { ready: false, dependencies: { private: false } });
   } finally { await new Promise((resolve) => server.close(resolve)); }
 });
 
