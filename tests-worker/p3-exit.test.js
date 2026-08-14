@@ -59,19 +59,60 @@ test("P3 engine latches breach in the callback and persists only from its critic
   market.updateCandle({ instId: "BTC-USDT", ts: expectedClosedCandleTs(now.nowMs()), low: "95", confirm: true });
   assert.equal(sell.observeCandle("BTC-USDT").find((event) => event.type === "SELL_PROTECTION").protection, "94.715");
   market.updateCandle({ instId: "BTC-USDT", ts: expectedClosedCandleTs(now.nowMs()), low: "80", confirm: true });
-  assert.equal(sell.observeCandle("BTC-USDT").find((event) => event.type === "SELL_PROTECTION").protection, "79.76", "the latest corrected 3m low is authoritative");
+  assert.equal(sell.observeCandle("BTC-USDT").find((event) => event.type === "SELL_PROTECTION"), undefined, "a corrected lower low never loosens protection");
 });
 
-test("P3 SELL uses a strict 3m breakdown: equality does not trigger", () => {
+test("P3 SELL uses a strict 3m breakdown: equality does not trigger", async () => {
   const now = clock(); const market = new MarketProjection({ clock: now });
   market.updateInstrument({ instId: "BTC-USDT", ts: 1, state: "live", tickSz: "0.1", lotSz: "0.1", minSz: "0.1", base: "BTC" });
   const fill = { account_id: "a", inst_id: "BTC-USDT", base_ccy: "BTC", trade_id: "strict", side: "BUY", fill_size: "1", disposed_size: "0", sell_time: 1, sell_state: "WAITING", version: 1 };
-  const sell = new SellService({ market, clock: now, coordinator: { enqueue: () => true }, state: {} });
-  sell.rebuild([fill]); market.updateCandle({ instId: "BTC-USDT", ts: expectedClosedCandleTs(now.nowMs()), low: "100", confirm: true }); sell.observeCandle("BTC-USDT");
+  const sell = new SellService({ market, clock: now, coordinator: { enqueue: () => true }, state: { raiseProtection: async () => ({ rowCount: 1, rows: [{ ...fill, protection_price: "99.7", version: 2 }] }) } });
+  sell.rebuild([fill]); market.updateCandle({ instId: "BTC-USDT", ts: expectedClosedCandleTs(now.nowMs()), low: "100", confirm: true });
+  await sell.consume(sell.observeCandle("BTC-USDT").find((event) => event.type === "SELL_PROTECTION"));
   market.updateTicker({ instId: "BTC-USDT", ts: 11, last: "99.7", bidPx: "99.7" });
   assert.equal(sell.observeTicker("BTC-USDT").length, 0);
   market.updateTicker({ instId: "BTC-USDT", ts: 12, last: "99.699", bidPx: "99.699" });
   assert.equal(sell.observeTicker("BTC-USDT").length, 1);
+});
+
+test("P3 force hold fires at its boundary without a candle, fresh quote, or clock sync", () => {
+  const now = { value: 100, nowMs() { return this.value; } }; const market = new MarketProjection({ clock: now });
+  market.updateInstrument({ instId: "BTC-USDT", ts: 1, state: "live", tickSz: "0.1", lotSz: "0.1", minSz: "0.1", base: "BTC" });
+  const fill = { account_id: "a", inst_id: "BTC-USDT", base_ccy: "BTC", trade_id: "force", side: "BUY", fill_size: "1", disposed_size: "0", sell_time: 1, force_sell_time: 100, sell_state: "WAITING", version: 1 };
+  const sell = new SellService({ market, clock: now, clockFresh: () => false, coordinator: { enqueue: () => true }, state: {} });
+  sell.rebuild([fill]); assert.equal(sell.reviewForceHold().length, 1);
+  assert.equal(sell.reviewForceHold().length, 0, "latch deduplicates recurring scans");
+});
+
+test("P3 force hold resumes after restart and persists its explicit reason", async () => {
+  const now = { nowMs: () => 100 }; const market = new MarketProjection({ clock: now }); const writes = [];
+  const fill = { account_id: "a", inst_id: "BTC-USDT", base_ccy: "BTC", trade_id: "force-resume", side: "BUY", fill_size: "1", disposed_size: "0", sell_time: 1, force_sell_time: 100, sell_state: "WAITING", version: 1 };
+  const sell = new SellService({ market, clock: now, coordinator: { enqueue: () => true }, loadFill: async () => fill, state: { markSellTriggered: async (_tx, row) => { writes.push(row); return { rowCount: 1, rows: [{ ...fill, sell_state: "SELL_TRIGGERED", version: 2 }] }; } } });
+  sell.rebuild([fill]); const [event] = sell.resumeForceHold();
+  assert.equal(event.reason, "MAX_HOLD_EXPIRED"); await sell.consume(event);
+  assert.equal(writes[0].sellTriggerReason, "MAX_HOLD_EXPIRED");
+});
+
+test("P3 protection only changes in memory after durable ratchet success", async () => {
+  const now = clock(); const market = new MarketProjection({ clock: now });
+  market.updateInstrument({ instId: "BTC-USDT", ts: 1, state: "live", tickSz: "0.1", lotSz: "0.1", minSz: "0.1", base: "BTC" });
+  const fill = { account_id: "a", inst_id: "BTC-USDT", base_ccy: "BTC", trade_id: "ratchet", side: "BUY", fill_size: "1", disposed_size: "0", sell_time: 1, sell_state: "WAITING", version: 1 };
+  const sell = new SellService({ market, clock: now, coordinator: { enqueue: () => true }, loadFill: async () => fill, state: { raiseProtection: async () => ({ rowCount: 1, rows: [{ ...fill, protection_price: "94.715", version: 2 }] }) } });
+  sell.rebuild([fill]); market.updateCandle({ instId: "BTC-USDT", ts: expectedClosedCandleTs(now.nowMs()), low: "95", confirm: true });
+  const event = sell.observeCandle("BTC-USDT").find((row) => row.type === "SELL_PROTECTION");
+  assert.equal(sell.fills.get(sell.key(fill)).protection_price, undefined); await sell.consume(event);
+  market.updateCandle({ instId: "BTC-USDT", ts: expectedClosedCandleTs(now.nowMs()), low: "80", confirm: true });
+  assert.equal(sell.observeCandle("BTC-USDT").some((row) => row.type === "SELL_PROTECTION"), false);
+});
+
+test("P3 stale clock freezes protection updates but leaves armed breakdown detection live", () => {
+  const now = clock(); const market = new MarketProjection({ clock: now }); const telemetry = []; let syncs = 0;
+  market.updateInstrument({ instId: "BTC-USDT", ts: 1, state: "live", tickSz: "0.1", lotSz: "0.1", minSz: "0.1", base: "BTC" });
+  market.updateTicker({ instId: "BTC-USDT", ts: 2, last: "89", bidPx: "89" }); market.updateCandle({ instId: "BTC-USDT", ts: expectedClosedCandleTs(now.nowMs()), low: "95", confirm: true });
+  const fill = { account_id: "a", inst_id: "BTC-USDT", base_ccy: "BTC", trade_id: "stale-clock", side: "BUY", fill_size: "1", disposed_size: "0", sell_time: 1, sell_state: "WAITING", version: 1, protection_price: "90" };
+  const sell = new SellService({ market, clock: now, clockFresh: () => false, triggerClockSync: () => { syncs += 1; }, coordinator: { enqueue: () => true }, telemetry: (row) => telemetry.push(row), state: {} });
+  sell.rebuild([fill]); assert.equal(sell.observeCandle("BTC-USDT").filter((row) => row.type === "SELL_BREACH").length, 1);
+  sell.rebuild([fill]); sell.observeCandle("BTC-USDT"); assert.equal(syncs, 1); assert.equal(telemetry.filter((row) => row.reason === "SELL_CLOCK_SYNC_STALE").length, 1);
 });
 
 test("P3 releases a breach latch when the critical queue rejects the event", async () => {

@@ -141,7 +141,7 @@ export class ReconciliationService {
       source: managed.source, side: isBuy ? "BUY" : "SELL", fillSize: managed.sz, fillTime: managed.fillTime, fillPrice: fill.fillPx, fee: fill.fee, feeCcy: fill.feeCcy,
       executionMode: managed.executionMode,
       executionRoute: managed.executionRoute,
-      ...(isBuy ? { holdHours: this.ownership.holdHoursByInst?.[managed.instId], strategyConfigHash: this.ownership.configHash, sellTime: Number(managed.fillTime) + Number(this.ownership.holdHoursByInst?.[managed.instId] ?? 0) * 3_600_000, sellState: "WAITING" } : { allocationState: "PENDING" }),
+      ...(isBuy ? { holdHours: this.ownership.holdHoursByInst?.[managed.instId], maxHoldHours: this.ownership.maxHoldHoursByInst?.[managed.instId] ?? null, strategyConfigHash: this.ownership.configHash, sellTime: Number(managed.fillTime) + Number(this.ownership.holdHoursByInst?.[managed.instId] ?? 0) * 3_600_000, forceSellTime: this.ownership.maxHoldHoursByInst?.[managed.instId] ? Number(managed.fillTime) + Number(this.ownership.maxHoldHoursByInst[managed.instId]) * 3_600_000 : null, sellState: "WAITING" } : { allocationState: "PENDING" }),
     });
     if (managed.source === "ACCOUNT" && isBuy) this.onAccountBuy(managed.instId);
     // Before an HTTP send a PREPARED exit is purely local and can safely be

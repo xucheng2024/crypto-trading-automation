@@ -9,7 +9,7 @@ import { ReconciliationService } from "./reconciliation-service.js";
 import { SellService } from "./sell-service.js";
 import { InstrumentProtectionService } from "./instrument-protection-service.js";
 import { DelistOrchestrator } from "./delist-orchestrator.js";
-import { OkxRestClient, OKX_PROFILES, validateAccountProfile } from "../infrastructure/okx/rest-client.js";
+import { OkxRestClient, OKX_PROFILES, validateAccountProfile, CLOCK_SYNC_STALE_AFTER_MS } from "../infrastructure/okx/rest-client.js";
 import { OkxPublicWsClient, OkxPrivateWsClient, OkxBusinessWsClient } from "../infrastructure/okx/ws-client.js";
 import { VirtualSloMetrics } from "./slo-metrics.js";
 import { EngineRecurringWork } from "./engine-recurring-work.js";
@@ -88,18 +88,24 @@ export async function composeProductionRuntime(env, injected = {}) {
     const candle = normalizeConfirmed3mCandle(instId, await rest.candles(instId, { bar: "3m", limit: 3 }));
     if (candle) engine.receiveCandle(candle);
   };
-  const sellService = injected.sellService ?? new SellService({ state, transaction, coordinator, market, clock: runtime.clock, exchangeNowMs: () => runtime.clock.nowMs() + Number(rest.clockSkewMs ?? 0), refreshCandle, telemetry });
+  let clockSyncPromise = null;
+  const clockSync = () => {
+    if (!clockSyncPromise) clockSyncPromise = Promise.resolve(rest.syncServerTime()).finally(() => { clockSyncPromise = null; });
+    return clockSyncPromise;
+  };
+  const sellService = injected.sellService ?? new SellService({ state, transaction, coordinator, market, clock: runtime.clock, exchangeNowMs: () => runtime.clock.nowMs() + Number(rest.clockSkewMs ?? 0), clockFresh: () => rest.clockFresh(CLOCK_SYNC_STALE_AFTER_MS), triggerClockSync: clockSync, refreshCandle, telemetry });
   function rebuildSellWatches(ledger, attempts = []) {
     sellService.rebuild(ledger);
     const active = new Set(attempts.filter((attempt) => ["SELL", "DELIST"].includes(attempt.intent) && !["NOT_CREATED", "SETTLED"].includes(attempt.state)).map((attempt) => attempt.source_buy_trade_id ?? attempt.sourceBuyTradeId));
-    engine?.enqueueSellEvents?.(sellService.resumeTriggered?.(active) ?? []);
+    engine?.enqueueSellEvents?.([...(sellService.resumeTriggered?.(active) ?? []), ...(sellService.resumeForceHold?.(active) ?? [])]);
   }
   const delist = injected.delist ?? new DelistOrchestrator({ transaction, state, orders, coordinator, accountId: config.accountId, market, telemetry }).bind();
   const protection = injected.protection ?? new InstrumentProtectionService({ state, transaction, telemetry, onProtect: (p) => buyPlanner?.protected?.add(p.instId), onExit: (p) => delist.drive(p.instId) });
   const holdHoursByInst = Object.fromEntries(Object.entries(config.strategyConfig.rows).map(([instId, row]) => [instId, row.holdHours]));
+  const maxHoldHoursByInst = Object.fromEntries(Object.entries(config.strategyConfig.rows).map(([instId, row]) => [instId, row.maxHoldHours]));
   buyPlanner = injected.buyPlanner ?? new BuySignalPlanner({ accountId: config.accountId, instIds, strategyConfig: config.strategyConfig, market, account, coordinator, state, orders, transaction, rest, readyGate, clock: runtime.clock, quoteFreshMs: config.quote_max_age_ms, telemetry, slo });
   const reconciliation = injected.reconciliation ?? new ReconciliationService({ orders, state, transport: rest, ownerGuard, readyGate, clock: runtime.clock, safetyWaitMs: config.owner_safety_wait_ms, transaction, telemetry,
-    ownership: { accountId: config.accountId, managedAfter: config.managedFillStartMs, enabledInstIds: instIds, systemClOrdIdPrefix: config.orderVersion, strategyTag: config.strategyTag, holdHoursByInst, configHash: config.strategyConfig.contentHash },
+    ownership: { accountId: config.accountId, managedAfter: config.managedFillStartMs, enabledInstIds: instIds, systemClOrdIdPrefix: config.orderVersion, strategyTag: config.strategyTag, holdHoursByInst, maxHoldHoursByInst, configHash: config.strategyConfig.contentHash },
     onAccountBuy: (instId) => engine?.protectInstrument(instId), onRecovery: ({ ledger, protection: rows, daily, buyAttempts, attempts }) => { rebuildSellWatches(ledger, attempts); buyPlanner.restore?.({ ledger, protection: rows, daily, buyAttempts }); return delist.recover(rows); },
     onTerminal: async ({ attempt, order, fills, exchangeState, accFillSz }) => {
       const result = attempt.intent === "BUY" ? await coordinator.settleBuy({ attempt, fills, exchangeState, accFillSz }) : await coordinator.settleExit({ attempt, fills, exchangeState, accFillSz });
@@ -135,6 +141,10 @@ export async function composeProductionRuntime(env, injected = {}) {
       EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='order_attempts' AND column_name='execution_route') AS attempt_route,
       EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='filled_orders' AND column_name='execution_route') AS fill_route,
       EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='filled_orders' AND column_name='fill_price') AS fill_price,
+      EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='order_attempts' AND column_name='max_hold_hours') AS attempt_max_hold,
+      EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='filled_orders' AND column_name='max_hold_hours') AS fill_max_hold,
+      EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='filled_orders' AND column_name='force_sell_time') AS force_sell_time,
+      EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='filled_orders' AND column_name='sell_trigger_reason') AS sell_trigger_reason,
       EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='daily_limit_cache' AND column_name='today_open') AS daily_inputs`);
     if (!result.rows?.[0] || Object.values(result.rows[0]).some((value) => value === null || value === false)) throw new Error("POSTGRES_MIGRATIONS_MISSING");
   });
@@ -143,11 +153,6 @@ export async function composeProductionRuntime(env, injected = {}) {
     return reconciliation.reconcileAll({ accountId: config.accountId, attempts, watermarks });
   };
   const baseline = injected.baseline ?? (() => runRestBaseline({ rest, instIds, market, account, readyGate, clock: runtime.clock, executionRoutes, quoteCurrencies }));
-  let clockSyncPromise = null;
-  const clockSync = () => {
-    if (!clockSyncPromise) clockSyncPromise = Promise.resolve(rest.syncServerTime()).finally(() => { clockSyncPromise = null; });
-    return clockSyncPromise;
-  };
   const recurring = injected.recurring ?? new EngineRecurringWork({ timers: injected.timers ?? globalThis, telemetry,
     announcementMs: injected.announcementMs ?? 60_000, reconcileMs: injected.reconcileMs ?? 300_000, routeMs: injected.routeMs ?? 3_600_000, weeklyMs: injected.weeklyMs ?? 7 * 86_400_000, clockSyncMs: injected.clockSyncMs ?? 300_000, candleReviewMs: injected.candleReviewMs ?? 15_000,
     announcements: () => protection.scanAnnouncements((page) => rest.announcements(page), instIds.map((instId) => market.instrument(instId)).filter(Boolean)),
@@ -157,7 +162,10 @@ export async function composeProductionRuntime(env, injected = {}) {
         try { Promise.resolve(telemetry({ type: "execution_routes", reason: "ROUTES_REFRESHED", ...counts })).catch(() => {}); } catch {}
         return counts;
       } catch (error) { readyGate.set("account", false); throw error; }
-    }, weeklyReconcile: injected.weeklyReconcile ?? reconcile, clockSync, reviewCandles: () => sellService.reviewCandleFreshness(),
+    }, weeklyReconcile: injected.weeklyReconcile ?? reconcile, clockSync, reviewCandles: () => {
+      sellService.reviewCandleFreshness();
+      engine.enqueueSellEvents(sellService.reviewForceHold());
+    },
     reportMetrics: () => { const snapshot = engine.snapshot(); telemetry({ type: "metric_snapshot", reason: "RUNTIME_METRICS", ...slo.snapshot({ reset: true }), ready: snapshot.ready.ready ? 1 : 0, queue_depth_current: snapshot.queue, pending_buy_current: coordinator.pending?.BUY?.size ?? 0, active_buy_current: snapshot.activeBuy }); },
   });
   return { runtime, keyVault, credentials, pool, ownerClient, ownerGuard, orders, state, transaction, market, account, readyGate, coordinator, reconciliation, buyPlanner, sellService, protection, delist, rest, ws, engine, workLoop, slo, recurring, executionRoutes, quoteCurrencies, offline: false,

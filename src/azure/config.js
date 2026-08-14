@@ -24,7 +24,8 @@ function strategyConfig(raw) {
   const rows = {};
   for (const row of parsed.config) {
     if (!/^[A-Z0-9]+-[A-Z0-9]+$/.test(row.inst_id ?? "") || !(Number(row.hold_hours) > 0) || !(Number(row.best_limit) > 0) || rows[row.inst_id]) throw new Error("Invalid STRATEGY_CONFIG_JSON row");
-    rows[row.inst_id] = Object.freeze({ bestLimit: String(row.best_limit), holdHours: String(row.hold_hours) });
+    if (row.max_hold_hours != null && !(Number(row.max_hold_hours) > Number(row.hold_hours))) throw new Error("Invalid STRATEGY_CONFIG_JSON row");
+    rows[row.inst_id] = Object.freeze({ bestLimit: String(row.best_limit), holdHours: String(row.hold_hours), maxHoldHours: row.max_hold_hours != null ? String(row.max_hold_hours) : null });
   }
   return Object.freeze({ contentHash: parsed.content_hash.toLowerCase(), rows: Object.freeze(rows) });
 }

@@ -48,13 +48,13 @@ export class TradingStateRepository {
   async insertFill(tx, fill) {
     return tx.query(`INSERT INTO filled_orders(
       account_id,inst_id,base_ccy,trade_id,bill_id,source,side,fill_size,fill_time,
-      hold_hours,strategy_config_hash,sell_time,protection_price,sell_state,allocation_state,execution_mode,execution_route,
+      hold_hours,max_hold_hours,strategy_config_hash,sell_time,force_sell_time,protection_price,sell_state,allocation_state,execution_mode,execution_route,
       source_attempt_cl_ord_id,fill_price,fee,fee_ccy,min_price_after_fill,max_adverse_pct
-    ) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23)
+    ) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25)
     ON CONFLICT(inst_id,trade_id) DO NOTHING`, [
       fill.accountId, fill.instId, fill.baseCcy, fill.tradeId, fill.billId ?? null,
-      fill.source, fill.side, fill.fillSize, fill.fillTime, fill.holdHours ?? null,
-      fill.strategyConfigHash ?? null, fill.sellTime ?? null, fill.protectionPrice ?? null,
+      fill.source, fill.side, fill.fillSize, fill.fillTime, fill.holdHours ?? null, fill.maxHoldHours ?? null,
+      fill.strategyConfigHash ?? null, fill.sellTime ?? null, fill.forceSellTime ?? null, fill.protectionPrice ?? null,
       fill.sellState ?? null, fill.allocationState ?? null, fill.executionMode ?? "cross", fill.executionRoute ?? "margin",
       fill.sourceAttemptClOrdId ?? null, fill.fillPrice ?? null, fill.fee ?? null, fill.feeCcy ?? null,
       fill.fillPrice ?? null, fill.fillPrice ? "0" : null,
@@ -85,15 +85,15 @@ export class TradingStateRepository {
       ORDER BY sell_time,fill_time,trade_id FOR UPDATE`, [accountId, baseCcy, intent, nowMs])).rows;
   }
 
-  async markSellTriggered(tx, { accountId, instId, tradeId, version, protectionPrice }) {
+  async markSellTriggered(tx, { accountId, instId, tradeId, version, protectionPrice, sellTriggerReason }) {
     return tx.query(`UPDATE filled_orders SET sell_state='SELL_TRIGGERED',
-      protection_price=$5::numeric,version=version+1
+      protection_price=$5::numeric,sell_trigger_reason=$6,version=version+1
       WHERE account_id=$1 AND inst_id=$2 AND trade_id=$3 AND side='BUY' AND version=$4
-      AND sell_state IN ('WAITING','SELL_TRIGGERED','DUST_PENDING') RETURNING *`, [accountId, instId, tradeId, version, protectionPrice]);
+      AND sell_state IN ('WAITING','SELL_TRIGGERED','DUST_PENDING') RETURNING *`, [accountId, instId, tradeId, version, protectionPrice, sellTriggerReason]);
   }
 
   async raiseProtection(tx, { accountId, instId, tradeId, version, protectionPrice }) {
-    return tx.query(`UPDATE filled_orders SET protection_price=$5::numeric,version=version+1
+    return tx.query(`UPDATE filled_orders SET protection_price=GREATEST(COALESCE(protection_price,$5::numeric),$5::numeric),version=version+1
       WHERE account_id=$1 AND inst_id=$2 AND trade_id=$3 AND side='BUY' AND version=$4
       AND sell_state IN ('WAITING','SELL_TRIGGERED','DUST_PENDING') RETURNING *`, [accountId, instId, tradeId, version, protectionPrice]);
   }
@@ -224,12 +224,12 @@ export class OrderRepository {
       strategy_day,generation,planned_size,state,reserved_exposure_usd,reserved_base_size,
       reservation_state,frozen_target_usd,decision_quote_ts,decision_quote_hash,
       decision_candle_ts,decision_candle_hash,decision_market_key,execution_limit_price,
-      instrument_version,hold_hours,strategy_config_hash,admission_equity,
+      instrument_version,hold_hours,max_hold_hours,strategy_config_hash,admission_equity,
       admission_exposure,account_snapshot_version,execution_mode,execution_route,
       decision_trigger_price,decision_reference_price,decision_reason
     ) VALUES(
       $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'PREPARED',$11,$12,'ACTIVE',$13,$14,$15,$16,$17,
-      $18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30
+      $18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31
     )`, [
       attempt.accountId, attempt.intent, attempt.instId, attempt.baseCcy, attempt.clOrdId,
       attempt.payloadHash, attempt.sourceBuyTradeId ?? null, attempt.strategyDay ?? null,
@@ -239,7 +239,7 @@ export class OrderRepository {
       attempt.decisionQuoteHash ?? null, attempt.decisionCandleTs ?? null,
       attempt.decisionCandleHash ?? null, attempt.decisionMarketKey ?? null,
       attempt.executionLimitPrice ?? null, attempt.instrumentVersion ?? null,
-      attempt.holdHours ?? null, attempt.strategyConfigHash ?? null,
+      attempt.holdHours ?? null, attempt.maxHoldHours ?? null, attempt.strategyConfigHash ?? null,
       attempt.admissionEquity ?? null, attempt.admissionExposure ?? null,
       attempt.accountSnapshotVersion ?? null, attempt.executionMode ?? "cross", attempt.executionRoute ?? "margin",
       attempt.decisionTriggerPrice ?? null, attempt.decisionReferencePrice ?? null, attempt.decisionReason ?? null,

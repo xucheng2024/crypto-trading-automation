@@ -9,9 +9,9 @@ const field = (row, snake, camel) => row[snake] ?? row[camel];
  * consume* runs later and is the only part that reads/writes durable state.
  */
 export class SellService {
-  constructor({ state, transaction = async (fn) => fn(null), coordinator, market, clock = { nowMs: () => Date.now() }, exchangeNowMs = () => clock.nowMs(), refreshCandle = async () => {}, telemetry = () => {}, loadFill = async (_tx, key) => this.fills.get(key) }) {
-    Object.assign(this, { state, transaction, coordinator, market, clock, exchangeNowMs, refreshCandle, telemetry, loadFill });
-    this.fills = new Map(); this.byInst = new Map(); this.latches = new Set(); this.candleRefreshes = new Set();
+  constructor({ state, transaction = async (fn) => fn(null), coordinator, market, clock = { nowMs: () => Date.now() }, exchangeNowMs = () => clock.nowMs(), clockFresh = () => true, triggerClockSync = () => {}, refreshCandle = async () => {}, telemetry = () => {}, loadFill = async (_tx, key) => this.fills.get(key) }) {
+    Object.assign(this, { state, transaction, coordinator, market, clock, exchangeNowMs, clockFresh, triggerClockSync, refreshCandle, telemetry, loadFill });
+    this.fills = new Map(); this.byInst = new Map(); this.latches = new Set(); this.candleRefreshes = new Set(); this.clockSyncStale = false;
   }
   key(fill) { return `${field(fill, "account_id", "accountId")}:${field(fill, "inst_id", "instId")}:${field(fill, "trade_id", "tradeId")}`; }
   _emit(event) { try { Promise.resolve(this.telemetry(event)).catch(() => {}); } catch { /* best effort */ } }
@@ -42,9 +42,43 @@ export class SellService {
     }
     return events;
   }
+  resumeForceHold(activeSourceTradeIds = new Set()) {
+    const events = [];
+    for (const [key, fill] of this.fills) {
+      const tradeId = field(fill, "trade_id", "tradeId"); const forceSellTime = field(fill, "force_sell_time", "forceSellTime");
+      if (field(fill, "sell_state", "sellState") !== "WAITING" || activeSourceTradeIds.has(tradeId) || this.latches.has(key) || forceSellTime == null || Number(forceSellTime) > this.clock.nowMs()) continue;
+      this.latches.add(key);
+      events.push({ type: "SELL_BREACH", priority: "critical", key, instId: field(fill, "inst_id", "instId"), protection: fill.protection_price ?? fill.protectionPrice ?? null, reason: "MAX_HOLD_EXPIRED", resumed: true });
+    }
+    return events;
+  }
+  checkForceHold(instId, nowMs = this.clock.nowMs()) {
+    const events = [];
+    for (const key of this.byInst.get(instId) ?? []) {
+      const fill = this.fills.get(key); const forceSellTime = field(fill ?? {}, "force_sell_time", "forceSellTime");
+      if (!fill || field(fill, "sell_state", "sellState") !== "WAITING" || forceSellTime == null || Number(forceSellTime) > nowMs || this.latches.has(key)) continue;
+      this.latches.add(key);
+      events.push({ type: "SELL_BREACH", priority: "critical", key, instId, protection: fill.protection_price ?? fill.protectionPrice ?? null, reason: "MAX_HOLD_EXPIRED" });
+    }
+    return events;
+  }
+  reviewForceHold() {
+    const events = []; const nowMs = this.clock.nowMs();
+    for (const instId of this.byInst.keys()) events.push(...this.checkForceHold(instId, nowMs));
+    return events;
+  }
   observeCandle(instId) {
     const candle = this.market.candle(instId); const instrument = this.market.instrument(instId);
     if (!instrument) return [];
+    if (!this.clockFresh()) {
+      if (!this.clockSyncStale) {
+        this.clockSyncStale = true;
+        this._emit({ type: "sell_protection", reason: "SELL_CLOCK_SYNC_STALE", instId });
+        try { Promise.resolve(this.triggerClockSync()).catch(() => {}); } catch { /* best effort */ }
+      }
+      return this.observeTicker(instId);
+    }
+    this.clockSyncStale = false;
     const freshness = candleFreshness({ candle, exchangeNowMs: this.exchangeNowMs() });
     if (freshness.state !== "FRESH") {
       const reason = freshness.state === "PENDING" ? "SELL_CANDLE_PENDING" : freshness.state === "MISSING" ? "SELL_CANDLE_MISSING" : "SELL_CANDLE_STALE";
@@ -52,16 +86,14 @@ export class SellService {
       this._emit({ type: "sell_protection", reason, instId, candleTs: candle?.ts, expectedTs: freshness.expectedTs, age: freshness.age });
       for (const fill of fills) if (!fill.protection_price) this._emit({ type: "sell_protection", reason: "SELL_PROTECTION_UNARMED", instId, sourceBuyTradeId: field(fill, "trade_id", "tradeId") });
       this._refreshCandle(instId);
-      return [];
+      return this.observeTicker(instId);
     }
     const events = [];
     for (const key of this.byInst.get(instId) ?? []) {
       const fill = this.fills.get(key); if (!fill || Number(field(fill, "sell_time", "sellTime")) > this.clock.nowMs()) continue;
       const protection = sellBreakdownPrice(candle.low);
-      // The latest confirmed native 3m candle is authoritative. Same-ts
-      // corrections and later candles may move the threshold either way.
-      if (!fill.protection_price || compareDecimal(protection, fill.protection_price) !== 0) {
-        fill.protection_price = protection; events.push({ type: "SELL_PROTECTION", key, instId, protection, candleTs: candle.ts, previousClosedLow: candle.low });
+      if (!fill.protection_price || compareDecimal(protection, fill.protection_price) > 0) {
+        events.push({ type: "SELL_PROTECTION", key, instId, protection, candleTs: candle.ts, previousClosedLow: candle.low });
       }
     }
     return [...events, ...this.observeTicker(instId)];
@@ -89,13 +121,15 @@ export class SellService {
     }
   }
   observeTicker(instId) {
-    const quote = this.market.freshQuote(instId, this.market.quoteFreshMs ?? 30_000); if (!quote) return [];
-    const events = [];
+    const events = this.checkForceHold(instId, this.clock.nowMs());
+    const quote = this.market.freshQuote(instId, this.market.quoteFreshMs ?? 30_000); if (!quote) return events;
     for (const key of this.byInst.get(instId) ?? []) {
       const fill = this.fills.get(key); const state = fill && field(fill, "sell_state", "sellState");
-      if (!fill || state === "SOLD" || Number(field(fill, "sell_time", "sellTime")) > this.clock.nowMs() || !fill.protection_price || compareDecimal(quote.last, fill.protection_price) >= 0 || this.latches.has(key)) continue;
+      // DUST_PENDING is owned exclusively by reviewDust(): it decides
+      // sellability from remaining size/notional, not from price alone.
+      if (!fill || state === "SOLD" || state === "DUST_PENDING" || Number(field(fill, "sell_time", "sellTime")) > this.clock.nowMs() || !fill.protection_price || compareDecimal(quote.last, fill.protection_price) >= 0 || this.latches.has(key)) continue;
       this.latches.add(key); // must happen before event enqueue / any await
-      events.push({ type: "SELL_BREACH", priority: "critical", key, instId, protection: fill.protection_price, triggerPrice: quote.last, quoteTs: quote.ts });
+      events.push({ type: "SELL_BREACH", priority: "critical", key, instId, protection: fill.protection_price, triggerPrice: quote.last, quoteTs: quote.ts, reason: "PRICE_BREAKDOWN" });
     }
     return events;
   }
@@ -110,13 +144,14 @@ export class SellService {
         this.fills.set(event.key, current);
         this._emit({ type: "sell_watch_armed", reason: "SELL_WATCH_ARMED", instId, sourceBuyTradeId: tradeId, sellTime: field(fill, "sell_time", "sellTime"), candleTs: event.candleTs, previousClosedLow: event.previousClosedLow, breakdownPrice: event.protection });
       }
-      return { accepted: result?.rowCount === 1, reason: "PROTECTION_UPDATED" };
+      if (result?.rowCount !== 1) return { accepted: false, reason: "CAS_LOST", retryable: true };
+      return { accepted: true, reason: "PROTECTION_UPDATED" };
     }
     if (event.type !== "SELL_BREACH") return { accepted: false, reason: "UNSUPPORTED" };
     const sellState = field(fill, "sell_state", "sellState");
     if (sellState === "SOLD") { this.releaseLatch(event, "FILL_SOLD"); return { accepted: false, reason: "FILL_SOLD" }; }
     if (sellState === "SELL_TRIGGERED") return this._enqueueTriggered(fill, event);
-    const result = await this.transaction((tx) => this.state.markSellTriggered(tx, { accountId, instId, tradeId, version: fill.version, protectionPrice: event.protection }));
+    const result = await this.transaction((tx) => this.state.markSellTriggered(tx, { accountId, instId, tradeId, version: fill.version, protectionPrice: event.protection, sellTriggerReason: event.reason ?? "PRICE_BREAKDOWN" }));
     if (result?.rowCount !== 1) return { accepted: false, reason: "CAS_LOST", retryable: true };
     const current = result.rows?.[0] ?? { ...fill, sell_state: "SELL_TRIGGERED", protection_price: event.protection, version: BigInt(fill.version) + 1n };
     this.fills.set(event.key, current);
