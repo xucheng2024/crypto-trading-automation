@@ -73,13 +73,14 @@ jobs:
           set -euo pipefail
           test -n "$GH_RUNNER_PAT"
           environment_id="$(az containerapp show --resource-group "$RESOURCE_GROUP" --name "$CONTAINER_APP_NAME" --query properties.managedEnvironmentId --output tsv)"
-          registry_id="$(az acr show --resource-group "$RESOURCE_GROUP" --name "$ACR_NAME" --query id --output tsv)"
+          registry_identity="$(az containerapp show --resource-group "$RESOURCE_GROUP" --name "$CONTAINER_APP_NAME" --query 'properties.configuration.registries[0].identity' --output tsv)"
+          [[ "$registry_identity" == /subscriptions/*/resourceGroups/*/providers/Microsoft.ManagedIdentity/userAssignedIdentities/* ]] || { echo "Production ACR pull identity is unavailable" >&2; exit 1; }
           location="$(az group show --name "$RESOURCE_GROUP" --query location --output tsv)"
           runner_name="${CONTAINER_APP_NAME%-engine}-github-runner"
           az deployment group create --resource-group "$RESOURCE_GROUP" --name "github-runner-${GITHUB_RUN_ID}" \
             --template-file infrastructure/bicep/github-runner.bicep \
             --parameters location="$location" runnerName="$runner_name" environmentId="$environment_id" \
-              registryId="$registry_id" registryServer="$ACR_LOGIN_SERVER" runnerImage="$RUNNER_IMAGE" \
+              registryIdentityId="$registry_identity" registryServer="$ACR_LOGIN_SERVER" runnerImage="$RUNNER_IMAGE" \
               githubRepository="$GITHUB_REPOSITORY" githubRunnerPat="$GH_RUNNER_PAT" \
             --output none
           for attempt in {1..36}; do

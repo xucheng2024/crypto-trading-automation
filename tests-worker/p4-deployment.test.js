@@ -103,8 +103,10 @@ test("P4 self-hosted migration runner is VNet-integrated, ephemeral and secret-s
   ]);
   assert.match(workflow, /environment: production-off/); assert.doesNotMatch(workflow, /environment: production-migrate/);
   assert.match(workflow, /environmentId="\$environment_id"/); assert.match(workflow, /secrets\.GH_RUNNER_PAT/);
+  assert.match(workflow, /registryIdentityId="\$registry_identity"/); assert.doesNotMatch(workflow, /az acr show/);
   assert.match(workflow, /Require the dedicated runner registration credential/); assert.match(workflow, /actions\/runners\?per_page=100/); assert.match(workflow, /\.status == "online"/);
   assert.match(bicep, /managedEnvironmentId: environmentId/); assert.match(bicep, /minReplicas: 1, maxReplicas: 1/);
+  assert.match(bicep, /userAssignedIdentities/); assert.match(bicep, /identity: registryIdentityId/); assert.doesNotMatch(bicep, /roleAssignments/);
   assert.match(bicep, /GITHUB_RUNNER_PAT', secretRef: 'github-runner-pat'/); assert.doesNotMatch(bicep, /ingress:/);
   assert.match(entrypoint, /--ephemeral --disableupdate/); assert.match(entrypoint, /unset GITHUB_RUNNER_PAT/); assert.match(entrypoint, /rm -rf _work/);
   assert.match(dockerfile, /sha256sum --check --strict/); assert.match(dockerfile, /azure-cli gh/);
