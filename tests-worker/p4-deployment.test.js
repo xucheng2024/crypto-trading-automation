@@ -17,6 +17,8 @@ import { createApplicationInsightsTelemetry, isImportantTelemetry } from "../src
 import { EngineRecurringWork } from "../src/application/engine-recurring-work.js";
 import { EngineWorkLoop } from "../src/application/engine-work-loop.js";
 import { ReadyGate } from "../src/application/trading-engine.js";
+import { EventEmitter } from "node:events";
+import { PostgresOwnerGuard } from "../src/infrastructure/postgres/owner-guard.js";
 
 test("P4 runtime validates safety timing and defaults OFF", () => {
   const config = loadAzureRuntimeConfig({});
@@ -167,6 +169,31 @@ test("P4 graceful shutdown stops intake before transports and owner release", as
   const events = []; const { startTradingEngine } = await import("../src/entrypoints/azure/trading-engine.js");
   const engine = await startTradingEngine({}, { lifecycle: Object.fromEntries(['stopIntake','stopTimers','stopNewMutations','closeWebSockets','finishInFlight','releaseOwner','closeDatabase','closeHealthServer'].map((name) => [name, async () => events.push(name)])) });
   await engine.shutdown(); assert.deepEqual(events, ['stopIntake','stopTimers','stopNewMutations','closeWebSockets','finishInFlight','releaseOwner','closeDatabase','closeHealthServer']);
+});
+
+test("P4 owner session loss shuts down before requesting a container restart", async () => {
+  const events = []; const exits = []; let onLost; let unsubscribed = false; let finish;
+  const { startTradingEngine } = await import("../src/entrypoints/azure/trading-engine.js");
+  const lifecycle = Object.fromEntries(['stopIntake','stopTimers','stopNewMutations','closeWebSockets','releaseOwner','closeDatabase','closeHealthServer'].map((name) => [name, async () => events.push(name)]));
+  lifecycle.finishInFlight = async () => { events.push('finishInFlight'); await new Promise((resolve) => { finish = resolve; }); };
+  lifecycle.onOwnerLost = (listener) => { onLost = listener; return () => { unsubscribed = true; }; };
+  const engine = await startTradingEngine({}, {
+    lifecycle, telemetry: () => {}, exitProcess: (code) => exits.push(code),
+  });
+  onLost(); onLost(); await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(exits, [], "restart waits for in-flight work"); finish(); await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(events, ['stopIntake','stopTimers','stopNewMutations','closeWebSockets','finishInFlight','releaseOwner','closeDatabase','closeHealthServer']);
+  assert.deepEqual(exits, [1]); assert.equal(unsubscribed, true);
+  await engine.shutdown(); assert.deepEqual(exits, [1], "owner-loss restart remains idempotent");
+});
+
+test("P4 owner guard signals a held-session loss once and ignores graceful release", async () => {
+  const client = new EventEmitter(); client.query = async (sql) => ({ rows: [{ held: sql.includes("pg_try") }] });
+  const owner = new PostgresOwnerGuard(client, "owner-loss-unit"); let losses = 0; owner.onLost(() => { losses += 1; });
+  assert.equal(await owner.acquire(), true); client.emit("error", new Error("connection lost")); client.emit("end");
+  assert.equal(losses, 1); assert.equal(owner.isHeld(), false);
+  assert.equal(await owner.acquire(), true); await owner.release(); client.emit("end");
+  assert.equal(losses, 1, "normal release and close do not request a restart");
 });
 
 test("P4 maintenance CLI fails closed without an injected credential-free adapter", async () => {

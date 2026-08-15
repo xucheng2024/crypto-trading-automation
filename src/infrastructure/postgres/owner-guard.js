@@ -10,7 +10,10 @@ export class PostgresOwnerGuard extends OwnerGuard {
     super();
     this.#client = client;
     this.#key = key;
-    const lost = () => { this.#held = false; for (const listener of this.#lossListeners) listener(); };
+    const lost = () => {
+      if (!this.#held) return;
+      this.#held = false; for (const listener of this.#lossListeners) listener();
+    };
     client.on?.("error", lost);
     client.on?.("end", lost);
   }
