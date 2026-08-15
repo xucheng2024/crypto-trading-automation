@@ -28,12 +28,25 @@ test("Azure ops summary separates waiting, policy, opportunity, and safety block
     { timestamp: "2", message: "trading_decision QUOTE_STALE", customDimensions: JSON.stringify({ instId: "BTC-USDT", reason: "QUOTE_STALE", last: "1", breakoutPrice: "0.9" }) },
     { timestamp: "1", message: "trading_decision PRICE_OUTSIDE", customDimensions: { instId: "ETH-USDT", reason: "PRICE_OUTSIDE" } },
   ]);
-  const trading = summarizeTrading(decisions, [{ timestamp: "3", reason: "BUY_PREPARED", instId: "ETH-USDT", clOrdId: "one" }], new Map([["BTC-USDT", "margin"], ["ETH-USDT", "spot"]]));
+  const trading = summarizeTrading(decisions, [{ timestamp: "3", reason: "BUY_PREPARED", decisionId: "D1", instId: "ETH-USDT", clOrdId: "one" }], new Map([["BTC-USDT", "margin"], ["ETH-USDT", "spot"]]), decisions, [{ timestamp: "4", type: "block_evidence", stage: "AVAILABILITY", reason: "INSUFFICIENT_FUNDS_WAIT_RISK_VERSION", decisionId: "D2", instId: "SOL-USDT", availBuy: "0" }]);
   assert.deepEqual(trading.currentStates, { waiting: 1, policy: 0, blocked: 1, opportunity: 0 });
   assert.equal(trading.currentStateCoverage, 2);
-  assert.equal(trading.blocked[0].route, "margin"); assert.equal(trading.events.prepared, 1); assert.equal(trading.executions[0].route, "spot");
+  assert.equal(trading.blocked[0].route, "margin"); assert.equal(trading.blocked[1].stage, "AVAILABILITY"); assert.equal(trading.blocked[1].availBuy, "0"); assert.equal(trading.events.prepared, 1); assert.equal(trading.executions[0].route, "spot");
   assert.equal(trading.blocked[0].breakoutGap, "0.1");
   assert.equal(trading.blocked[0].apiBoundary, "PRE_API_STRATEGY_DECISION"); assert.equal(trading.executions[0].apiBoundary, "DB_RESERVED_BEFORE_API");
+  assert.equal(trading.attemptTimelines.length, 2); assert.deepEqual(trading.attemptTimelines.find((row) => row.decisionId === "D1").timeline.map((event) => event.stage), ["PERSISTED"]);
+});
+
+test("Azure ops summary links one BUY from candidate through API and fill", () => {
+  const decisions = [{ timestamp: "1", reason: "BUY_QUEUED", decisionId: "D1", instId: "BTC-USDT" }];
+  const lifecycle = [
+    { timestamp: "2", reason: "BUY_PREPARED", decisionId: "D1", clOrdId: "O1", instId: "BTC-USDT" },
+    { timestamp: "3", reason: "BUY_SUBMITTED", decisionId: "D1", clOrdId: "O1", instId: "BTC-USDT" },
+    { timestamp: "4", reason: "BUY_SETTLED", decisionId: "D1", clOrdId: "O1", instId: "BTC-USDT" },
+  ];
+  const attempt = summarizeTrading(decisions, lifecycle).attemptTimelines[0];
+  assert.equal(attempt.outcome, "BUY_SETTLED"); assert.equal(attempt.clOrdId, "O1");
+  assert.deepEqual(attempt.timeline.map((event) => event.stage), ["CANDIDATE", "PERSISTED", "API", "FILLED"]);
 });
 
 test("Azure ops summary fails closed on unsafe runtime state", () => {

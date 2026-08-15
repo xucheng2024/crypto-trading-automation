@@ -53,7 +53,7 @@ export function traceEvents(rows) {
   });
 }
 
-export function summarizeTrading(decisionEvents, lifecycleEvents, routeByInst = new Map(), currentDecisionEvents = decisionEvents) {
+export function summarizeTrading(decisionEvents, lifecycleEvents, routeByInst = new Map(), currentDecisionEvents = decisionEvents, blockEvents = []) {
   const latest = new Map();
   for (const event of currentDecisionEvents) if (event.instId && (!latest.has(event.instId) || event.timestamp > latest.get(event.instId).timestamp)) latest.set(event.instId, event);
   const states = { waiting: 0, policy: 0, blocked: 0, opportunity: 0 };
@@ -62,7 +62,7 @@ export function summarizeTrading(decisionEvents, lifecycleEvents, routeByInst = 
   const executions = lifecycleEvents.map((event) => {
     const prepared = preparedByOrder.get(event.clOrdId); const instId = event.instId ?? prepared?.instId;
     const apiBoundary = { BUY_PREPARED: "DB_RESERVED_BEFORE_API", BUY_SUBMITTED: "API_ACKNOWLEDGED", BUY_UNKNOWN: "API_RESULT_AMBIGUOUS", BUY_NOT_CREATED: "API_REJECTED_OR_NOT_SENT", BUY_SETTLED: "EXCHANGE_FILL_CONFIRMED" }[event.reason] ?? "EXECUTION_LIFECYCLE";
-    return { timestamp: event.timestamp, reason: event.reason, instId, route: routeByInst.get(instId), clOrdId: event.clOrdId, exchangeReason: event.exchangeReason, apiBoundary };
+    return { timestamp: event.timestamp, reason: event.reason, decisionId: event.decisionId ?? prepared?.decisionId, instId, route: event.executionRoute ?? routeByInst.get(instId), clOrdId: event.clOrdId, exchangeReason: event.exchangeReason, apiBoundary };
   });
   const gap = (left, right) => {
     if (left === undefined || right === undefined) return undefined;
@@ -71,16 +71,36 @@ export function summarizeTrading(decisionEvents, lifecycleEvents, routeByInst = 
   const detail = (event) => {
     const apiBoundary = event.reason === "BUY_QUEUE_REJECTED" ? "COORDINATOR_QUEUE_REJECTED" : "PRE_API_STRATEGY_DECISION";
     return {
-      timestamp: event.timestamp, instId: event.instId, reason: event.reason, route: routeByInst.get(event.instId), apiBoundary,
+      timestamp: event.timestamp, decisionId: event.decisionId, clOrdId: event.clOrdId, stage: event.stage, instId: event.instId, reason: event.reason, route: event.executionRoute ?? routeByInst.get(event.instId), apiBoundary: event.stage ? `PRE_API_${event.stage}` : apiBoundary,
       last: event.last, askPx: event.askPx, previousClosedHigh: event.previousClosedHigh,
       dailyLimitPrice: event.dailyLimitPrice, breakoutPrice: event.breakoutPrice,
-      breakoutGap: gap(event.last, event.breakoutPrice), limitHeadroom: gap(event.dailyLimitPrice, event.last), askLimitGap: gap(event.askPx, event.dailyLimitPrice),
+      breakoutGap: event.breakoutGap ?? gap(event.last, event.breakoutPrice), priceLimitGap: event.priceLimitGap,
+      limitHeadroom: gap(event.dailyLimitPrice, event.last), askLimitGap: gap(event.askPx, event.dailyLimitPrice),
+      quoteAgeMs: event.quoteAgeMs, candleAgeMs: event.candleAgeMs, availBuy: event.availBuy,
+      remainingCapacity: event.remainingCapacity, plannedSize: event.plannedSize, minSize: event.minSize,
+      adjustedEquity: event.adjustedEquity, managedExposure: event.managedExposure, riskVersion: event.riskVersion,
     };
   };
-  const blocked = decisionEvents.filter((event) => classifyDecision(event.reason) === "blocked").map(detail);
+  const blocked = [...decisionEvents.filter((event) => classifyDecision(event.reason) === "blocked"), ...blockEvents].map(detail);
   const policy = [...latest.values()].filter((event) => classifyDecision(event.reason) === "policy").map(detail);
   const blockedReasons = {};
   for (const row of blocked) blockedReasons[row.reason] = (blockedReasons[row.reason] ?? 0) + 1;
+  const clOrdDecision = new Map(lifecycleEvents.filter((event) => event.clOrdId && event.decisionId).map((event) => [event.clOrdId, event.decisionId]));
+  const attempts = new Map();
+  const appendAttempt = (event, stage) => {
+    const decisionId = event.decisionId ?? clOrdDecision.get(event.clOrdId); if (!decisionId) return;
+    const current = attempts.get(decisionId) ?? { decisionId, instId: event.instId, clOrdId: event.clOrdId, route: event.executionRoute ?? routeByInst.get(event.instId), timeline: [] };
+    current.instId ??= event.instId; current.clOrdId ??= event.clOrdId; current.route ??= event.executionRoute ?? routeByInst.get(event.instId);
+    current.timeline.push({ timestamp: event.timestamp, stage, reason: event.reason, clOrdId: event.clOrdId, exchangeReason: event.exchangeReason, apiBoundary: event.apiBoundary, evidence: detail(event) });
+    attempts.set(decisionId, current);
+  };
+  for (const event of decisionEvents) if (event.decisionId) appendAttempt(event, event.reason === "BUY_QUEUED" ? "CANDIDATE" : "DECISION");
+  for (const event of blockEvents) appendAttempt(event, event.stage ?? "BLOCKED");
+  for (const event of lifecycleEvents) appendAttempt(event, ({ BUY_PREPARED: "PERSISTED", BUY_SUBMITTED: "API", BUY_UNKNOWN: "API", BUY_NOT_CREATED: "API", BUY_SETTLED: "FILLED" })[event.reason] ?? "LIFECYCLE");
+  const attemptTimelines = [...attempts.values()].map((attempt) => {
+    attempt.timeline.sort((a, b) => String(a.timestamp).localeCompare(String(b.timestamp)));
+    const latest = attempt.timeline.at(-1); return { ...attempt, outcome: latest?.reason, latest: latest?.timestamp };
+  }).sort((a, b) => String(b.latest).localeCompare(String(a.latest)));
   return {
     currentStates: states,
     currentStateCoverage: latest.size,
@@ -92,7 +112,7 @@ export function summarizeTrading(decisionEvents, lifecycleEvents, routeByInst = 
       unknown: lifecycleEvents.filter((event) => event.reason === "BUY_UNKNOWN").length,
       notCreated: lifecycleEvents.filter((event) => event.reason === "BUY_NOT_CREATED").length,
     },
-    blocked, blockedReasons, policy, executions,
+    blocked, blockedReasons, policy, executions, attemptTimelines,
   };
 }
 
@@ -174,6 +194,7 @@ export async function main(argv = process.argv.slice(2)) {
   const decisionQuery = `traces | where ${timeFilter} | where message startswith 'trading_decision ' | project timestamp, message, customDimensions | order by timestamp desc | take 5000`;
   const currentDecisionQuery = "traces | where timestamp > ago(24h) | where message startswith 'trading_decision ' | extend instId=tostring(customDimensions.instId) | summarize arg_max(timestamp, customDimensions) by instId";
   const lifecycleQuery = `traces | where ${timeFilter} | where message startswith 'order_lifecycle BUY_' or message startswith 'trade_lifecycle BUY_' | project timestamp, message, customDimensions | order by timestamp desc | take 1000`;
+  const blockQuery = `traces | where ${timeFilter} | where message startswith 'block_evidence ' | project timestamp, message, customDimensions | order by timestamp desc | take 5000`;
   const errorQuery = `traces | where ${timeFilter} | where severityLevel >= 3 | project timestamp, message | order by timestamp desc | take 10`;
   const metric = appInsightsQuery(resourceGroup, appInsights, metricQuery)[0] ?? null;
   const needDecisions = options.command !== "snapshot";
@@ -183,6 +204,7 @@ export async function main(argv = process.argv.slice(2)) {
   const decisionEvents = needDecisions ? traceEvents(appInsightsQuery(resourceGroup, appInsights, decisionQuery)) : [];
   const currentDecisionEvents = needCurrentDecisions ? traceEvents(appInsightsQuery(resourceGroup, appInsights, currentDecisionQuery)) : [];
   const lifecycleEvents = needLifecycle ? traceEvents(appInsightsQuery(resourceGroup, appInsights, lifecycleQuery)) : [];
+  const blockEvents = needDecisions ? traceEvents(appInsightsQuery(resourceGroup, appInsights, blockQuery)) : [];
   const groupedDecisions = new Map();
   for (const event of decisionEvents) {
     const key = `${event.reason}:${event.instId}`; const current = groupedDecisions.get(key) ?? { reason: event.reason, instId: event.instId, decisions: 0, latest: event.timestamp };
@@ -192,7 +214,7 @@ export async function main(argv = process.argv.slice(2)) {
   const errors = needErrors ? appInsightsQuery(resourceGroup, appInsights, errorQuery) : [];
   const artifact = JSON.parse(await readFile(new URL("../infrastructure/config/p5-enabled-instruments.json", import.meta.url), "utf8"));
   const routeByInst = new Map([...(artifact.routes?.margin ?? []).map((instId) => [instId, "margin"]), ...(artifact.routes?.spot ?? []).map((instId) => [instId, "spot"])]);
-  const trading = summarizeTrading(decisionEvents, lifecycleEvents, routeByInst, currentDecisionEvents);
+  const trading = summarizeTrading(decisionEvents, lifecycleEvents, routeByInst, currentDecisionEvents, blockEvents);
   const assessment = assessRuntime({ app, active, replicas, traffic, metric, expectedMode: options.expectedMode });
   const revision = active[0]; const container = revision?.properties?.template?.containers?.[0];
   const replicaContainers = replicas.flatMap((replica) => replica.properties?.containers ?? []);
@@ -245,7 +267,16 @@ export async function main(argv = process.argv.slice(2)) {
       console.log(`Blocks: safety_events=${trading.blocked.length} current_safety=${trading.currentStates.blocked} current_policy=${trading.currentStates.policy}`);
       console.log(`Block reasons: ${blockReasons}`);
     }
-      const evidence = (row) => [row.last && `last=${row.last}`, row.askPx && `ask=${row.askPx}`, row.breakoutPrice && `breakout=${row.breakoutPrice}`, row.dailyLimitPrice && `limit=${row.dailyLimitPrice}`, row.breakoutGap !== undefined && `breakout_gap=${row.breakoutGap}`, row.limitHeadroom !== undefined && `limit_headroom=${row.limitHeadroom}`, `boundary=${row.apiBoundary}`].filter(Boolean).join(" ");
+    const evidence = (row) => [
+      row.decisionId && `decision=${row.decisionId}`, row.clOrdId && `order=${row.clOrdId}`, row.stage && `stage=${row.stage}`,
+      row.last && `last=${row.last}`, row.askPx && `ask=${row.askPx}`, row.breakoutPrice && `breakout=${row.breakoutPrice}`, row.dailyLimitPrice && `limit=${row.dailyLimitPrice}`,
+      row.breakoutGap !== undefined && `breakout_gap=${row.breakoutGap}`, row.priceLimitGap !== undefined && `price_limit_gap=${row.priceLimitGap}`, row.limitHeadroom !== undefined && `limit_headroom=${row.limitHeadroom}`,
+      row.quoteAgeMs !== undefined && `quote_age_ms=${row.quoteAgeMs}`, row.candleAgeMs !== undefined && `candle_age_ms=${row.candleAgeMs}`,
+      row.availBuy !== undefined && `avail_buy=${row.availBuy}`, row.remainingCapacity !== undefined && `remaining_capacity=${row.remainingCapacity}`,
+      row.plannedSize !== undefined && `planned_size=${row.plannedSize}`, row.minSize !== undefined && `min_size=${row.minSize}`,
+      row.adjustedEquity !== undefined && `equity=${row.adjustedEquity}`, row.managedExposure !== undefined && `exposure=${row.managedExposure}`, row.riskVersion !== undefined && `risk_version=${row.riskVersion}`,
+      `boundary=${row.apiBoundary}`,
+    ].filter(Boolean).join(" ");
     if (options.details && options.command !== "activity") {
       console.log("Blocked details:");
       if (!trading.blocked.length) console.log("  none");
@@ -257,9 +288,16 @@ export async function main(argv = process.argv.slice(2)) {
       if (trading.policy.length > 100) console.log(`  ... ${trading.policy.length - 100} more; use --json for all`);
     }
     if (options.details && options.command !== "blocks") {
+      console.log("Attempt timelines:");
+      if (!trading.attemptTimelines.length) console.log("  none");
+      else for (const attempt of trading.attemptTimelines.slice(0, 100)) {
+        console.log(`  ${attempt.instId ?? "?"} route=${attempt.route ?? "?"} decisionId=${attempt.decisionId} clOrdId=${attempt.clOrdId ?? "?"} outcome=${attempt.outcome ?? "?"}`);
+        for (const event of attempt.timeline) console.log(`    ${event.timestamp} ${event.stage} ${event.reason}${event.exchangeReason ? ` exchange=${event.exchangeReason}` : ""}`);
+      }
+      if (trading.attemptTimelines.length > 100) console.log(`  ... ${trading.attemptTimelines.length - 100} more; use --json for all`);
       console.log("Execution details:");
       if (!trading.executions.length) console.log("  none");
-      else for (const row of trading.executions.slice(0, 100)) console.log(`  ${row.timestamp} ${row.instId ?? "?"} route=${row.route ?? "?"} ${row.reason} boundary=${row.apiBoundary} clOrdId=${row.clOrdId ?? "?"}${row.exchangeReason ? ` exchange=${row.exchangeReason}` : ""}`);
+      else for (const row of trading.executions.slice(0, 100)) console.log(`  ${row.timestamp} ${row.instId ?? "?"} route=${row.route ?? "?"} ${row.reason} boundary=${row.apiBoundary} decisionId=${row.decisionId ?? "?"} clOrdId=${row.clOrdId ?? "?"}${row.exchangeReason ? ` exchange=${row.exchangeReason}` : ""}`);
       if (trading.executions.length > 100) console.log(`  ... ${trading.executions.length - 100} more; use --json for all`);
     }
   }

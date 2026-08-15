@@ -16,12 +16,30 @@ function add(left, right) {
 export class OrderCoordinator {
   constructor({ transaction, orders, state, transport, ownerGuard, readyGate, market, account, mode = () => "OFF", executionRoute = () => "margin", tradeQuoteCurrency = () => null, isBuyAllowed = () => true, clock = { nowMs: () => Date.now() }, config, telemetry = () => {}, onBuySettled = null, onExitSettled = null, onExitDust = null, slo = null }) {
     Object.assign(this, { transaction, orders, state, transport, ownerGuard, readyGate, market, account, mode, executionRoute, tradeQuoteCurrency, isBuyAllowed, clock, config, telemetry, onBuySettled, onExitSettled, onExitDust, slo });
-    this.pending = { BUY: new Map(), SELL: new Map(), DELIST: new Map() }; this.submitting = false; this.accepting = true; this.isolatedBases = new Set();
+    this.pending = { BUY: new Map(), SELL: new Map(), DELIST: new Map() }; this.submitting = false; this.accepting = true; this.isolatedBases = new Set(); this.buyBlockStates = new Map();
   }
   enqueue(intent) { if (!this.accepting) return false; const group = this.pending[intent.intent]; if (!group) throw new Error("unknown intent"); const key = intent.intent === "BUY" ? intent.instId : `${intent.baseCcy}:${intent.sourceBuyTradeId}`; group.set(key, intent); return true; }
   stopNewMutations() { this.accepting = false; }
   async finishInFlight() { while (this.submitting) await new Promise((resolve) => setTimeout(resolve, 1)); }
   _emit(event) { try { Promise.resolve(this.telemetry(event)).catch(() => {}); } catch { /* telemetry cannot block trading */ } }
+  _emitBuyBlock(intent, stage, reason, evidence = {}) {
+    const identity = intent.decisionId ?? intent.clOrdId ?? `${intent.instId}:${intent.strategyDay ?? ""}:${intent.generation ?? 0}`;
+    const key = `${identity}:${stage}`; const fingerprint = reason;
+    if (this.buyBlockStates.get(key) === fingerprint) return;
+    if (this.buyBlockStates.size >= 1_000) this.buyBlockStates.delete(this.buyBlockStates.keys().next().value);
+    this.buyBlockStates.set(key, fingerprint);
+    this._emit({
+      type: "block_evidence", side: "BUY", stage, reason, reasonCode: reason,
+      decisionId: intent.decisionId, clOrdId: intent.clOrdId, instId: intent.instId,
+      strategyDay: intent.strategyDay, generation: intent.generation,
+      executionMode: intent.executionMode, executionRoute: intent.executionRoute,
+      ...evidence,
+    });
+  }
+  _clearBuyBlock(intent, stage) {
+    const identity = intent.decisionId ?? intent.clOrdId ?? `${intent.instId}:${intent.strategyDay ?? ""}:${intent.generation ?? 0}`;
+    this.buyBlockStates.delete(`${identity}:${stage}`);
+  }
   canCreateNextBuy({ previousAttempt, nextMarketKey }) {
     return ["SETTLED", "NOT_CREATED"].includes(previousAttempt?.state) && Boolean(nextMarketKey) && nextMarketKey !== previousAttempt.decision_market_key;
   }
@@ -48,25 +66,39 @@ export class OrderCoordinator {
   }
   async prepareBuys(candidates) {
     const riskVersion = this.account.value?.version ?? 0;
-    const eligible = candidates.filter((intent) => (!intent.waitForRiskVersion || riskVersion > intent.waitForRiskVersion) && this._buyGuard(intent).allowed);
+    const eligible = [];
+    for (const intent of candidates) {
+      if (intent.waitForRiskVersion && riskVersion <= intent.waitForRiskVersion) {
+        this._emitBuyBlock(intent, "AVAILABILITY", "INSUFFICIENT_FUNDS_WAIT_RISK_VERSION", { riskVersion, waitForRiskVersion: intent.waitForRiskVersion });
+        continue;
+      }
+      const guard = this._buyGuard(intent);
+      if (!guard.allowed) { this._emitBuyBlock(intent, "COORDINATOR_GUARD", guard.reason, guard.evidence); continue; }
+      this._clearBuyBlock(intent, "COORDINATOR_GUARD"); eligible.push(intent);
+    }
     if (!eligible.length) return [];
     const maxAvailStarted = this.clock.nowMs();
     const routed = eligible.map((intent) => { const executionRoute = this._executionRoute(intent); return { intent, executionRoute, executionMode: executionRoute ? "cross" : null, tradeQuoteCcy: intent.tradeQuoteCcy ?? this.tradeQuoteCurrency(intent.instId) }; }).filter(({ intent, executionRoute, executionMode }) => {
       if (executionRoute && executionMode) return true;
-      this._emit({ type: "buy_deferred", reason: "EXECUTION_ROUTE_UNAVAILABLE", instId: intent.instId }); return false;
+      this._emitBuyBlock(intent, "ROUTING", "EXECUTION_ROUTE_UNAVAILABLE"); return false;
     });
     const groups = Map.groupBy(routed, (row) => row.executionMode);
     const modeByInst = new Map(routed.map(({ intent, executionMode }) => [intent.instId, executionMode]));
     const routeByInst = new Map(routed.map(({ intent, executionRoute }) => [intent.instId, executionRoute]));
     const quoteByInst = new Map(routed.map(({ intent, tradeQuoteCcy }) => [intent.instId, tradeQuoteCcy]));
-    const avail = (await Promise.all([...groups].map(([tdMode, rows]) => this.transport.maxAvailSize(rows.map(({ intent }) => intent.instId).join(","), { tdMode })))).flat(); this.slo?.record("signal_max_avail", maxAvailStarted);
+    let avail;
+    try { avail = (await Promise.all([...groups].map(([tdMode, rows]) => this.transport.maxAvailSize(rows.map(({ intent }) => intent.instId).join(","), { tdMode })))).flat(); }
+    catch (error) {
+      for (const { intent, executionMode, executionRoute } of routed) this._emitBuyBlock({ ...intent, executionMode, executionRoute }, "AVAILABILITY", "MAX_AVAIL_FAILED", { error: error?.message });
+      return [];
+    } finally { this.slo?.record("signal_max_avail", maxAvailStarted); }
     const byInst = new Map((avail ?? []).map((row) => [row.instId, row.availBuy]));
     return eligible.flatMap((intent) => {
       const availBuy = byInst.get(intent.instId);
       const available = availBuy && compareDecimal(availBuy, "0") > 0;
       if (!available) {
         intent.waitForRiskVersion = riskVersion;
-        this._emit({ type: "buy_deferred", reason: "INSUFFICIENT_FUNDS_WAIT_RISK_VERSION", instId: intent.instId, riskVersion });
+        this._emitBuyBlock(intent, "AVAILABILITY", "INSUFFICIENT_FUNDS_WAIT_RISK_VERSION", { availBuy: availBuy ?? "0", riskVersion });
       }
       return available ? [{ ...intent, availBuy, executionMode: modeByInst.get(intent.instId), executionRoute: routeByInst.get(intent.instId), tradeQuoteCcy: quoteByInst.get(intent.instId) }] : [];
     });
@@ -80,26 +112,26 @@ export class OrderCoordinator {
       const rows = [];
       for (const intent of candidates) {
         const guard = this._buyGuard(intent);
-        if (!guard.allowed) continue;
+        if (!guard.allowed) { this._emitBuyBlock(intent, "PREPARATION_GUARD", guard.reason, guard.evidence); continue; }
         const { instrument, quote, candle } = guard;
         const executionPrice = roundToStep(intent.dailyLimitPrice, instrument.tickSz, "down");
-        if (compareDecimal(quote.askPx, executionPrice) > 0) continue;
+        if (compareDecimal(quote.askPx, executionPrice) > 0) { this._emitBuyBlock(intent, "SIZING", "ASK_ABOVE_LIMIT", { askPx: quote.askPx, dailyLimitPrice: executionPrice, priceLimitGap: subtractDecimal(executionPrice, quote.askPx) }); continue; }
         const frozenTarget = intent.frozenTargetUsd ?? multiplyDecimal(BUY_ADMISSION_LEVERAGE, adjustedEquity(this.account.value));
         const remainingTarget = intent.remainingTargetUsd ?? frozenTarget;
         const maxNotional = min(remainingTarget, intent.availBuy, this._remainingCapacity(intent.managedExposure ?? "0"));
         const feeMultiplier = add("1", TRADE_FEE_RATE);
         const size = roundToStep(divideDecimal(maxNotional, multiplyDecimal(executionPrice, feeMultiplier)), instrument.lotSz, "down");
-        if (compareDecimal(size, instrument.minSz) < 0) continue;
+        if (compareDecimal(size, instrument.minSz) < 0) { this._emitBuyBlock(intent, "SIZING", "MINIMUM_SIZE", { availBuy: intent.availBuy, remainingCapacity: this._remainingCapacity(intent.managedExposure ?? "0"), plannedSize: size, minSize: instrument.minSz, notional: multiplyDecimal(size, executionPrice) }); continue; }
         const executionRoute = this._executionRoute(intent);
         const executionMode = executionRoute ? "cross" : null;
-        if (!executionMode) continue;
+        if (!executionMode) { this._emitBuyBlock(intent, "ROUTING", "EXECUTION_ROUTE_UNAVAILABLE"); continue; }
         const tradeQuoteCcy = intent.tradeQuoteCcy ?? this.tradeQuoteCurrency(intent.instId);
         const payload = { instId: intent.instId, tdMode: executionMode, side: "buy", ordType: "ioc", px: executionPrice, sz: size, tag: this.config.strategyTag, ...(executionRoute === "margin" && tradeQuoteCcy ? { tradeQuoteCcy } : {}) };
         const tuple = { instId: intent.instId, strategyDay: intent.strategyDay, generation: intent.generation };
         const clOrdId = await createClOrdId(this.config.orderVersion, "BUY", tuple); payload.clOrdId = clOrdId;
         const hash = await payloadHash(payload); const marketKey = await payloadHash({ quote, candle });
         const attempt = {
-          accountId: this.config.accountId, intent: "BUY", instId: intent.instId, baseCcy: instrument.base, clOrdId, payloadHash: hash,
+          accountId: this.config.accountId, intent: "BUY", instId: intent.instId, baseCcy: instrument.base, decisionId: intent.decisionId, clOrdId, payloadHash: hash,
           strategyDay: intent.strategyDay, generation: intent.generation, plannedSize: size, reservedExposureUsd: multiplyDecimal(multiplyDecimal(size, executionPrice), feeMultiplier),
           frozenTargetUsd: frozenTarget, decisionQuoteTs: quote.ts, decisionQuoteHash: await payloadHash(quote), decisionCandleTs: candle.ts, decisionCandleHash: await payloadHash(candle), decisionMarketKey: marketKey,
           executionLimitPrice: executionPrice, instrumentVersion: String(instrument.version ?? "1"), holdHours: intent.holdHours, maxHoldHours: intent.maxHoldHours, strategyConfigHash: intent.configHash,
@@ -111,7 +143,8 @@ export class OrderCoordinator {
           let reserve;
           try { reserve = await this.orders.reserveBuy(tx, attempt, { managedExposure: intent.managedExposure ?? "0", maxExposure: multiplyDecimal(BUY_ADMISSION_LEVERAGE, attempt.admissionEquity) }); }
           finally { this.slo?.record("buy_reserve_db", reserveStarted); }
-          if (reserve.authorized) rows.push({ intent, attempt, payload });
+          if (reserve.authorized) rows.push({ intent: { ...intent, clOrdId }, attempt, payload });
+          else this._emitBuyBlock({ ...intent, clOrdId }, "RESERVATION", reserve.reason ?? "RESERVATION_DENIED", { adjustedEquity: attempt.admissionEquity, managedExposure: intent.managedExposure ?? "0", reservedExposure: attempt.reservedExposureUsd, remainingCapacity: this._remainingCapacity(intent.managedExposure ?? "0") });
         } catch (error) {
           // A lost COMMIT acknowledgement is resolved by the deterministic business key.
           // Never turn that ambiguity into a second generation or a second HTTP submit.
@@ -136,11 +169,11 @@ export class OrderCoordinator {
       return { submitted: false, reason: "COMMIT_ACK_LOST" };
     } finally { this.slo?.record("buy_reservation_tx", reservationStarted); }
     if (!prepared.length) return { submitted: false, reason: "RESERVATION_DENIED" };
-    for (const row of prepared) this._emit({ type: "order_lifecycle", reason: "BUY_PREPARED", intent: "BUY", instId: row.intent.instId, clOrdId: row.attempt.clOrdId, generation: row.intent.generation, limitPrice: row.attempt.executionLimitPrice, plannedSize: row.attempt.plannedSize, triggerPrice: row.attempt.decisionTriggerPrice, referencePrice: row.attempt.decisionReferencePrice });
+    for (const row of prepared) this._emit({ type: "order_lifecycle", reason: "BUY_PREPARED", intent: "BUY", decisionId: row.intent.decisionId, instId: row.intent.instId, clOrdId: row.attempt.clOrdId, generation: row.intent.generation, executionMode: row.attempt.executionMode, executionRoute: row.attempt.executionRoute, limitPrice: row.attempt.executionLimitPrice, plannedSize: row.attempt.plannedSize, triggerPrice: row.attempt.decisionTriggerPrice, referencePrice: row.attempt.decisionReferencePrice });
     const safe = [];
     for (const row of prepared) {
       const guard = this._buyGuard(row.intent);
-      if (!guard.allowed) await this.transaction((tx) => this.orders.markNotCreated(tx, row.attempt.clOrdId, guard.reason));
+      if (!guard.allowed) { this._emitBuyBlock(row.intent, "FINAL_GUARD", guard.reason, guard.evidence); await this.transaction((tx) => this.orders.markNotCreated(tx, row.attempt.clOrdId, guard.reason)); }
       else safe.push(row);
     }
     if (!safe.length) return { submitted: false, reason: "FINAL_GUARD" };
@@ -159,7 +192,8 @@ export class OrderCoordinator {
         await result;
       }
     });
-    for (const item of response) this._emit({ type: "order_lifecycle", reason: `BUY_${item.status}`, intent: "BUY", clOrdId: item.clOrdId, ordId: item.ordId, exchangeReason: item.reason });
+    const safeByClOrdId = new Map(safe.map((row) => [row.attempt.clOrdId, row]));
+    for (const item of response) { const row = safeByClOrdId.get(item.clOrdId); this._emit({ type: "order_lifecycle", reason: `BUY_${item.status}`, intent: "BUY", decisionId: row?.intent.decisionId, instId: row?.intent.instId, executionMode: row?.attempt.executionMode, executionRoute: row?.attempt.executionRoute, clOrdId: item.clOrdId, ordId: item.ordId, exchangeReason: item.reason }); }
     for (const row of safe) this.pending.BUY.delete(row.intent.instId);
     const unknown = response.filter((item) => item.status === "UNKNOWN").length; this.slo?.observe("unknown_count", unknown); this.slo?.increment?.("unknown_count", unknown); this.slo?.observe("batch_size", safe.length); this.slo?.observe("mutation_concurrency", 1); this._emit({ type: "buy_batch", count: safe.length, results: response.map((item) => ({ clOrdId: item.clOrdId, status: item.status })) });
     return { submitted: true, count: safe.length, response };
@@ -376,7 +410,7 @@ export class OrderCoordinator {
       for (const fill of fills) await this.state.insertFill(tx, { accountId: attempt.account_id, instId: attempt.inst_id, baseCcy: attempt.base_ccy, tradeId: fill.tradeId, source: "SYSTEM", side: "BUY", fillSize: fill.fillSz, fillTime: fill.fillTime, sourceAttemptClOrdId: attempt.cl_ord_id ?? attempt.clOrdId, fillPrice: fill.fillPx, fee: fill.fee, feeCcy: fill.feeCcy, holdHours: attempt.hold_hours, maxHoldHours: attempt.max_hold_hours, strategyConfigHash: attempt.strategy_config_hash, sellTime: Number(fill.fillTime) + Number(attempt.hold_hours) * 3_600_000, forceSellTime: attempt.max_hold_hours ? Number(fill.fillTime) + Number(attempt.max_hold_hours) * 3_600_000 : null, sellState: "WAITING", executionMode: attempt.execution_mode ?? attempt.executionMode ?? "cross", executionRoute: attempt.execution_route ?? attempt.executionRoute ?? "margin" });
       await this.orders.markSettled(tx, attempt.cl_ord_id, exchangeState, compareDecimal(accFillSz, "0") > 0 ? "CONVERTED" : "RELEASED");
     });
-    this._emit({ type: "trade_lifecycle", reason: "BUY_SETTLED", intent: "BUY", instId: attempt.inst_id ?? attempt.instId, clOrdId: attempt.cl_ord_id ?? attempt.clOrdId, filledSize: filled, exchangeState, sellTime: fills.length ? Math.min(...fills.map((fill) => Number(fill.fillTime) + Number(attempt.hold_hours) * 3_600_000)) : undefined });
+    this._emit({ type: "trade_lifecycle", reason: "BUY_SETTLED", intent: "BUY", decisionId: attempt.decision_id ?? attempt.decisionId, instId: attempt.inst_id ?? attempt.instId, clOrdId: attempt.cl_ord_id ?? attempt.clOrdId, filledSize: filled, exchangeState, sellTime: fills.length ? Math.min(...fills.map((fill) => Number(fill.fillTime) + Number(attempt.hold_hours) * 3_600_000)) : undefined });
     if (this.onBuySettled) await this.onBuySettled({ attempt, fills, exchangeState, accFillSz });
     return { settled: true };
   }
@@ -390,20 +424,26 @@ export class OrderCoordinator {
     return value === "margin" || value === "spot" ? value : null;
   }
   _buyGuard(intent) {
-    if (intent.generation > 0 && !this.canCreateNextBuy({ previousAttempt: intent.previousAttempt, nextMarketKey: intent.nextMarketKey })) return { allowed: false, reason: "GENERATION_NOT_SETTLED_OR_DUPLICATE" };
-    if (this.mode() !== "FULL") return { allowed: false, reason: "MODE" };
+    if (intent.generation > 0 && !this.canCreateNextBuy({ previousAttempt: intent.previousAttempt, nextMarketKey: intent.nextMarketKey })) return { allowed: false, reason: "GENERATION_NOT_SETTLED_OR_DUPLICATE", evidence: { previousState: intent.previousAttempt?.state, marketKey: intent.nextMarketKey } };
+    const currentMode = this.mode();
+    if (currentMode !== "FULL") return { allowed: false, reason: "MODE", evidence: { currentMode } };
     if (!this.ownerGuard.isHeld()) return { allowed: false, reason: "OWNER" };
-    if (!this.readyGate.ready || !this.account.fresh(this.config.accountFreshMs)) return { allowed: false, reason: "NOT_READY" };
-    if (!this.transport.clockFresh(CLOCK_SYNC_STALE_AFTER_MS)) return { allowed: false, reason: "CLOCK_SYNC_STALE" };
+    const accountFresh = this.account.fresh(this.config.accountFreshMs);
+    if (!this.readyGate.ready || !accountFresh) return { allowed: false, reason: "NOT_READY", evidence: { ready: this.readyGate.ready, accountFresh } };
+    if (!this.transport.clockFresh(CLOCK_SYNC_STALE_AFTER_MS)) return { allowed: false, reason: "CLOCK_SYNC_STALE", evidence: { clockSkewMs: this.transport.clockSkewMs } };
     const quote = this.market.freshQuote(intent.instId, this.config.quoteFreshMs); const candle = this.market.candle(intent.instId); const instrument = this.market.instrument(intent.instId);
-    if (!quote || !candle || !instrument || instrument.state !== "live" || intent.protected || intent.enabled === false || intent.dailyReady === false || !this.isBuyAllowed(intent.instId)) return { allowed: false, reason: "MARKET" };
-    if (candleFreshness({ candle, exchangeNowMs: this.clock.nowMs() + Number(this.transport.clockSkewMs ?? 0) }).state !== "FRESH") return { allowed: false, reason: "MARKET" };
+    const exchangeNowMs = this.clock.nowMs() + Number(this.transport.clockSkewMs ?? 0);
+    const marketEvidence = { quoteAgeMs: quote?.ts ? exchangeNowMs - Number(quote.ts) : undefined, candleAgeMs: candle?.ts ? exchangeNowMs - Number(candle.ts) : undefined, instrumentState: instrument?.state, protected: intent.protected, enabled: intent.enabled, dailyReady: intent.dailyReady };
+    if (!quote || !candle || !instrument || instrument.state !== "live" || intent.protected || intent.enabled === false || intent.dailyReady === false || !this.isBuyAllowed(intent.instId)) return { allowed: false, reason: "MARKET", evidence: marketEvidence };
+    const candleState = candleFreshness({ candle, exchangeNowMs }).state;
+    if (candleState !== "FRESH") return { allowed: false, reason: "MARKET", evidence: { ...marketEvidence, candleState } };
     const risk = assessLeverage({ committedExposure: intent.managedExposure ?? "0", ...this.account.value });
-    if (risk.hardStopped) return { allowed: false, reason: "HARD_STOP" };
-    const signal = buySignal({ last: quote.last, askPx: quote.askPx, limitPrice: roundToStep(intent.dailyLimitPrice, instrument.tickSz, "down"), previousClosedHigh: candle.high });
+    if (risk.hardStopped) return { allowed: false, reason: "HARD_STOP", evidence: { adjustedEquity: risk.equity, leverage: risk.effective, managedExposure: intent.managedExposure ?? "0", hardStop: true } };
+    const limitPrice = roundToStep(intent.dailyLimitPrice, instrument.tickSz, "down");
+    const signal = buySignal({ last: quote.last, askPx: quote.askPx, limitPrice, previousClosedHigh: candle.high });
     // The same snapshot backs both the allow/deny decision and attempt construction in
     // submitBuys, so a quote/candle read can never drift from the freshness check that gated it.
-    return signal.eligible ? { allowed: true, quote, candle, instrument, signal } : { allowed: false, reason: signal.reason };
+    return signal.eligible ? { allowed: true, quote, candle, instrument, signal } : { allowed: false, reason: signal.reason, evidence: { last: quote.last, askPx: quote.askPx, dailyLimitPrice: limitPrice, breakoutPrice: signal.breakoutPrice, breakoutGap: subtractDecimal(quote.last, signal.breakoutPrice), priceLimitGap: subtractDecimal(limitPrice, quote.askPx), ...marketEvidence } };
   }
   _exitGuard(intent, kind) {
     if (this.mode() === "OFF") return { allowed: false, reason: "MODE" };

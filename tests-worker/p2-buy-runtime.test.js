@@ -61,13 +61,30 @@ test("P2 BUY coordinator uses one fake batch, persists item-independent outcomes
   } });
   for (const instId of ["BTC-USDT", "ETH-USDT", "SOL-USDT"]) {
     if (instId !== "BTC-USDT") { market.updateInstrument({ instId, ts: 1, state: "live", tickSz: "0.1", lotSz: "0.001", minSz: "0.001", base: instId.split("-")[0], version: 1 }); market.updateTicker({ instId, ts: 2, last: "95", askPx: "95", bidPx: "94" }); market.updateCandle({ instId, ts: expectedClosedCandleTs(now.nowMs()), open: "90", high: "90", low: "89", confirm: true }); }
-    coordinator.enqueue({ intent: "BUY", instId, generation: 0, eligibleSince: 1, strategyDay: "2026-08-14", dailyLimitPrice: "100", holdHours: "24", configHash: "cfg", tradeQuoteCcy: "USDT", managedExposure: "0" });
+    coordinator.enqueue({ intent: "BUY", decisionId: `decision-${instId}`, instId, generation: 0, eligibleSince: 1, strategyDay: "2026-08-14", dailyLimitPrice: "100", holdHours: "24", configHash: "cfg", tradeQuoteCcy: "USDT", managedExposure: "0" });
   }
   const result = await coordinator.drainOnce();
   assert.equal(result.count, 3); assert.equal(sends, 1); assert.deepEqual([...attempts.values()].map((row) => row.state).sort(), ["NOT_CREATED", "SUBMITTED", "UNKNOWN"]);
   assert.deepEqual(slo.assertInvariants(), { maxBatchSize: 3, maxMutationConcurrency: 1, unknownCount: 1 }); assert.equal(slo.samples.get("signal_post")[0], 0);
+  assert.ok([...attempts.values()].every((row) => row.decisionId === `decision-${row.instId}`)); assert.ok(events.filter((event) => event.type === "order_lifecycle").every((event) => event.decisionId));
   assert.equal(slo.samples.get("buy_reserve_db").length, 3); assert.deepEqual(slo.samples.get("buy_reservation_tx"), [0]);
   assert.equal(events.at(-1).count, 3); await coordinator.drainOnce(); assert.equal(sends, 1, "UNKNOWN is never blindly resent");
+});
+
+test("P5 BUY coordinator emits one structured block per unchanged decision stage", async () => {
+  const now = clock(10); const events = [];
+  const coordinator = new OrderCoordinator({ transaction: async (fn) => fn({}), orders: {}, state: {}, ownerGuard: { isHeld: () => true }, readyGate: ready(), market: setupMarket(now), account: new AccountCapitalSnapshot({ clock: now }), mode: () => "OFF", clock: now, config, telemetry: (event) => events.push(event), transport: clockReady });
+  const intent = { intent: "BUY", decisionId: "D-BLOCK", instId: "BTC-USDT", generation: 0, strategyDay: "2026-08-14" };
+  await coordinator.prepareBuys([intent]); await coordinator.prepareBuys([intent]);
+  assert.deepEqual(events, [{ type: "block_evidence", side: "BUY", stage: "COORDINATOR_GUARD", reason: "MODE", reasonCode: "MODE", decisionId: "D-BLOCK", clOrdId: undefined, instId: "BTC-USDT", strategyDay: "2026-08-14", generation: 0, executionMode: undefined, executionRoute: undefined, currentMode: "OFF" }]);
+});
+
+test("P5 BUY availability failure emits bounded structured evidence and remains retryable", async () => {
+  const now = clock(10); const events = []; const account = new AccountCapitalSnapshot({ clock: now }); account.update({ ts: 1, totalEq: "150", adjEq: "150" });
+  const coordinator = new OrderCoordinator({ transaction: async (fn) => fn({}), orders: {}, state: {}, ownerGuard: { isHeld: () => true }, readyGate: ready(), market: setupMarket(now), account, mode: () => "FULL", executionRoute: () => "margin", clock: now, config, telemetry: (event) => events.push(event), transport: { ...clockReady, maxAvailSize: async () => { throw new Error("temporary unavailable"); } } });
+  const intent = { intent: "BUY", decisionId: "D-AVAIL", instId: "BTC-USDT", generation: 0, strategyDay: "2026-08-14", dailyLimitPrice: "100", managedExposure: "0" };
+  assert.deepEqual(await coordinator.prepareBuys([intent]), []); assert.deepEqual(await coordinator.prepareBuys([intent]), []);
+  const blocks = events.filter((event) => event.type === "block_evidence"); assert.equal(blocks.length, 1); assert.equal(blocks[0].reason, "MAX_AVAIL_FAILED"); assert.equal(blocks[0].executionRoute, "margin");
 });
 
 test("P2 BUY final guard releases PREPARED reservation when owner, mode, READY, or freshness is lost", async () => {

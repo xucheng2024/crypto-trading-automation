@@ -229,10 +229,10 @@ export class OrderRepository {
       decision_candle_ts,decision_candle_hash,decision_market_key,execution_limit_price,
       instrument_version,hold_hours,max_hold_hours,strategy_config_hash,admission_equity,
       admission_exposure,account_snapshot_version,execution_mode,execution_route,
-      decision_trigger_price,decision_reference_price,decision_reason
+      decision_trigger_price,decision_reference_price,decision_reason,decision_id
     ) VALUES(
       $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'PREPARED',$11,$12,'ACTIVE',$13,$14,$15,$16,$17,
-      $18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31
+      $18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32
     )`, [
       attempt.accountId, attempt.intent, attempt.instId, attempt.baseCcy, attempt.clOrdId,
       attempt.payloadHash, attempt.sourceBuyTradeId ?? null, attempt.strategyDay ?? null,
@@ -246,6 +246,7 @@ export class OrderRepository {
       attempt.admissionEquity ?? null, attempt.admissionExposure ?? null,
       attempt.accountSnapshotVersion ?? null, attempt.executionMode ?? "cross", attempt.executionRoute ?? "margin",
       attempt.decisionTriggerPrice ?? null, attempt.decisionReferencePrice ?? null, attempt.decisionReason ?? null,
+      attempt.decisionId ?? null,
     ]);
   }
 

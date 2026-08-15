@@ -6,4 +6,5 @@ export const postgresMigrations = [
   "0005_execution_route.sql",
   "0006_decision_observability.sql",
   "0007_sell_force_hold.sql",
+  "0008_buy_decision_correlation.sql",
 ];

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { normalizeInstrument } from "../src/domain/instrument.js";
-import { assertAttemptState, createClOrdId, payloadHash } from "../src/domain/order.js";
+import { assertAttemptState, createClOrdId, createDecisionId, payloadHash } from "../src/domain/order.js";
 import { assessLeverage, buySignal, CANDLE_STALE_HARD_MS, candleFreshness, dailyLimit, delistPlan, expectedClosedCandleTs, normalizeHoldHours, sellBreakdownPrice, strategyDay } from "../src/domain/rules.js";
 
 test("domain instrument and order contracts normalize deterministically", async () => {
@@ -9,6 +9,11 @@ test("domain instrument and order contracts normalize deterministically", async 
   const id = await createClOrdId("v1", "BUY", ["BTC-USDT", "2026-08-14", 0]);
   assert.match(id, /^[A-Za-z0-9]{1,32}$/);
   assert.equal(id, await createClOrdId("v1", "BUY", ["BTC-USDT", "2026-08-14", 0]));
+  const decision = { accountId: "a", instId: "BTC-USDT", strategyDay: "2026-08-14", generation: 0, marketKey: "market" };
+  const decisionId = await createDecisionId(decision);
+  assert.match(decisionId, /^D[A-Z2-7]{26}$/);
+  assert.equal(decisionId, await createDecisionId(decision));
+  assert.notEqual(decisionId, await createDecisionId({ ...decision, marketKey: "new-market" }));
   assert.notEqual(await payloadHash({ b: 1, a: 2 }), await payloadHash({ b: 2, a: 1 }));
   assert.throws(() => assertAttemptState("FILLED"));
 });

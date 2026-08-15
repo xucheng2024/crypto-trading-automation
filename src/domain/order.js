@@ -33,6 +33,11 @@ export async function payloadHash(payload) {
   return base32(await digest(payload));
 }
 
+export async function createDecisionId({ accountId, instId, strategyDay, generation, marketKey }) {
+  if (!accountId || !instId || !strategyDay || !Number.isInteger(generation) || generation < 0 || !marketKey) throw new Error("Invalid decision ID tuple");
+  return `D${base32((await digest([accountId, instId, strategyDay, generation, marketKey])).slice(0, 16))}`;
+}
+
 export async function createClOrdId(version, intent, tuple) {
   const prefix = `${version}${intent}`.replace(/[^a-zA-Z0-9]/g, "");
   if (!prefix || prefix.length > 10) throw new Error("Invalid order ID prefix");
