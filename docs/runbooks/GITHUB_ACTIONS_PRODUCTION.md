@@ -15,7 +15,11 @@ one to become healthy.
 Create two Azure application registrations with GitHub OIDC federated
 credentials restricted to this repository and the listed environments:
 
-- deployment identity: ACR push and Container Apps update/revision permissions;
+- deployment identity: ACR push; resource-group-scoped `Container Apps
+  Contributor` and `Azure Deployment Stack Contributor`; and `Managed Identity
+  Operator` scoped only to the production ACR pull identity. These rights allow
+  the bootstrap to create/update the Runner without granting database, network,
+  Key Vault, role-assignment, or general Contributor access;
 - migration identity: PostgreSQL migration DDL role. It does not require
   Flexible Server firewall-rule permission because migrations run from the
   VNet-integrated self-hosted runner through the existing NAT allowlist.

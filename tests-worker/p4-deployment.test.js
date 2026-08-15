@@ -103,7 +103,7 @@ test("P4 self-hosted migration runner is VNet-integrated, ephemeral and secret-s
   ]);
   assert.match(workflow, /environment: production-off/); assert.doesNotMatch(workflow, /environment: production-migrate/);
   assert.match(workflow, /environmentId="\$environment_id"/); assert.match(workflow, /secrets\.GH_RUNNER_PAT/);
-  assert.match(workflow, /registryIdentityId="\$registry_identity"/); assert.doesNotMatch(workflow, /az acr show/);
+  assert.match(workflow, /registryIdentityId="\$registry_identity"/); assert.doesNotMatch(workflow, /az (acr|group) show/);
   assert.match(workflow, /\$\{registry_identity,,\}/);
   assert.match(workflow, /Require the dedicated runner registration credential/); assert.match(workflow, /actions\/runners\?per_page=100/); assert.match(workflow, /\.status == "online"/);
   assert.match(bicep, /managedEnvironmentId: environmentId/); assert.match(bicep, /minReplicas: 1, maxReplicas: 1/);
