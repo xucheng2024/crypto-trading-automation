@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { AccountCapitalSnapshot, BoundedPriorityQueue, MarketProjection, ReadyGate, TradingEngine } from "../src/application/trading-engine.js";
+import { AccountCapitalSnapshot, BoundedPriorityQueue, MarketProjection, ReadyGate } from "../src/application/trading-engine.js";
 import { OrderCoordinator } from "../src/application/order-coordinator.js";
 import { ReconciliationService } from "../src/application/reconciliation-service.js";
 import { VirtualSloMetrics } from "../src/application/slo-metrics.js";
@@ -21,7 +21,7 @@ function setupMarket(now) {
   return market;
 }
 
-test("P2 runtime coalesces ticker pressure, accepts same-ms corrections, and schedules BUY fairly", () => {
+test("P2 runtime coalesces ticker pressure and accepts same-ms corrections", () => {
   const now = clock(); const projection = new MarketProjection({ clock: now }); const queue = new BoundedPriorityQueue({ capacity: 1 });
   assert.equal(projection.updateTicker({ instId: "BTC-USDT", ts: 1, last: "10" }).accepted, true);
   assert.equal(projection.updateTicker({ instId: "BTC-USDT", ts: 1, last: "11" }).corrected, true);
@@ -29,11 +29,6 @@ test("P2 runtime coalesces ticker pressure, accepts same-ms corrections, and sch
   assert.equal(projection.updateTicker({ instId: "BTC-USDT", ts: 0, last: "9" }).reason, "OUT_OF_ORDER");
   queue.enqueue({ type: "ticker", instId: "BTC-USDT", payload: 1 }); queue.enqueue({ type: "ticker", instId: "BTC-USDT", payload: 2 });
   assert.equal(queue.size, 1); assert.equal(queue.take().payload, 2);
-  const engine = new TradingEngine({ projection, queue, clock: now });
-  engine.queueBuy({ instId: "BTC-USDT", generation: 1, eligibleSince: 1 });
-  engine.queueBuy({ instId: "ETH-USDT", generation: 0, eligibleSince: 9 });
-  engine.queueBuy({ instId: "SOL-USDT", generation: 0, eligibleSince: 1 });
-  assert.deepEqual(engine.takeBuyBatch().map((row) => row.instId), ["SOL-USDT", "ETH-USDT", "BTC-USDT"]);
 });
 
 test("P2 recovery keeps READY false, waits owner safety window, and treats PREPARED as query-only UNKNOWN", async () => {
@@ -187,16 +182,13 @@ test("P2 boundaries retain decimal equity, fee reservation, leverage gates, dail
   assert.equal(market.instrument("BTC-USDT").tickSz, "0.3", "daily cache is not rewritten by the new rule");
 });
 
-test("P2 50-asset replay keeps only latest ticker per asset and always selects generation zero before retry generations", () => {
-  const queue = new BoundedPriorityQueue({ capacity: 5 }); const engine = new TradingEngine({ queue });
+test("P2 50-asset replay keeps only latest ticker per asset", () => {
+  const queue = new BoundedPriorityQueue({ capacity: 5 });
   for (let index = 1; index <= 50; index += 1) {
     const instId = `C${String(index).padStart(2, "0")}-USDT`;
     for (let tick = 2; tick <= 100; tick += 1) queue.enqueue({ type: "ticker", instId, tick });
-    engine.queueBuy({ instId, generation: 0, eligibleSince: index });
   }
-  engine.queueBuy({ instId: "C01-USDT", generation: 1, eligibleSince: 0 });
   assert.equal(queue.size, 50, "coalescing bounds each asset to its newest market event");
-  assert.deepEqual(engine.takeBuyBatch(5).map((item) => [item.instId, item.generation]), [["C01-USDT", 0], ["C02-USDT", 0], ["C03-USDT", 0], ["C04-USDT", 0], ["C05-USDT", 0]]);
 });
 
 test("P2 BUY settlement records fills with reservation conversion atomically and gates next generation by a new key", async () => {

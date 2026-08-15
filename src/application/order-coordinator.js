@@ -210,8 +210,18 @@ export class OrderCoordinator {
   _deferExit(intent, kind, reason, delayMs = 1_000) {
     const key = `${intent.baseCcy}:${intent.sourceBuyTradeId}`;
     const current = this.pending[kind].get(key) ?? intent;
-    this.pending[kind].set(key, { ...current, notBefore: this.clock.nowMs() + delayMs });
+    const firstDeferredAt = current.firstDeferredAt ?? this.clock.nowMs();
+    this.pending[kind].set(key, { ...current, notBefore: this.clock.nowMs() + delayMs, firstDeferredAt, lastDeferReason: reason });
     this._emit({ type: "exit_deferred", intent: kind, reason, sourceBuyTradeId: intent.sourceBuyTradeId, retryAfterMs: delayMs });
+  }
+  // Watchdog signal: an exit that has been sitting in the pending map (repeatedly
+  // deferred, never reserved) for longer than a threshold — e.g. INSTRUMENT_NOT_TRADABLE
+  // with no delist confirmation ever arriving — is exactly the "never sellable" failure
+  // mode this counts, independent of why any single defer happened.
+  stuckExitCount(thresholdMs, nowMs = this.clock.nowMs()) {
+    let count = 0;
+    for (const kind of ["SELL", "DELIST"]) for (const intent of this.pending[kind].values()) if (intent.firstDeferredAt && nowMs - intent.firstDeferredAt >= thresholdMs) count += 1;
+    return count;
   }
   // A dust-sized remainder must stop being redriven every ~10ms and must be
   // reflected out of the local pending map immediately: nothing else clears
@@ -219,7 +229,7 @@ export class OrderCoordinator {
   // re-read durable truth before deciding to drop it.
   async _resolveDust(intent, kind) {
     const key = `${intent.baseCcy}:${intent.sourceBuyTradeId}`;
-    const result = await this.transaction((tx) => this.state.markDust?.(tx, { ...intent, version: intent.fillVersion }));
+    const result = await this.transaction((tx) => this.state.markDust?.(tx, { ...intent, tradeId: intent.sourceBuyTradeId, version: intent.fillVersion }));
     if (result?.rowCount === 1) {
       this.pending[kind].delete(key);
       const row = result.rows?.[0];

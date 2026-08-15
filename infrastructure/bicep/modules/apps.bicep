@@ -43,6 +43,7 @@ resource engine 'Microsoft.App/containerApps@2024-03-01' = {
     configuration: {
       activeRevisionsMode: 'Single'
       registries: [{ server: registryServer, identity: 'system' }]
+      secrets: [{ name: 'appinsights-connection-string', value: applicationInsightsConnectionString }]
       ingress: { external: false, targetPort: 8080 }
     }
     template: {
@@ -61,7 +62,7 @@ resource engine 'Microsoft.App/containerApps@2024-03-01' = {
             { name: 'MANAGED_FILL_START_MS', value: managedFillStartMs }
             { name: 'STRATEGY_CONFIG_JSON', value: strategyConfigJson }
             { name: 'PORT', value: '8080' }
-            { name: 'APPLICATIONINSIGHTS_CONNECTION_STRING', value: applicationInsightsConnectionString }
+            { name: 'APPLICATIONINSIGHTS_CONNECTION_STRING', secretRef: 'appinsights-connection-string' }
             { name: 'DEPLOYMENT_ENVIRONMENT', value: 'p5' }
           ]
           probes: [
@@ -85,6 +86,7 @@ resource maintenance 'Microsoft.App/jobs@2024-03-01' = {
       replicaTimeout: 1800
       scheduleTriggerConfig: { cronExpression: '5 0 * * *', parallelism: 1, replicaCompletionCount: 1 }
       registries: [{ server: registryServer, identity: 'system' }]
+      secrets: [{ name: 'appinsights-connection-string', value: applicationInsightsConnectionString }]
     }
     template: {
       containers: [
@@ -97,7 +99,7 @@ resource maintenance 'Microsoft.App/jobs@2024-03-01' = {
             { name: 'TRADING_MODE', value: 'OFF' }
             { name: 'POSTGRES_URL', value: maintenancePostgresUrl }
             { name: 'MAINTENANCE_ADAPTER_MODULE', value: 'file:///app/src/entrypoints/azure/maintenance-adapter.js' }
-            { name: 'APPLICATIONINSIGHTS_CONNECTION_STRING', value: applicationInsightsConnectionString }
+            { name: 'APPLICATIONINSIGHTS_CONNECTION_STRING', secretRef: 'appinsights-connection-string' }
             { name: 'DEPLOYMENT_ENVIRONMENT', value: 'p5' }
           ]
         }

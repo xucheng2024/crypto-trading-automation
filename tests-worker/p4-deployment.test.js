@@ -211,6 +211,7 @@ test("P4 baseline failure releases the owner and never starts WS", async () => {
 test("P4 production composition routes fake WS baselines into projections and keeps account fail-closed", async () => {
   const readyGate = new ReadyGate();
   const marketEvents = []; const buyPlanner = { protected: new Set(), restore: () => {}, prime: async () => readyGate.set('strategy', true), observe: async (event) => marketEvents.push(event) };
+  const expTimeConfirmations = [];
   const sockets = []; const socketFactory = () => {
     const listeners = new Map(); const socket = { sent: [], addEventListener(name, fn) { listeners.set(name, fn); }, send(value) { this.sent.push(JSON.parse(value)); }, close() { listeners.get('close')?.(); }, emit(name, data) { listeners.get(name)?.(name === 'message' ? { data: JSON.stringify(data) } : {}); } };
     sockets.push(socket); return socket;
@@ -220,6 +221,7 @@ test("P4 production composition routes fake WS baselines into projections and ke
     socketFactory, ownerGuard, ownerClient: {}, readyGate, buyPlanner, keyVault: { readOkxCredentials: async () => ({ apiKey: 'a', secretKey: 'b', passphrase: 'c' }) },
     pool: { query: async () => ({ rows: [{ attempts: 'order_attempts', fills: 'filled_orders', watermarks: 'sync_watermarks' }] }), transaction: async (fn) => fn({}), end: async () => {} },
     reconciliation: { recover: async () => ({ ready: false }) }, baseline: async () => readyGate.set('instruments', true), orderConfig: { strategyTag: 'azure', orderVersion: 'v1' },
+    protection: { confirm: async (row) => expTimeConfirmations.push(row), scanAnnouncements: async () => {} },
   });
   try {
     await composed.start(); sockets.forEach((socket) => socket.emit('open'));
@@ -232,11 +234,15 @@ test("P4 production composition routes fake WS baselines into projections and ke
     sockets[2].emit('message', { event: 'subscribe', code: '0', arg: { channel: 'candle3m', instId: 'BTC-USDT' } });
     sockets[0].emit('message', { arg: { channel: 'tickers', instId: 'BTC-USDT' }, data: [{ instId: 'BTC-USDT', ts: '1', last: '100', askPx: '101', bidPx: '99' }] });
     sockets[0].emit('message', { arg: { channel: 'instruments', instType: 'SPOT' }, data: [{ instId: 'BTC-USDT', uTime: '1', state: 'live', tickSz: '0.1', lotSz: '0.001', minSz: '0.001' }] });
+    sockets[0].emit('message', { arg: { channel: 'instruments', instType: 'SPOT' }, data: [{ instId: 'OTHER-USDT', uTime: '2', state: 'live', tickSz: '0.1', lotSz: '0.001', minSz: '0.001', expTime: '9' }] });
+    sockets[0].emit('message', { arg: { channel: 'instruments', instType: 'SPOT' }, data: [{ instId: 'BTC-USDT', uTime: '2', state: 'live', tickSz: '0.1', lotSz: '0.001', minSz: '0.001', expTime: '9' }] });
+    sockets[0].emit('message', { arg: { channel: 'instruments', instType: 'SPOT' }, data: [{ instId: 'BTC-USDT', uTime: '3', state: 'live', tickSz: '0.1', lotSz: '0.001', minSz: '0.001', expTime: '9' }] });
     sockets[2].emit('message', { arg: { channel: 'candle3m', instId: 'BTC-USDT' }, data: [['1', '100', '101', '99', '100', '1', '1', '1', '1']] });
     await new Promise((resolve) => setTimeout(resolve, 20));
     assert.equal(composed.market.ticker('BTC-USDT').last, '100'); assert.equal(composed.market.instrument('BTC-USDT').state, 'live'); assert.equal(composed.market.candle('BTC-USDT').open, '100');
     assert.ok(marketEvents.some((event) => event.type === 'ticker')); assert.ok(marketEvents.some((event) => event.type === 'market-recheck'));
     assert.equal(composed.readyGate.snapshot().dependencies.account, false);
+    assert.deepEqual(expTimeConfirmations, [{ instId: 'BTC-USDT', baseCcy: 'BTC', reason: 'EXP_TIME' }], 'only configured instruments are confirmed, and duplicate WS updates share one in-flight confirmation');
     sockets[1].emit('message', { arg: { channel: 'account' }, data: [{ totalEq: '10', adjEq: '9', uTime: '2' }] });
     assert.equal(composed.readyGate.snapshot().dependencies.account, true); assert.equal(composed.slo.samples.get('event_enqueue').length, 1);
   } finally { await composed.closeWebSockets(); await composed.stopTimers(); await composed.releaseOwner(); }
@@ -261,8 +267,44 @@ test("P4 Engine recurring work serializes remote timers but never phase-starves 
   assert.equal(events[0].reason, 'WEEKLY_RECONCILE_FAILED'); work.stop(); assert.equal(intervals.size, 0);
 });
 
-test("P4 Engine work loop drains critical events and Coordinator batches without reentry", async () => {
-  const events = [{ type: "SELL_BREACH" }, null]; const results = [{ submitted: true }, { submitted: false, reason: "EMPTY" }]; let consumed = 0; let drained = 0;
-  const loop = new EngineWorkLoop({ engine: { consumeOne: async () => { consumed += 1; return events.shift(); } }, coordinator: { drainOnce: async () => { drained += 1; return results.shift(); } }, timers: { setInterval: () => 1, clearInterval: () => {} } });
-  assert.deepEqual(await loop.run(), { events: 1, batches: 1 }); assert.equal(consumed, 2); assert.equal(drained, 2);
+test("P4 Engine work loop drains critical events without reentry", async () => {
+  const events = [{ type: "SELL_BREACH" }, null]; let consumed = 0;
+  const loop = new EngineWorkLoop({ engine: { consumeOne: async () => { consumed += 1; return events.shift(); } }, coordinator: { drainOnce: async () => ({ submitted: false, reason: "EMPTY" }) }, timers: { setInterval: () => 1, clearInterval: () => {} } });
+  const first = loop.runEvents();
+  assert.deepEqual(await loop.runEvents(), { skipped: true });
+  assert.deepEqual(await first, { events: 1 }); assert.equal(consumed, 2);
+});
+
+test("P4 Engine work loop drains Coordinator batches without reentry", async () => {
+  const results = [{ submitted: true }, { submitted: false, reason: "EMPTY" }]; let drained = 0;
+  const loop = new EngineWorkLoop({ engine: { consumeOne: async () => null }, coordinator: { drainOnce: async () => { drained += 1; return results.shift(); } }, timers: { setInterval: () => 1, clearInterval: () => {} } });
+  const first = loop.runMutations();
+  assert.deepEqual(await loop.runMutations(), { skipped: true });
+  assert.deepEqual(await first, { batches: 1 }); assert.equal(drained, 2);
+});
+
+test("P4 Engine work loop keeps evaluating events while Coordinator mutations block on a slow REST round trip", async () => {
+  let release; const stuck = new Promise((resolve) => { release = resolve; });
+  let drainCalls = 0; const coordinator = { drainOnce: async () => { drainCalls += 1; await stuck; return { submitted: false, reason: "EMPTY" }; } };
+  let consumed = 0; const engine = { consumeOne: async () => { consumed += 1; return consumed <= 3 ? { type: "ticker" } : null; } };
+  const loop = new EngineWorkLoop({ engine, coordinator, timers: { setInterval: () => 1, clearInterval: () => {} } });
+  const mutations = loop.runMutations(); // hangs inside the first drainOnce call, simulating a slow max-avail-size/batch-orders round trip
+  assert.equal(drainCalls, 1);
+  // The independent events loop is not blocked by the in-flight mutation call.
+  assert.deepEqual(await loop.runEvents(), { events: 3 }); assert.equal(consumed, 4);
+  release(); assert.deepEqual(await mutations, { batches: 0 });
+});
+
+test("P4 Engine work loop evaluates different instruments concurrently but preserves each instrument order", async () => {
+  let releaseA; const waitA = new Promise((resolve) => { releaseA = resolve; }); const events = [{ type: "ticker", instId: "A-USDT", id: "a1" }, { type: "ticker", instId: "A-USDT", id: "a2" }, { type: "ticker", instId: "B-USDT", id: "b1" }]; const calls = [];
+  const engine = {
+    takeOne: () => events.shift() ?? null,
+    dispatch: async (event) => { calls.push(event.id); if (event.id === "a1") await waitA; },
+  };
+  const loop = new EngineWorkLoop({ engine, coordinator: { drainOnce: async () => ({ submitted: false, reason: "EMPTY" }) }, timers: { setInterval: () => 1, clearInterval: () => {} } });
+  assert.deepEqual(await loop.runEvents(), { events: 3 });
+  await Promise.resolve(); await Promise.resolve();
+  assert.deepEqual(calls, ["a1", "b1"], "B is not blocked by A, while A2 remains chained behind A1");
+  releaseA(); await Promise.all([...loop.marketChains.values()]);
+  assert.deepEqual(calls, ["a1", "b1", "a2"]);
 });

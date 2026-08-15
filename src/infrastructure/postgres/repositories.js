@@ -25,6 +25,9 @@ export class TradingStateRepository {
     return this.findDaily(tx, row.instId, row.strategyDay);
   }
   async listManagedFills(tx, accountId) { return (await tx.query("SELECT * FROM filled_orders WHERE account_id=$1 ORDER BY fill_time,bill_id,trade_id", [accountId])).rows; }
+  async listPendingAccountSellBases(tx, accountId) {
+    return (await tx.query("SELECT DISTINCT base_ccy FROM filled_orders WHERE account_id=$1 AND side='SELL' AND source='ACCOUNT' AND allocation_state='PENDING'", [accountId])).rows.map((row) => row.base_ccy);
+  }
   async listDelistCandidates(tx, { accountId, instId }) {
     return (await tx.query(`SELECT f.*, (f.fill_size-f.disposed_size)::text AS remaining_size,
       COALESCE((SELECT max(a.generation)+1 FROM order_attempts a

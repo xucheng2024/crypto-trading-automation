@@ -49,6 +49,19 @@ test("P5 private terminal order observation loads fills and closes the durable a
   assert.equal(settled.length, 1); assert.equal(settled[0].fills[0].fillPx, "90"); assert.equal(settled[0].accFillSz, "1");
 });
 
+test("P5 private external order observation immediately ingests an ACCOUNT buy and refreshes its projections", async () => {
+  const stored = []; const refreshed = []; let inTransaction = false;
+  const service = new ReconciliationService({ ownerGuard: { isHeld: () => true, onLost: () => {} }, readyGate: new ReadyGate(), safetyWaitMs: 0, transaction: async (fn) => { inTransaction = true; try { return await fn({}); } finally { inTransaction = false; } },
+    ownership: { accountId: "a", managedAfter: 0, enabledInstIds: ["BTC-USDT"], holdHoursByInst: { "BTC-USDT": "24" }, configHash: "cfg" },
+    orders: { findByClOrdId: async () => null }, state: { insertFill: async (_tx, row) => { stored.push(row); return { rowCount: 1 }; } },
+    transport: { fills: async (type) => type === "SPOT" ? [{ instId: "BTC-USDT", instType: "SPOT", side: "buy", ordId: "external-1", tradeId: "trade-1", fillSz: "1", fillPx: "90", fillTime: "2" }] : [], fillsHistory: async () => [] },
+    onAccountBuy: async (instId) => { assert.equal(inTransaction, false, "projection refresh runs only after the fill transaction commits"); refreshed.push(instId); },
+  });
+  assert.deepEqual(await service.observeOrder({ instId: "BTC-USDT", ordId: "external-1", state: "filled", accFillSz: "1", tdMode: "cross" }), { handled: true, source: "ACCOUNT", fills: 1 });
+  assert.deepEqual(stored.map((row) => [row.source, row.side, row.sellState]), [["ACCOUNT", "BUY", "WAITING"]]);
+  assert.deepEqual(refreshed, ["BTC-USDT"]);
+});
+
 test("P5 planner refuses a new BUY when any managed position lacks a fresh quote", async () => {
   const clock = { nowMs: () => current }; const market = new MarketProjection({ clock });
   market.updateInstrument({ instId: "BTC-USDT", ts: 1, state: "live", tickSz: "0.1", lotSz: "0.001", minSz: "0.001", base: "BTC", version: "1" });
@@ -64,6 +77,62 @@ test("P5 planner refuses a new BUY when any managed position lacks a fresh quote
   assert.deepEqual(await planner.observe({ type: "ticker", instId: "BTC-USDT" }), { queued: false, reason: "MANAGED_EXPOSURE_STALE" });
   await planner.quoteRefreshPromise;
   assert.equal(restCalls, 1); assert.equal(intents.length, 1); assert.equal(intents[0].managedExposure, "9.9");
+});
+
+function makeTwoInstrumentStaleQuotePlanner() {
+  const clock = { nowMs: () => current }; const market = new MarketProjection({ clock });
+  for (const instId of ["BTC-USDT", "SOL-USDT"]) {
+    market.updateInstrument({ instId, ts: 1, state: "live", tickSz: "0.1", lotSz: "0.001", minSz: "0.001", base: instId.split("-")[0], version: "1" });
+    market.updateTicker({ instId, ts: current, last: "95", askPx: "95", bidPx: "94.9" });
+    market.updateCandle({ instId, ts: current - 180_000, high: "94", low: "90", confirm: true });
+  }
+  const account = new AccountCapitalSnapshot({ clock }); account.update({ ts: current, totalEq: "100", adjEq: "100" });
+  const intents = []; let restCalls = 0;
+  const planner = new BuySignalPlanner({ accountId: "a", instIds: ["BTC-USDT", "SOL-USDT"], strategyConfig: { contentHash: "d".repeat(64), rows: { "BTC-USDT": { bestLimit: "100", holdHours: "24" }, "SOL-USDT": { bestLimit: "100", holdHours: "24" } } }, market, account,
+    coordinator: { enqueue: (intent) => Boolean(intents.push(intent)) }, state: {}, orders: { listBuyCycle: async () => ({ attempts: [], consumedUsd: "0" }) }, transaction: async (fn) => fn({}),
+    rest: { clockSkewMs: 0, clockFresh: () => true, tickers: async () => { restCalls += 1; return [{ instId: "ETH-USDT", ts: current, last: "10", bidPx: "9.9", askPx: "10" }]; } }, readyGate: new ReadyGate(), clock,
+  });
+  planner.currentDay = "2026-08-14";
+  planner.daily.set("BTC-USDT:2026-08-14", { status: "READY", dailyLimitPrice: "100" });
+  planner.daily.set("SOL-USDT:2026-08-14", { status: "READY", dailyLimitPrice: "100" });
+  planner.ledger = [{ account_id: "a", inst_id: "ETH-USDT", side: "BUY", fill_size: "1", disposed_size: "0" }];
+  return { planner, intents, restCalls: () => restCalls };
+}
+
+test("P5 planner replays every instrument stalled behind a shared quote refresh, driven end to end through observe()", async () => {
+  const { planner, intents } = makeTwoInstrumentStaleQuotePlanner();
+  // Both go stale through the real observe() path: BTC-USDT's own trigger starts the shared
+  // refresh; SOL-USDT's trigger arrives while it's already in flight and must not be dropped.
+  assert.deepEqual(await planner.observe({ type: "ticker", instId: "BTC-USDT" }), { queued: false, reason: "MANAGED_EXPOSURE_STALE" });
+  await planner.observe({ type: "ticker", instId: "SOL-USDT" });
+  while (planner.quoteRefreshPromise) await planner.quoteRefreshPromise;
+  assert.equal(planner.pendingQuoteRecheck.size, 0);
+  assert.deepEqual(intents.map((intent) => intent.instId).sort(), ["BTC-USDT", "SOL-USDT"]);
+});
+
+test("P5 planner starts a fresh drain when a trigger lands between an inner drain settling and an old-style finalizer", async () => {
+  const { planner, intents } = makeTwoInstrumentStaleQuotePlanner();
+  // Register this continuation on the inner drain *before* refreshManagedQuotes
+  // could register an external .finally().  With the old implementation it
+  // runs first, sees the old outer promise still set, and strands BTC in the
+  // Set after that finalizer clears it.  Inline clearing makes this start a
+  // genuinely new drain instead.
+  const drain = planner._drainQuoteRecheck.bind(planner); let second; let injectOnce = true;
+  planner._drainQuoteRecheck = () => {
+    const current = drain();
+    if (injectOnce) {
+      injectOnce = false;
+      current.then(() => { second = planner.refreshManagedQuotes("BTC-USDT"); });
+    }
+    return current;
+  };
+  const first = planner.refreshManagedQuotes("SOL-USDT");
+  await first;
+  assert.ok(second, "the inner-drain continuation fired");
+  assert.notEqual(second, first);
+  await second;
+  assert.equal(planner.pendingQuoteRecheck.size, 0);
+  assert.deepEqual(intents.map((intent) => intent.instId).sort(), ["BTC-USDT", "SOL-USDT"]);
 });
 
 test("P5 planner blocks a new-day duplicate position but permits the current BUY cycle", async () => {

@@ -26,11 +26,15 @@ export class ReconciliationService {
     this.readyGate.set("owner", false); for (const scope of scopes) this.readyGate.set(scope, false);
     if (!this.ownerGuard.isHeld()) return { ready: false, reason: "OWNER_NOT_HELD" };
     this.readyGate.set("owner", true); await this.sleep(this.safetyWaitMs);
-    const [protection, daily, ledger, attempts, buyAttempts, watermarks] = await this.transaction((tx) => Promise.all([
+    const [protection, daily, initialLedger, attempts, buyAttempts, watermarks] = await this.transaction((tx) => Promise.all([
       this.state.listProtection?.(tx, accountId) ?? [], this.state.listDaily?.(tx, accountId) ?? [], this.state.listManagedFills?.(tx, accountId) ?? [],
       this.orders.listNonTerminal?.(tx, accountId) ?? [], this.orders.listTodayBuys?.(tx, accountId, strategyDay) ?? [], this.orders.listWatermarks?.(tx, accountId) ?? [],
     ]));
     const recovered = await this.reconcileAll({ accountId, attempts, watermarks });
+    // reconcileAll may have just discovered ACCOUNT fills.  Re-read after it
+    // commits so the startup risk and sell projections include them on their
+    // first build, rather than only after a later restart or SYSTEM fill.
+    const ledger = await this.transaction((tx) => this.state.listManagedFills?.(tx, accountId) ?? initialLedger);
     // Consumers rebuild their in-memory watch/index strictly from this
     // durable snapshot before READY can be restored by baseline completion.
     await this.onRecovery({ protection, daily, ledger, attempts, buyAttempts, watermarks, recovered });
@@ -55,20 +59,29 @@ export class ReconciliationService {
     }
     const unique = [...new Map(raw.filter((fill) => fill?.instId && fill?.tradeId).map((fill) => [keyOf(fill), fill])).values()]
       .sort((a, b) => fillKey(a).localeCompare(fillKey(b), undefined, { numeric: true }));
+    const accountBuys = new Set();
     await this.transaction(async (tx) => {
       for (const fill of unique) {
         const order = typeof this.transport.order === "function" ? await this.transport.order({ instId: fill.instId, ordId: fill.ordId, clOrdId: fill.clOrdId }) : null;
-        await this.ingestFill(tx, fill, order);
+        await this.ingestFill(tx, fill, order, accountBuys);
       }
       for (const instType of instTypes) await this.orders.upsertWatermark?.(tx, { accountId, instType, endpoint: "fills", watermark: unique.at(-1)?.fillTime ?? overlapBegin, overlapBegin, healthy: true });
     });
+    for (const instId of accountBuys) await this.refreshAccountBuy(instId);
     return unique;
   }
   async reconcileAll({ accountId, attempts, watermarks }) {
     const observations = [];
     for (const attempt of attempts) observations.push(await this.reconcileAttempt(attempt));
     const overlap = Math.min(...watermarks.filter((row) => row.endpoint === "fills" && row.healthy).map((row) => Number(row.overlap_begin ?? row.overlapBegin ?? 0)), 0);
-    if (accountId) await this.recoverFills({ accountId, overlapBegin: overlap });
+    if (accountId) {
+      await this.recoverFills({ accountId, overlapBegin: overlap });
+      // A PENDING ACCOUNT SELL blocks every future SYSTEM SELL/DELIST reservation for
+      // its base forever unless something resolves it. Sweep every base with a PENDING
+      // ACCOUNT SELL on the same cadence recovery/periodic reconcile already runs on.
+      const bases = await this.transaction((tx) => this.state.listPendingAccountSellBases?.(tx, accountId) ?? []);
+      for (const baseCcy of bases) await this.allocateSafeAccountSells({ accountId, baseCcy });
+    }
     return observations;
   }
   async reconcileAttempt(attempt) {
@@ -120,12 +133,33 @@ export class ReconciliationService {
     return this.onTerminal({ attempt, order, fills, exchangeState: order.state, accFillSz: order.accFillSz ?? "0" });
   }
   async observeOrder(order) {
-    const clOrdId = order?.clOrdId; if (!clOrdId || !["filled", "canceled", "mmp_canceled"].includes(String(order.state).toLowerCase())) return { handled: false };
-    const attempt = await this.transaction((tx) => this.orders.findByClOrdId(tx, clOrdId));
-    if (!attempt) return { handled: false };
-    await this.settleTerminal(attempt, order); return { handled: true };
+    const clOrdId = order?.clOrdId; const ordId = order?.ordId;
+    if (!clOrdId && !ordId) return { handled: false };
+    const state = String(order.state ?? "").toLowerCase();
+    const terminal = ["filled", "canceled", "mmp_canceled"].includes(state);
+    const attempt = clOrdId ? await this.transaction((tx) => this.orders.findByClOrdId?.(tx, clOrdId)) : null;
+    if (attempt) {
+      if (!terminal) return { handled: false };
+      await this.settleTerminal(attempt, order); return { handled: true };
+    }
+    // An order created outside this process has no local attempt.  The private
+    // orders stream is nevertheless the earliest reliable notification that
+    // it may have filled, so load its immutable fills immediately.  REST
+    // reconciliation remains the recovery path when the fills endpoint lags.
+    if (!["partially_filled", "filled"].includes(state) || (order.accFillSz !== undefined && compareDecimal(order.accFillSz, "0") <= 0)) return { handled: false };
+    const fills = await this.fillsForOrder({ instId: order.instId, clOrdId, ord_id: ordId }, order);
+    let ingested = 0; const accountBuys = new Set();
+    await this.transaction(async (tx) => {
+      for (const fill of fills) if (await this.ingestFill(tx, fill, order, accountBuys)) ingested += 1;
+    });
+    for (const instId of accountBuys) await this.refreshAccountBuy(instId);
+    return { handled: ingested > 0, source: "ACCOUNT", fills: ingested };
   }
-  async ingestFill(tx, fill, order) {
+  async refreshAccountBuy(instId) {
+    try { await this.onAccountBuy(instId); }
+    catch (error) { emit(this.telemetry, { type: "account_fill", reason: "ACCOUNT_BUY_PROJECTION_REFRESH_FAILED", instId, error: error?.message }); }
+  }
+  async ingestFill(tx, fill, order, accountBuys = null) {
     const managed = classifyManagedFill(fill, order, this.ownership);
     if (!managed) return false;
     if (order?.clOrdId && typeof this.orders.findByClOrdId === "function") {
@@ -143,7 +177,13 @@ export class ReconciliationService {
       executionRoute: managed.executionRoute,
       ...(isBuy ? { holdHours: this.ownership.holdHoursByInst?.[managed.instId], maxHoldHours: this.ownership.maxHoldHoursByInst?.[managed.instId] ?? null, strategyConfigHash: this.ownership.configHash, sellTime: Number(managed.fillTime) + Number(this.ownership.holdHoursByInst?.[managed.instId] ?? 0) * 3_600_000, forceSellTime: this.ownership.maxHoldHoursByInst?.[managed.instId] ? Number(managed.fillTime) + Number(this.ownership.maxHoldHoursByInst[managed.instId]) * 3_600_000 : null, sellState: "WAITING" } : { allocationState: "PENDING" }),
     });
-    if (managed.source === "ACCOUNT" && isBuy) this.onAccountBuy(managed.instId);
+    if (managed.source === "ACCOUNT" && isBuy && inserted?.rowCount !== 0) {
+      // Refresh the in-memory risk and exit indexes only after the durable
+      // transaction commits. A callback failure must not roll back or invalidate
+      // an already recorded exchange fill; polling/recovery can retry later.
+      if (accountBuys) accountBuys.add(managed.instId);
+      else await this.refreshAccountBuy(managed.instId);
+    }
     // Before an HTTP send a PREPARED exit is purely local and can safely be
     // released. SUBMITTED/UNKNOWN are never cancelled here: they must settle
     // through exchange fills/history.

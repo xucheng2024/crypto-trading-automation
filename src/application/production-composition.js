@@ -15,6 +15,7 @@ import { VirtualSloMetrics } from "./slo-metrics.js";
 import { EngineRecurringWork } from "./engine-recurring-work.js";
 import { EngineWorkLoop } from "./engine-work-loop.js";
 import { BuySignalPlanner, normalizeConfirmed3mCandle } from "./buy-signal-planner.js";
+import { evaluateWatchdog } from "./operations-watchdog.js";
 import { ManagedIdentityCredential } from "@azure/identity";
 
 const noop = () => {};
@@ -82,6 +83,7 @@ export async function composeProductionRuntime(env, injected = {}) {
   const quoteCurrencies = injected.quoteCurrencies ?? new Map();
   let buyPlanner; let engine; let sellService;
   const delistingInstIds = new Set();
+  const expTimeConfirmingInstIds = new Set();
   const coordinator = injected.coordinator ?? new OrderCoordinator({ transaction, orders, state, transport: rest, ownerGuard, readyGate, market, account, mode: () => config.tradingMode, executionRoute: (instId) => executionRoutes.get(instId), tradeQuoteCurrency: (instId) => quoteCurrencies.get(instId), isBuyAllowed: (instId) => !buyPlanner?.protected?.has(instId), clock: runtime.clock, config: injected.orderConfig ?? { accountId: config.accountId, strategyTag: config.strategyTag, orderVersion: config.orderVersion, accountFreshMs: config.account_max_age_ms, quoteFreshMs: config.quote_max_age_ms, orderExpiryMs: config.order_expiry_ms }, telemetry, slo,
     onBuySettled: async () => { if (!buyPlanner) return; const ledger = await buyPlanner.reloadLedger(); rebuildSellWatches(ledger); },
     onExitDust: ({ row }) => sellService?.applyDust(row),
@@ -108,7 +110,8 @@ export async function composeProductionRuntime(env, injected = {}) {
   buyPlanner = injected.buyPlanner ?? new BuySignalPlanner({ accountId: config.accountId, instIds, strategyConfig: config.strategyConfig, market, account, coordinator, state, orders, transaction, rest, readyGate, clock: runtime.clock, quoteFreshMs: config.quote_max_age_ms, telemetry, slo });
   const reconciliation = injected.reconciliation ?? new ReconciliationService({ orders, state, transport: rest, ownerGuard, readyGate, clock: runtime.clock, safetyWaitMs: config.owner_safety_wait_ms, transaction, telemetry,
     ownership: { accountId: config.accountId, managedAfter: config.managedFillStartMs, enabledInstIds: instIds, systemClOrdIdPrefix: config.orderVersion, strategyTag: config.strategyTag, holdHoursByInst, maxHoldHoursByInst, configHash: config.strategyConfig.contentHash },
-    onAccountBuy: (instId) => engine?.protectInstrument(instId), onRecovery: ({ ledger, protection: rows, daily, buyAttempts, attempts }) => { delistingInstIds.clear(); for (const row of rows) if (["EXITING", "DELIST_DUST"].includes(row.state)) delistingInstIds.add(row.inst_id ?? row.instId); rebuildSellWatches(ledger, attempts); buyPlanner.restore?.({ ledger, protection: rows, daily, buyAttempts }); return delist.recover(rows); },
+    onAccountBuy: async () => { const ledger = await buyPlanner.reloadLedger(); rebuildSellWatches(ledger); },
+    onRecovery: ({ ledger, protection: rows, daily, buyAttempts, attempts }) => { delistingInstIds.clear(); for (const row of rows) if (["EXITING", "DELIST_DUST"].includes(row.state)) delistingInstIds.add(row.inst_id ?? row.instId); rebuildSellWatches(ledger, attempts); buyPlanner.restore?.({ ledger, protection: rows, daily, buyAttempts }); return delist.recover(rows); },
     onTerminal: async ({ attempt, order, fills, exchangeState, accFillSz }) => {
       const result = attempt.intent === "BUY" ? await coordinator.settleBuy({ attempt, fills, exchangeState, accFillSz }) : await coordinator.settleExit({ attempt, fills, exchangeState, accFillSz });
       if (result?.settled) { const ledger = await buyPlanner.reloadLedger?.(); if (ledger) rebuildSellWatches(ledger); }
@@ -124,12 +127,24 @@ export async function composeProductionRuntime(env, injected = {}) {
   // observation is required. The REST baseline establishes instrument
   // readiness; public WS freshness is a separate gate, so a reconnect must
   // not discard already validated static instrument metadata.
+  // A standalone non-live state (suspend/preopen/test) must never force an exit on its
+  // own — only a trustworthy delist signal may. expTime straight from the exchange is
+  // the second such signal alongside announcement text; confirm it once per instrument.
+  const maybeConfirmExpTime = (instId, expTime) => {
+    if (!instIds.includes(instId) || !expTime || delistingInstIds.has(instId) || expTimeConfirmingInstIds.has(instId)) return;
+    const baseCcy = market.instrument(instId)?.base; if (!baseCcy) return;
+    expTimeConfirmingInstIds.add(instId);
+    Promise.resolve(protection.confirm({ instId, baseCcy, reason: "EXP_TIME" }))
+      .catch((error) => { try { telemetry({ type: "protection", reason: "EXP_TIME_CONFIRM_FAILED", instId, error: error?.message }); } catch {} })
+      .finally(() => expTimeConfirmingInstIds.delete(instId));
+  };
   const observePublic = (row) => {
     if (row.type === "ticker") engine.receiveTicker(row);
     else if (row.type === "instrument") {
       const updated = market.updateInstrument(row);
       if (updated.accepted && instIds.includes(row.instId)) instrumentBaseline.add(row.instId);
       if (instrumentBaseline.size === instIds.length) readyGate.set("instruments", true);
+      if (updated.accepted) maybeConfirmExpTime(row.instId, row.expTime);
     }
   };
   const observePrivate = (row) => { if (row.type === "account" && account.update(row)) readyGate.set("account", true); else if (row.type === "orders") engine.receiveOrder(row); };
@@ -173,13 +188,20 @@ export async function composeProductionRuntime(env, injected = {}) {
       const rows = await transaction((tx) => state.listProtection(tx));
       for (const row of rows) if (["EXITING", "DELIST_DUST"].includes(row.state)) await delist.drive(row.inst_id ?? row.instId);
     },
-    reportMetrics: () => { const snapshot = engine.snapshot(); telemetry({ type: "metric_snapshot", reason: "RUNTIME_METRICS", ...slo.snapshot({ reset: true }), ready: snapshot.ready.ready ? 1 : 0, queue_depth_current: snapshot.queue, pending_buy_current: coordinator.pending?.BUY?.size ?? 0, active_buy_current: snapshot.activeBuy }); },
+    reportMetrics: () => {
+      const snapshot = engine.snapshot(); const ws = readyGate.snapshot().dependencies;
+      const exitBacklog = coordinator.stuckExitCount(5 * 60_000);
+      const verdict = evaluateWatchdog({ ready: snapshot.ready.ready, ws: { public: ws.public, private: ws.private, business: ws.business }, owner: ws.owner, exitBacklog });
+      if (!verdict.healthy) telemetry({ type: "watchdog", reason: "WATCHDOG_UNHEALTHY", reasons: verdict.reasons, exitBacklog });
+      telemetry({ type: "metric_snapshot", reason: "RUNTIME_METRICS", ...slo.snapshot({ reset: true }), ready: snapshot.ready.ready ? 1 : 0, queue_depth_current: snapshot.queue, pending_buy_current: coordinator.pending?.BUY?.size ?? 0, exit_backlog_current: exitBacklog });
+    },
   });
   return { runtime, keyVault, credentials, pool, ownerClient, ownerGuard, orders, state, transaction, market, account, readyGate, coordinator, reconciliation, buyPlanner, sellService, protection, delist, rest, ws, engine, workLoop, slo, recurring, executionRoutes, quoteCurrencies, offline: false,
     async start() { // fixed startup order: config -> secrets -> DB -> migration -> owner -> recovery -> REST baseline -> WS -> timers
       readyGate.set("database", false); await migrationCheck(); readyGate.set("database", true); if (!await ownerGuard.acquire()) throw new Error("OWNER_UNAVAILABLE");
       try {
         await reconciliation.recover({ accountId: config.accountId }); await baseline();
+        for (const instId of instIds) maybeConfirmExpTime(instId, market.instrument(instId)?.expTime);
         if (injected.baseline && !injected.buyPlanner) readyGate.set("strategy", true); else await buyPlanner.prime();
         for (const instId of instIds) for (const event of sellService.observeCandle?.(instId) ?? []) engine.queue.enqueue({ ...event, enqueuedAt: runtime.clock.nowMs() });
         for (const client of Object.values(ws)) client.connect?.(); engine.startWatchdog(); workLoop.start?.(); recurring.start?.();

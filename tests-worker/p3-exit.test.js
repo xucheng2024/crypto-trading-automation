@@ -61,7 +61,7 @@ test("P3 dust transition drops the hot pending intent and synchronizes the watch
   market.updateInstrument({ instId: "BTC-USDT", ts: 1, state: "live", tickSz: "0.1", lotSz: "0.1", minSz: "0.1", base: "BTC" }); market.updateTicker({ instId: "BTC-USDT", ts: 1, last: "1", bidPx: "1" });
   const row = { account_id: "p3", inst_id: "BTC-USDT", base_ccy: "BTC", trade_id: "dust-sync", side: "BUY", fill_size: "0.05", disposed_size: "0", sell_time: 1, sell_state: "DUST_PENDING", version: 2 }; let availCalls = 0; let applied;
   const coordinator = new OrderCoordinator({ transaction: async (fn) => fn({}), market, account, readyGate: gate(), ownerGuard: { isHeld: () => true }, mode: () => "EXIT_ONLY", clock: now, config, onExitDust: ({ row: value }) => { applied = value; },
-    state: { markDust: async () => ({ rowCount: 1, rows: [row] }) }, orders: {}, transport: { maxAvailSize: async () => { availCalls += 1; return [{ instId: "BTC-USDT", availSell: "0.05" }]; } },
+    state: { markDust: async (_tx, args) => { assert.equal(args.tradeId, "dust-sync"); return { rowCount: 1, rows: [row] }; } }, orders: {}, transport: { maxAvailSize: async () => { availCalls += 1; return [{ instId: "BTC-USDT", availSell: "0.05" }]; } },
   });
   coordinator.enqueue({ intent: "SELL", instId: "BTC-USDT", baseCcy: "BTC", sourceBuyTradeId: "dust-sync", remainingSize: "0.05", fillVersion: 1, sellTime: 1, bidPx: "1" });
   assert.equal((await coordinator.drainOnce()).reason, "NO_ELIGIBLE"); assert.equal(coordinator.pending.SELL.size, 0); assert.equal(applied, row);

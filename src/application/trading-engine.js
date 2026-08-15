@@ -74,7 +74,7 @@ export class BoundedPriorityQueue {
 
 export class TradingEngine {
   constructor({ projection = new MarketProjection(), account = new AccountCapitalSnapshot(), readyGate = new ReadyGate(), queue = new BoundedPriorityQueue(), clock = { nowMs: () => Date.now() }, timers = globalThis, watchdogMs = 5_000, onWatchdog = () => {}, onMarketEvent = async (event) => event, onOrderEvent = async (event) => event, sellService = null, coordinator = null, slo = null } = {}) {
-    Object.assign(this, { projection, account, readyGate, queue, clock, timers, watchdogMs, onWatchdog, onMarketEvent, onOrderEvent, sellService, coordinator, slo }); this.pendingBuy = new Map(); this.activeBuy = new Set(); this.watchdog = null;
+    Object.assign(this, { projection, account, readyGate, queue, clock, timers, watchdogMs, onWatchdog, onMarketEvent, onOrderEvent, sellService, coordinator, slo }); this.watchdog = null;
   }
   receiveTicker(row) {
     const started = this.clock.nowMs();
@@ -123,9 +123,13 @@ export class TradingEngine {
     this.slo?.increment("queue_dropped_sell");
     return false;
   }
-  async consumeOne() {
+  takeOne() {
     const event = this.queue.take(this.clock.nowMs()); if (!event) return null;
     if (Number.isFinite(event.enqueuedAt)) this.slo?.record("queue_wait", event.enqueuedAt);
+    return event;
+  }
+  async dispatch(event) {
+    if (!event) return null;
     if (event.type === "SELL_BREACH" || event.type === "SELL_PROTECTION") {
       try {
         const result = await this.sellService.consume(event);
@@ -140,12 +144,8 @@ export class TradingEngine {
     if (event.type === "ticker" || event.type === "market-recheck") return this.onMarketEvent(event);
     return event;
   }
-  protectInstrument(instId) { this.pendingBuy.delete(instId); return this.activeBuy.has(instId); }
-  queueBuy(intent) { if (this.activeBuy.has(intent.instId)) return false; const current = this.pendingBuy.get(intent.instId); if (!current || intent.generation < current.generation || (intent.generation === current.generation && intent.eligibleSince <= current.eligibleSince)) this.pendingBuy.set(intent.instId, intent); return true; }
-  takeBuyBatch(limit = 5) { return [...this.pendingBuy.values()].sort((a, b) => a.generation - b.generation || a.eligibleSince - b.eligibleSince || a.instId.localeCompare(b.instId)).slice(0, limit); }
-  markBuyActive(instId) { this.pendingBuy.delete(instId); this.activeBuy.add(instId); }
-  markBuyTerminal(instId) { this.activeBuy.delete(instId); }
+  async consumeOne() { return this.dispatch(this.takeOne()); }
   startWatchdog() { if (!this.watchdog) this.watchdog = this.timers.setInterval(() => this.onWatchdog(this.snapshot()), this.watchdogMs); }
   stopWatchdog() { if (this.watchdog) this.timers.clearInterval(this.watchdog); this.watchdog = null; }
-  snapshot() { return { ready: this.readyGate.snapshot(), pendingBuy: this.pendingBuy.size, activeBuy: this.activeBuy.size, queue: this.queue.size }; }
+  snapshot() { return { ready: this.readyGate.snapshot(), queue: this.queue.size }; }
 }

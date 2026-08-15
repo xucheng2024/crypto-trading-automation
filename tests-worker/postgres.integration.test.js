@@ -461,6 +461,28 @@ test("temporary PostgreSQL enforces P1-B invariants", { timeout: 60_000 }, async
       assert.deepEqual((await db.admin.query("SELECT state,reservation_state FROM order_attempts WHERE cl_ord_id='p3-partial-exit'")).rows[0], { state: "SETTLED", reservation_state: "RELEASED" });
     });
 
+    await t.test("P3 dust remainder converges to DUST_PENDING through the real coordinator and repository, not an infinite retry", async () => {
+      const accountId = "p3-dust-real"; const instId = "DUST-USDT"; const baseCcy = "DUST";
+      const now = { nowMs: () => 1_000 }; const market = new MarketProjection({ clock: now }); const account = new AccountCapitalSnapshot({ clock: now }); const ready = new ReadyGate();
+      for (const key of ready.required) ready.set(key, true); account.update({ ts: 1_000, totalEq: "100", adjEq: "100" });
+      market.updateInstrument({ instId, ts: 1, state: "live", tickSz: "0.01", lotSz: "0.1", minSz: "0.1", base: baseCcy });
+      await state.insertFill(db.admin, { accountId, instId, baseCcy, tradeId: "dust-real", billId: "1", source: "SYSTEM", side: "BUY", fillSize: "0.05", fillTime: 1, holdHours: "24", strategyConfigHash: "cfg", sellTime: 0, sellState: "WAITING" });
+      const seeded = (await db.admin.query("SELECT version FROM filled_orders WHERE trade_id='dust-real'")).rows[0];
+      const telemetry = []; let availCalls = 0;
+      const coordinator = new OrderCoordinator({ transaction: (fn) => tx(db.admin, fn), orders, state, market, account, readyGate: ready, ownerGuard: { isHeld: () => true }, mode: () => "EXIT_ONLY", clock: now,
+        config: { accountId, orderVersion: "p3", strategyTag: "P3", orderExpiryMs: 1_000, accountFreshMs: 10_000, quoteFreshMs: 10_000 },
+        transport: { maxAvailSize: async () => { availCalls += 1; return [{ instId, availSell: "0.05" }]; } }, telemetry: (event) => telemetry.push(event) });
+      coordinator.enqueue({ intent: "SELL", accountId, instId, baseCcy, sourceBuyTradeId: "dust-real", remainingSize: "0.05", fillVersion: seeded.version, sellTime: 0, availableBase: "0.05", bidPx: "1" });
+      assert.equal((await coordinator.drainOnce()).reason, "NO_ELIGIBLE");
+      assert.equal(coordinator.pending.SELL.size, 0, "the dust intent must not stay in the hot pending map");
+      assert.equal((await db.admin.query("SELECT sell_state FROM filled_orders WHERE trade_id='dust-real'")).rows[0].sell_state, "DUST_PENDING", "real markDust SQL must actually match the row, not just receive the right arguments");
+      assert.equal((await db.admin.query("SELECT count(*)::int AS count FROM order_attempts WHERE account_id=$1", [accountId])).rows[0].count, 0, "a dust remainder never reaches order submission");
+      assert.equal(telemetry.some((event) => event.reason === "DUST_CAS_LOST_RETRY"), false, "a real markDust hit must not fall through to the CAS-lost retry path");
+      assert.equal(availCalls, 1, "resolving dust once must not trigger a second maxAvailSize call on the same tick");
+      assert.deepEqual(await coordinator.drainOnce(), { submitted: false, reason: "EMPTY" });
+      assert.equal(availCalls, 1, "an already-DUST_PENDING fill must not be re-driven on the next tick");
+    });
+
     await t.test("P3 account SELL releases only PREPARED exits and waits for the smaller SPOT/MARGIN fence", async () => {
       const accountId = "p3-manual"; const telemetry = [];
       await tx(db.admin, async (client) => {
@@ -479,6 +501,24 @@ test("temporary PostgreSQL enforces P1-B invariants", { timeout: 60_000 }, async
       assert.deepEqual(await service.allocateSafeAccountSells({ accountId, baseCcy: "BTC" }), { allocated: 1 });
       assert.equal((await db.admin.query("SELECT disposed_size FROM filled_orders WHERE trade_id='p3-manual-buy'")).rows[0].disposed_size, "1");
       assert.equal(telemetry.some((event) => event.reason === "PREPARED_EXIT_NOT_CREATED"), true);
+    });
+
+    await t.test("P3 reconcileAll automatically allocates a watermark-safe PENDING ACCOUNT SELL, with no manual allocateSafeAccountSells call", async () => {
+      const accountId = "p3-auto-alloc"; const instId = "BTC-USDT"; const baseCcy = "BTC";
+      await tx(db.admin, async (client) => {
+        await state.insertFill(client, { accountId, instId, baseCcy, tradeId: "auto-buy", billId: "1", source: "SYSTEM", side: "BUY", fillSize: "1", fillTime: 10, holdHours: "24", strategyConfigHash: "cfg", sellTime: 11, sellState: "WAITING" });
+        await state.insertFill(client, { accountId, instId, baseCcy, tradeId: "auto-sell", billId: "2", source: "ACCOUNT", side: "SELL", fillSize: "1", fillTime: 20, allocationState: "PENDING" });
+        await orders.upsertWatermark(client, { accountId, instType: "SPOT", endpoint: "fills", watermark: 30, overlapBegin: 0, healthy: true });
+        await orders.upsertWatermark(client, { accountId, instType: "MARGIN", endpoint: "fills", watermark: 30, overlapBegin: 0, healthy: true });
+      });
+      const service = new ReconciliationService({ ownerGuard: { isHeld: () => true, onLost: () => {} }, readyGate: new ReadyGate(), safetyWaitMs: 0, transaction: (fn) => tx(db.admin, fn), state, orders, transport: {},
+        ownership: { accountId, managedAfter: 0, enabledInstIds: [instId] } });
+      // Neither this test nor production-composition.js's reconcile()/recover() ever calls
+      // allocateSafeAccountSells directly — reconcileAll must sweep every base with a PENDING
+      // ACCOUNT SELL on its own, or a manual sell permanently blocks that base's SYSTEM exits.
+      await service.reconcileAll({ accountId, attempts: [], watermarks: [] });
+      assert.deepEqual((await db.admin.query("SELECT disposed_size,sell_state FROM filled_orders WHERE trade_id='auto-buy'")).rows[0], { disposed_size: "1", sell_state: "SOLD" });
+      assert.equal((await db.admin.query("SELECT allocation_state FROM filled_orders WHERE trade_id='auto-sell'")).rows[0].allocation_state, "APPLIED");
     });
 
     await t.test("P3 unified PG protection orchestrator queues one durable fill-level DELIST without shared-base excess", async () => {
