@@ -6,6 +6,7 @@ set -euo pipefail
 
 api="https://api.github.com/repos/${GITHUB_REPOSITORY}"
 repository_url="https://github.com/${GITHUB_REPOSITORY}"
+runner_name="crypto-remote-${HOSTNAME:0:48}"
 registration_token="$(curl --fail --silent --show-error --request POST \
   --header 'Accept: application/vnd.github+json' \
   --header "Authorization: Bearer ${GITHUB_RUNNER_PAT}" \
@@ -20,7 +21,7 @@ mkdir -p _work
 ./config.sh --unattended --ephemeral --disableupdate \
   --url "$repository_url" \
   --token "$registration_token" \
-  --name "crypto-remote-${HOSTNAME}" \
+  --name "$runner_name" \
   --labels "crypto-remote-migration" \
   --work "_work"
 

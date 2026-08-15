@@ -109,7 +109,7 @@ test("P4 self-hosted migration runner is VNet-integrated, ephemeral and secret-s
   assert.match(bicep, /managedEnvironmentId: environmentId/); assert.match(bicep, /minReplicas: 1, maxReplicas: 1/);
   assert.match(bicep, /userAssignedIdentities/); assert.match(bicep, /identity: registryIdentityId/); assert.doesNotMatch(bicep, /roleAssignments/);
   assert.match(bicep, /GITHUB_RUNNER_PAT', secretRef: 'github-runner-pat'/); assert.doesNotMatch(bicep, /ingress:/);
-  assert.match(entrypoint, /--ephemeral --disableupdate/); assert.match(entrypoint, /unset GITHUB_RUNNER_PAT/); assert.match(entrypoint, /rm -rf _work/);
+  assert.match(entrypoint, /--ephemeral --disableupdate/); assert.match(entrypoint, /unset GITHUB_RUNNER_PAT/); assert.match(entrypoint, /rm -rf _work/); assert.match(entrypoint, /HOSTNAME:0:48/);
   assert.match(dockerfile, /sha256sum --check --strict/); assert.match(dockerfile, /azure-cli gh/);
 });
 
