@@ -121,7 +121,10 @@ export class OrderCoordinator {
         const maxNotional = min(remainingTarget, intent.availBuy, this._remainingCapacity(intent.managedExposure ?? "0"));
         const feeMultiplier = add("1", TRADE_FEE_RATE);
         const size = roundToStep(divideDecimal(maxNotional, multiplyDecimal(executionPrice, feeMultiplier)), instrument.lotSz, "down");
-        if (compareDecimal(size, instrument.minSz) < 0) { this._emitBuyBlock(intent, "SIZING", "MINIMUM_SIZE", { availBuy: intent.availBuy, remainingCapacity: this._remainingCapacity(intent.managedExposure ?? "0"), plannedSize: size, minSize: instrument.minSz, notional: multiplyDecimal(size, executionPrice) }); continue; }
+        if (compareDecimal(size, instrument.minSz) < 0) {
+          const minimumCapacity = multiplyDecimal(multiplyDecimal(instrument.minSz, executionPrice), feeMultiplier);
+          this._emitBuyBlock(intent, "SIZING", "MINIMUM_SIZE", { availBuy: intent.availBuy, remainingCapacity: this._remainingCapacity(intent.managedExposure ?? "0"), availableCapacity: maxNotional, minimumCapacity, capacityGap: subtractDecimal(minimumCapacity, maxNotional), plannedSize: size, minSize: instrument.minSz, notional: multiplyDecimal(size, executionPrice), dailyLimitPrice: executionPrice }); continue;
+        }
         const executionRoute = this._executionRoute(intent);
         const executionMode = executionRoute ? "cross" : null;
         if (!executionMode) { this._emitBuyBlock(intent, "ROUTING", "EXECUTION_ROUTE_UNAVAILABLE"); continue; }

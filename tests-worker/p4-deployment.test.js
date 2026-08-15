@@ -82,6 +82,33 @@ test("P4 production roots and container have no legacy D1 runtime", async () => 
   assert.match(files[2], /TRADING_MODE=OFF/);
 });
 
+test("P4 production deployment overlaps independent work without weakening safety gates", async () => {
+  const workflow = await readFile(".github/workflows/production-deploy.yml", "utf8");
+  assert.match(workflow, /  migrate:\n    needs: validate\n/);
+  assert.match(workflow, /runs-on: \[self-hosted, linux, x64, crypto-remote-migration\]/);
+  assert.match(workflow, /  deploy_off:\n    needs: \[build, migrate\]\n/);
+  assert.match(workflow, /Require this run's image build before applying SQL/);
+  assert.match(workflow, /select\(\.name == "build"\) \| \.conclusion/);
+  assert.doesNotMatch(workflow, /api\.ipify|firewall-rule (create|delete)|github-migration-/);
+  assert.match(workflow, /  promote_full:[\s\S]+environment: production-full/);
+  assert.match(workflow, /\[ "\$state" = "RunningAtMaxScale Healthy" \]/);
+});
+
+test("P4 self-hosted migration runner is VNet-integrated, ephemeral and secret-scoped", async () => {
+  const [workflow, bicep, entrypoint, dockerfile] = await Promise.all([
+    readFile(".github/workflows/production-runner-bootstrap.yml", "utf8"),
+    readFile("infrastructure/bicep/github-runner.bicep", "utf8"),
+    readFile("infrastructure/runner/entrypoint.sh", "utf8"),
+    readFile("infrastructure/runner/Dockerfile", "utf8"),
+  ]);
+  assert.match(workflow, /environmentId="\$environment_id"/); assert.match(workflow, /secrets\.GH_RUNNER_PAT/);
+  assert.match(workflow, /Require the dedicated runner registration credential/); assert.match(workflow, /actions\/runners\?per_page=100/); assert.match(workflow, /\.status == "online"/);
+  assert.match(bicep, /managedEnvironmentId: environmentId/); assert.match(bicep, /minReplicas: 1, maxReplicas: 1/);
+  assert.match(bicep, /GITHUB_RUNNER_PAT', secretRef: 'github-runner-pat'/); assert.doesNotMatch(bicep, /ingress:/);
+  assert.match(entrypoint, /--ephemeral --disableupdate/); assert.match(entrypoint, /unset GITHUB_RUNNER_PAT/); assert.match(entrypoint, /rm -rf _work/);
+  assert.match(dockerfile, /sha256sum --check --strict/); assert.match(dockerfile, /azure-cli gh/);
+});
+
 test("P4 health endpoints distinguish liveness from global readiness", async () => {
   const server = createHealthServer({ liveness: () => true, readiness: () => false, readinessDetails: () => ({ ready: false, dependencies: { private: false } }) }, { port: 0 });
   await new Promise((resolve) => server.once("listening", resolve));

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { assessRuntime, classifyDecision, parseArgs, queryRows, summarizeDecisions, summarizeTrading, traceEvents } from "../scripts/azure-ops-summary.mjs";
+import { assessRuntime, classifyBlock, classifyDecision, parseArgs, queryRows, summarizeDecisions, summarizeTrading, traceEvents } from "../scripts/azure-ops-summary.mjs";
 
 test("Azure ops summary converts query tables and aggregates decisions", () => {
   assert.deepEqual(queryRows({ tables: [{ columns: [{ name: "reason" }, { name: "decisions" }], rows: [["WAIT", 2]] }] }), [{ reason: "WAIT", decisions: 2 }]);
@@ -24,6 +24,7 @@ test("Azure ops summary separates waiting, policy, opportunity, and safety block
   assert.equal(classifyDecision("SKIPPED_YESTERDAY_GAIN"), "policy");
   assert.equal(classifyDecision("BUY_QUEUED"), "opportunity");
   assert.equal(classifyDecision("QUOTE_STALE"), "blocked");
+  assert.equal(classifyBlock("QUOTE_STALE"), "LIKELY_RECOVERABLE"); assert.equal(classifyBlock("BREAKOUT_NOT_CONFIRMED"), "MARKET_MOVED"); assert.equal(classifyBlock("HARD_STOP"), "SAFETY_BOUNDARY");
   const decisions = traceEvents([
     { timestamp: "2", message: "trading_decision QUOTE_STALE", customDimensions: JSON.stringify({ instId: "BTC-USDT", reason: "QUOTE_STALE", last: "1", breakoutPrice: "0.9" }) },
     { timestamp: "1", message: "trading_decision PRICE_OUTSIDE", customDimensions: { instId: "ETH-USDT", reason: "PRICE_OUTSIDE" } },
@@ -35,6 +36,15 @@ test("Azure ops summary separates waiting, policy, opportunity, and safety block
   assert.equal(trading.blocked[0].breakoutGap, "0.1");
   assert.equal(trading.blocked[0].apiBoundary, "PRE_API_STRATEGY_DECISION"); assert.equal(trading.executions[0].apiBoundary, "DB_RESERVED_BEFORE_API");
   assert.equal(trading.attemptTimelines.length, 2); assert.deepEqual(trading.attemptTimelines.find((row) => row.decisionId === "D1").timeline.map((event) => event.stage), ["PERSISTED"]);
+  assert.deepEqual(trading.blockClasses, { LIKELY_RECOVERABLE: 2, MARKET_MOVED: 0, SAFETY_BOUNDARY: 0 }); assert.deepEqual(trading.blockStages, { PLANNER: 1, AVAILABILITY: 1 });
+});
+
+test("Azure ops summary calculates the smallest exact capacity gap", () => {
+  const trading = summarizeTrading([], [], new Map(), [], [
+    { timestamp: "1", stage: "SIZING", reason: "MINIMUM_SIZE", instId: "BTC-USDT", availableCapacity: "3.7", minimumCapacity: "10", capacityGap: "6.3" },
+    { timestamp: "2", stage: "SIZING", reason: "MINIMUM_SIZE", instId: "ETH-USDT", availableCapacity: "1", minimumCapacity: "10", capacityGap: "9" },
+  ]);
+  assert.equal(trading.minimumCapacityGap, "6.3"); assert.deepEqual(trading.blockClasses, { LIKELY_RECOVERABLE: 0, MARKET_MOVED: 0, SAFETY_BOUNDARY: 2 }); assert.deepEqual(trading.blockStages, { SIZING: 2 });
 });
 
 test("Azure ops summary links one BUY from candidate through API and fill", () => {

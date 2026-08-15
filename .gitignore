@@ -70,6 +70,8 @@ jspm_packages/
 .npm
 migration-export*.sql
 infrastructure/bicep/parameters.p5.json
+infrastructure/bicep/main.json
+infrastructure/bicep/github-runner.json
 
 # Optional eslint cache
 .eslintcache

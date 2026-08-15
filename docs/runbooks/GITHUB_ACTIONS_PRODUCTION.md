@@ -16,8 +16,9 @@ Create two Azure application registrations with GitHub OIDC federated
 credentials restricted to this repository and the listed environments:
 
 - deployment identity: ACR push and Container Apps update/revision permissions;
-- migration identity: PostgreSQL migration DDL role plus only the Flexible
-  Server firewall-rule permission required for the short-lived runner rule.
+- migration identity: PostgreSQL migration DDL role. It does not require
+  Flexible Server firewall-rule permission because migrations run from the
+  VNet-integrated self-hosted runner through the existing NAT allowlist.
 
 Create GitHub repository secrets:
 
@@ -25,6 +26,10 @@ Create GitHub repository secrets:
 - `AZURE_MIGRATION_CLIENT_ID`
 - `AZURE_TENANT_ID`
 - `AZURE_SUBSCRIPTION_ID`
+- `GH_RUNNER_PAT` — a dedicated fine-grained token restricted to this
+  repository with Repository Administration read/write solely so the runner
+  can exchange it for short-lived registration tokens. Do not reuse a personal
+  general-purpose CLI token.
 
 Create GitHub repository variables (none contains a password):
 
@@ -42,7 +47,15 @@ migrations or an OFF rollout.
 
 The migration identity must be created as a PostgreSQL principal with the
 minimum schema DDL rights. Do not reuse the engine or maintenance identity.
-The temporary runner firewall rule is deleted with an `always` shell trap.
+
+Before the first production deployment, run **Production runner bootstrap**
+from a GitHub-hosted runner. It builds a SHA-256-verified GitHub Actions runner
+image, pushes it to ACR by immutable digest, and deploys a no-ingress,
+single-replica Container App in the existing Container Apps Environment. The
+runner therefore shares the production VNet and fixed NAT IP already allowed
+by PostgreSQL. It registers with the `crypto-remote-migration` label, accepts
+one job with `--ephemeral`, clears its work directory, exits, and is restarted
+by Container Apps. Rotate `GH_RUNNER_PAT` by rerunning the bootstrap workflow.
 
 ## Use
 
@@ -60,8 +73,9 @@ tests, reopening the database firewall, or reapplying migrations.
 Production deploy requires a successful `CI` run for the exact commit instead
 of repeating the suite. Images tagged with the same commit are reused. The
 PostgreSQL server records the reviewed migration-set fingerprint after a
-successful application; unchanged sets skip dependency installation and the
-short-lived firewall cycle.
+successful application; unchanged sets skip dependency installation. A
+changed migration waits for the same workflow run's image build to succeed
+before SQL is applied.
 
 `scripts/apply-postgres-migrations.mjs` stores a SHA-256 hash for each reviewed
 migration in `schema_migrations`. A changed historical migration fails closed;

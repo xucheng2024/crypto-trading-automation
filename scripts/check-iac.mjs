@@ -2,13 +2,18 @@ import { readFile } from "node:fs/promises";
 import { spawnSync } from "node:child_process";
 const root = await readFile("infrastructure/bicep/main.bicep", "utf8");
 const files = await Promise.all(["network", "registry", "keyvault", "postgres", "observability", "apps", "alerts"].map((n) => readFile(`infrastructure/bicep/modules/${n}.bicep`, "utf8")));
-const text = [root, ...files].join("\n");
+const [runnerBicep, runnerEntrypoint, runnerDockerfile] = await Promise.all(["infrastructure/bicep/github-runner.bicep", "infrastructure/runner/entrypoint.sh", "infrastructure/runner/Dockerfile"].map((file) => readFile(file, "utf8")));
+const text = [root, ...files, runnerBicep].join("\n");
 const [instrumentArtifact, strategyArtifact] = await Promise.all([
   readFile("infrastructure/config/p5-enabled-instruments.json", "utf8").then(JSON.parse),
   readFile("infrastructure/config/p5-strategy.json", "utf8").then(JSON.parse),
 ]);
 for (const word of ["managedEnvironments", "containerApps", "jobs", "natGateways", "flexibleServers", "flexibleServers/databases", "enableRbacAuthorization: true", "adminUserEnabled: false", "name: 'TRADING_MODE', value: 'OFF'", "KEY_VAULT_URI", "POSTGRES_URL", "OKX_INSTRUMENTS", "MANAGED_FILL_START_MS", "STRATEGY_CONFIG_JSON", "MAINTENANCE_ADAPTER_MODULE", "secretRef: 'appinsights-connection-string'", "sha256", "activeDirectoryAuth: 'Enabled'", "passwordAuth: 'Disabled'", "flexibleServers/administrators", "roleAssignments", "AcrPull", "keyVaultSecretsUserRole", "monitoringReaderRole", "cronExpression: '5 0 * * *'", "budgetContactEmails", "dailyQuotaGb", "actionGroups", "metricAlerts", "scheduledQueryRules", "engine-restart", "postgres-storage-70", "postgres-storage-85-backup-ha", "maintenance-job-failure", "nat-anomaly", "keyvault-anomaly", "acr-anomaly", "ready-false", "owner-recovering", "unknown-orders", "risk-halt", "exit-backlog", "pending-sell-watermark", "appinsights-ingestion-70", "appinsights-ingestion-90", "Standard_B1ms", "highAvailabilityMode", "storageSizeGb", "skuName: acrSku", "cpu: json('0.25')", "memory: '0.5Gi'"]) if (!text.includes(word) && !root.includes(word)) throw new Error(`IaC control missing: ${word}`);
 if (/name: 'APPLICATIONINSIGHTS_CONNECTION_STRING', value: applicationInsightsConnectionString/.test(text)) throw new Error("App Insights connection string must use a Container Apps secretRef");
+for (const control of ["managedEnvironmentId: environmentId", "minReplicas: 1, maxReplicas: 1", "secretRef: 'github-runner-pat'", "AcrPull"]) if (!runnerBicep.includes(control)) throw new Error(`GitHub runner control missing: ${control}`);
+if (runnerBicep.includes("ingress:") || /GITHUB_RUNNER_PAT', value:/.test(runnerBicep)) throw new Error("GitHub runner must have no ingress and must consume PAT through secretRef");
+for (const control of ["--ephemeral", "--disableupdate", "unset GITHUB_RUNNER_PAT", "rm -rf _work"]) if (!runnerEntrypoint.includes(control)) throw new Error(`ephemeral runner control missing: ${control}`);
+if (!runnerDockerfile.includes("sha256sum --check --strict")) throw new Error("GitHub runner archive must be SHA-256 verified");
 for (const forbidden of ["privateEndpoints", "privateDnsZones", "serviceBus", "redis", "Microsoft.Storage", "administratorLoginPassword", "replace-at-deploy", ":latest"]) if (text.toLowerCase().includes(forbidden.toLowerCase())) throw new Error(`forbidden resource or secret: ${forbidden}`);
 if (!root.includes("imageDigest") || !root.includes("@sha256:")) throw new Error("image digest is not enforced");
 if (text.includes("maintenanceVaultRead") || text.includes("maintenance") && text.includes("keyVaultSecretsUserRole") && !text.includes("engineVaultRead")) throw new Error("maintenance Key Vault boundary violated");

@@ -1,7 +1,7 @@
 import { spawnSync } from "node:child_process";
 import { readFile, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
-import { subtractDecimal } from "../src/decimal.js";
+import { compareDecimal, subtractDecimal } from "../src/decimal.js";
 
 function run(command, args) {
   const result = spawnSync(command, args, { encoding: "utf8", maxBuffer: 4 * 1024 * 1024 });
@@ -45,6 +45,15 @@ export function classifyDecision(reason) {
   return "blocked";
 }
 
+const RECOVERABLE_REASONS = new Set(["QUOTE_STALE", "CANDLE_STALE", "CLOCK_SYNC_STALE", "NOT_READY", "MARKET", "MAX_AVAIL_FAILED", "INSUFFICIENT_FUNDS_WAIT_RISK_VERSION", "EXECUTION_ROUTE_UNAVAILABLE"]);
+const MARKET_MOVED_REASONS = new Set(["BREAKOUT_NOT_CONFIRMED"]);
+
+export function classifyBlock(reason) {
+  if (RECOVERABLE_REASONS.has(reason)) return "LIKELY_RECOVERABLE";
+  if (MARKET_MOVED_REASONS.has(reason)) return "MARKET_MOVED";
+  return "SAFETY_BOUNDARY";
+}
+
 export function traceEvents(rows) {
   return rows.map((row) => {
     let dimensions = row.customDimensions ?? {};
@@ -68,7 +77,7 @@ export function summarizeTrading(decisionEvents, lifecycleEvents, routeByInst = 
     if (left === undefined || right === undefined) return undefined;
     try { return subtractDecimal(left, right); } catch { return undefined; }
   };
-  const detail = (event) => {
+  const detail = (event, isBlock = classifyDecision(event.reason) === "blocked" || event.type === "block_evidence") => {
     const apiBoundary = event.reason === "BUY_QUEUE_REJECTED" ? "COORDINATOR_QUEUE_REJECTED" : "PRE_API_STRATEGY_DECISION";
     return {
       timestamp: event.timestamp, decisionId: event.decisionId, clOrdId: event.clOrdId, stage: event.stage, instId: event.instId, reason: event.reason, route: event.executionRoute ?? routeByInst.get(event.instId), apiBoundary: event.stage ? `PRE_API_${event.stage}` : apiBoundary,
@@ -78,13 +87,21 @@ export function summarizeTrading(decisionEvents, lifecycleEvents, routeByInst = 
       limitHeadroom: gap(event.dailyLimitPrice, event.last), askLimitGap: gap(event.askPx, event.dailyLimitPrice),
       quoteAgeMs: event.quoteAgeMs, candleAgeMs: event.candleAgeMs, availBuy: event.availBuy,
       remainingCapacity: event.remainingCapacity, plannedSize: event.plannedSize, minSize: event.minSize,
+      availableCapacity: event.availableCapacity, minimumCapacity: event.minimumCapacity, capacityGap: event.capacityGap,
       adjustedEquity: event.adjustedEquity, managedExposure: event.managedExposure, riskVersion: event.riskVersion,
+      optimizationClass: isBlock ? classifyBlock(event.reason) : undefined,
     };
   };
-  const blocked = [...decisionEvents.filter((event) => classifyDecision(event.reason) === "blocked"), ...blockEvents].map(detail);
+  const blocked = [...decisionEvents.filter((event) => classifyDecision(event.reason) === "blocked"), ...blockEvents].map((event) => detail(event, true));
   const policy = [...latest.values()].filter((event) => classifyDecision(event.reason) === "policy").map(detail);
   const blockedReasons = {};
   for (const row of blocked) blockedReasons[row.reason] = (blockedReasons[row.reason] ?? 0) + 1;
+  const blockClasses = { LIKELY_RECOVERABLE: 0, MARKET_MOVED: 0, SAFETY_BOUNDARY: 0 };
+  const blockStages = {}; let minimumCapacityGap;
+  for (const row of blocked) {
+    blockClasses[row.optimizationClass] += 1; const stage = row.stage ?? "PLANNER"; blockStages[stage] = (blockStages[stage] ?? 0) + 1;
+    if (row.capacityGap !== undefined && (minimumCapacityGap === undefined || compareDecimal(row.capacityGap, minimumCapacityGap) < 0)) minimumCapacityGap = row.capacityGap;
+  }
   const clOrdDecision = new Map(lifecycleEvents.filter((event) => event.clOrdId && event.decisionId).map((event) => [event.clOrdId, event.decisionId]));
   const attempts = new Map();
   const appendAttempt = (event, stage) => {
@@ -112,7 +129,7 @@ export function summarizeTrading(decisionEvents, lifecycleEvents, routeByInst = 
       unknown: lifecycleEvents.filter((event) => event.reason === "BUY_UNKNOWN").length,
       notCreated: lifecycleEvents.filter((event) => event.reason === "BUY_NOT_CREATED").length,
     },
-    blocked, blockedReasons, policy, executions, attemptTimelines,
+    blocked, blockedReasons, blockClasses, blockStages, minimumCapacityGap, policy, executions, attemptTimelines,
   };
 }
 
@@ -266,6 +283,9 @@ export async function main(argv = process.argv.slice(2)) {
       const blockReasons = Object.entries(trading.blockedReasons).map(([reason, count]) => `${reason}=${count}`).join(", ") || "none";
       console.log(`Blocks: safety_events=${trading.blocked.length} current_safety=${trading.currentStates.blocked} current_policy=${trading.currentStates.policy}`);
       console.log(`Block reasons: ${blockReasons}`);
+      console.log(`Optimization: recoverable=${trading.blockClasses.LIKELY_RECOVERABLE} market_moved=${trading.blockClasses.MARKET_MOVED} safety_boundary=${trading.blockClasses.SAFETY_BOUNDARY}`);
+      console.log(`Stage coverage: ${Object.entries(trading.blockStages).map(([stage, count]) => `${stage}=${count}`).join(", ") || "none"}`);
+      console.log(`Minimum capacity gap: ${trading.minimumCapacityGap ?? "n/a"}`);
     }
     const evidence = (row) => [
       row.decisionId && `decision=${row.decisionId}`, row.clOrdId && `order=${row.clOrdId}`, row.stage && `stage=${row.stage}`,
@@ -273,9 +293,10 @@ export async function main(argv = process.argv.slice(2)) {
       row.breakoutGap !== undefined && `breakout_gap=${row.breakoutGap}`, row.priceLimitGap !== undefined && `price_limit_gap=${row.priceLimitGap}`, row.limitHeadroom !== undefined && `limit_headroom=${row.limitHeadroom}`,
       row.quoteAgeMs !== undefined && `quote_age_ms=${row.quoteAgeMs}`, row.candleAgeMs !== undefined && `candle_age_ms=${row.candleAgeMs}`,
       row.availBuy !== undefined && `avail_buy=${row.availBuy}`, row.remainingCapacity !== undefined && `remaining_capacity=${row.remainingCapacity}`,
+      row.availableCapacity !== undefined && `available_capacity=${row.availableCapacity}`, row.minimumCapacity !== undefined && `minimum_capacity=${row.minimumCapacity}`, row.capacityGap !== undefined && `capacity_gap=${row.capacityGap}`,
       row.plannedSize !== undefined && `planned_size=${row.plannedSize}`, row.minSize !== undefined && `min_size=${row.minSize}`,
       row.adjustedEquity !== undefined && `equity=${row.adjustedEquity}`, row.managedExposure !== undefined && `exposure=${row.managedExposure}`, row.riskVersion !== undefined && `risk_version=${row.riskVersion}`,
-      `boundary=${row.apiBoundary}`,
+      `class=${row.optimizationClass}`, `boundary=${row.apiBoundary}`,
     ].filter(Boolean).join(" ");
     if (options.details && options.command !== "activity") {
       console.log("Blocked details:");

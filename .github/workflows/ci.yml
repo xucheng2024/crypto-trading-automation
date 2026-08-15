@@ -46,7 +46,10 @@ jobs:
       - run: npm test
       - run: npm run test:iac
       - name: Compile Bicep infrastructure
-        run: az bicep install && az bicep build --file infrastructure/bicep/main.bicep
+        run: |
+          az bicep install
+          az bicep build --file infrastructure/bicep/main.bicep
+          az bicep build --file infrastructure/bicep/github-runner.bicep
       - run: npm run migrate:fingerprint
       - run: npm run test:container
       # `npm test` already executes the real PostgreSQL integration suite;
