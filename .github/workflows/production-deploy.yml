@@ -99,6 +99,10 @@ jobs:
     environment: production-migrate
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
       - uses: azure/login@v2
         with:
           client-id: ${{ secrets.AZURE_MIGRATION_CLIENT_ID }}
@@ -120,11 +124,6 @@ jobs:
             echo "changed=$changed"
           } >> "$GITHUB_OUTPUT"
           echo "Migration set changed: $changed"
-      - if: ${{ steps.plan.outputs.changed == 'true' }}
-        uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
       - if: ${{ steps.plan.outputs.changed == 'true' }}
         run: npm ci --omit=dev
       - if: ${{ steps.plan.outputs.changed == 'true' }}

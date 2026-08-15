@@ -86,6 +86,7 @@ test("P4 production deployment overlaps independent work without weakening safet
   const workflow = await readFile(".github/workflows/production-deploy.yml", "utf8");
   assert.match(workflow, /  migrate:\n    needs: validate\n/);
   assert.match(workflow, /runs-on: \[self-hosted, linux, x64, crypto-remote-migration\]/);
+  assert.ok(workflow.indexOf("uses: actions/setup-node@v4", workflow.indexOf("  migrate:")) < workflow.indexOf("- id: plan", workflow.indexOf("  migrate:")));
   assert.match(workflow, /  deploy_off:\n    needs: \[build, migrate\]\n/);
   assert.match(workflow, /Require this run's image build before applying SQL/);
   assert.match(workflow, /select\(\.name == "build"\) \| \.conclusion/);
