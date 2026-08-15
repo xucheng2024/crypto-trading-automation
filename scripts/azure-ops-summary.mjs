@@ -151,10 +151,57 @@ export function assessRuntime({ app, active, replicas, traffic, metric, expected
   return { healthy: Object.values(checks).every(Boolean), checks };
 }
 
+export function classifySevereTraces(rows, activeRevision) {
+  const traces = rows.map((row) => {
+    const activeInstance = !row.cloudRoleInstance || row.cloudRoleInstance === activeRevision || row.cloudRoleInstance.startsWith(`${activeRevision}-`);
+    const expectedTransition = !activeInstance && row.tradingMode === "OFF" && row.message === "owner_lost SESSION_ADVISORY_LOCK_LOST";
+    return { ...row, classification: expectedTransition ? "EXPECTED_OFF_TRANSITION" : activeInstance ? "CURRENT_OR_UNATTRIBUTED" : "INACTIVE_REVISION" };
+  });
+  return {
+    traces,
+    current: traces.filter((row) => row.classification === "CURRENT_OR_UNATTRIBUTED"),
+    inactive: traces.filter((row) => row.classification === "INACTIVE_REVISION"),
+    transitions: traces.filter((row) => row.classification === "EXPECTED_OFF_TRANSITION"),
+  };
+}
+
+export function summarizeDeployment(runInfo, jobs = [], pendingDeployments = []) {
+  const normalizedJobs = jobs.map((job) => ({
+    name: job.name, status: job.status, conclusion: job.conclusion, runner: job.runner_name || null,
+    failedSteps: (job.steps ?? []).filter((step) => step.conclusion === "failure").map((step) => step.name),
+  }));
+  const failedJobs = normalizedJobs.filter((job) => job.conclusion === "failure");
+  const state = runInfo.status !== "completed" ? "IN_PROGRESS" : runInfo.conclusion === "success" ? "SUCCEEDED" : "FAILED";
+  return {
+    id: runInfo.id, status: runInfo.status, conclusion: runInfo.conclusion, commit: runInfo.head_sha,
+    url: runInfo.html_url, createdAt: runInfo.created_at, jobs: normalizedJobs, failedJobs,
+    pendingEnvironments: pendingDeployments.map((row) => row.environment?.name).filter(Boolean),
+    state, healthy: state !== "FAILED",
+  };
+}
+
+export function summarizeRunner(app, replicas = [], githubRunners = [], secretNames = []) {
+  const containers = replicas.flatMap((replica) => replica.properties?.containers ?? []);
+  const matched = githubRunners.filter((runner) => runner.labels?.some((label) => label.name === "crypto-remote-migration"));
+  const checks = {
+    secretConfigured: secretNames.includes("GH_RUNNER_PAT"),
+    provisioned: app.properties?.provisioningState === "Succeeded",
+    running: app.properties?.runningStatus === "Running",
+    replicasReady: containers.length > 0 && containers.every((container) => container.ready && container.runningState === "Running"),
+    githubOnline: matched.some((runner) => runner.status === "online"),
+  };
+  return {
+    healthy: Object.values(checks).every(Boolean), checks, revision: app.properties?.latestRevisionName,
+    replicas: replicas.length, readyContainers: containers.filter((container) => container.ready).length,
+    restarts: containers.reduce((sum, container) => sum + Number(container.restartCount ?? 0), 0),
+    github: matched.map((runner) => ({ name: runner.name, status: runner.status, busy: runner.busy })),
+  };
+}
+
 export function parseArgs(argv) {
   const args = [...argv];
-  const options = { command: "report", minutes: 15, json: false, details: false, expectedMode: null, since: null, sinceLast: false };
-  if (["report", "snapshot", "activity", "blocks"].includes(args[0])) options.command = args.shift();
+  const options = { command: "report", minutes: 15, json: false, details: false, expectedMode: null, since: null, sinceLast: false, runId: null };
+  if (["report", "snapshot", "activity", "blocks", "deploy", "runner"].includes(args[0])) options.command = args.shift();
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index];
     if (arg === "--json") options.json = true;
@@ -164,14 +211,15 @@ export function parseArgs(argv) {
       const value = args[++index]; if (!value || Number.isNaN(Date.parse(value))) throw new Error("--since requires an ISO timestamp");
       options.since = new Date(value).toISOString();
     }
-    else if (["--minutes", "--resource-group", "--app", "--app-insights", "--expect-mode"].includes(arg)) {
+    else if (["--minutes", "--resource-group", "--app", "--app-insights", "--expect-mode", "--run-id"].includes(arg)) {
       const value = args[++index]; if (!value) throw new Error(`${arg} requires a value`);
-      const key = { "--minutes": "minutes", "--resource-group": "resourceGroup", "--app": "app", "--app-insights": "appInsights", "--expect-mode": "expectedMode" }[arg];
-      options[key] = arg === "--minutes" ? Number(value) : value;
+      const key = { "--minutes": "minutes", "--resource-group": "resourceGroup", "--app": "app", "--app-insights": "appInsights", "--expect-mode": "expectedMode", "--run-id": "runId" }[arg];
+      options[key] = ["--minutes", "--run-id"].includes(arg) ? Number(value) : value;
     } else throw new Error(`Unknown argument: ${arg}`);
   }
   if (!Number.isInteger(options.minutes) || options.minutes < 1 || options.minutes > 1440) throw new Error("--minutes must be an integer from 1 to 1440");
   if (options.expectedMode && !["OFF", "FULL", "EXIT_ONLY"].includes(options.expectedMode)) throw new Error("--expect-mode must be OFF, FULL, or EXIT_ONLY");
+  if (options.runId !== null && (!Number.isSafeInteger(options.runId) || options.runId < 1)) throw new Error("--run-id must be a positive integer");
   if (options.since && options.sinceLast) throw new Error("Use only one of --since or --since-last");
   return options;
 }
@@ -184,10 +232,100 @@ function appInsightsQuery(resourceGroup, appInsights, query) {
 
 function compactDigest(image = "") { return image.includes("@sha256:") ? `sha256:${image.split("@sha256:")[1].slice(0, 12)}` : image; }
 
+function collectProductionRuntime(resourceGroup, appName) {
+  const app = azJson(["containerapp", "show", "--resource-group", resourceGroup, "--name", appName]);
+  const active = azJson(["containerapp", "revision", "list", "--resource-group", resourceGroup, "--name", appName]).filter((revision) => revision.properties?.active);
+  const revision = active[0]; const revisionName = revision?.name;
+  const replicas = revisionName ? azJson(["containerapp", "replica", "list", "--resource-group", resourceGroup, "--name", appName, "--revision", revisionName]) : [];
+  const traffic = azJson(["containerapp", "ingress", "traffic", "show", "--resource-group", resourceGroup, "--name", appName]);
+  const containers = replicas.flatMap((replica) => replica.properties?.containers ?? []); const container = revision?.properties?.template?.containers?.[0];
+  const checks = {
+    provisioned: app.properties?.provisioningState === "Succeeded", running: app.properties?.runningStatus === "Running", singleActiveRevision: active.length === 1,
+    revisionHealthy: revision?.properties?.healthState === "Healthy" && revision?.properties?.runningState === "RunningAtMaxScale",
+    traffic: traffic.reduce((sum, row) => sum + Number(row.weight ?? 0), 0) === 100,
+    replicasReady: containers.length > 0 && containers.every((row) => row.ready && row.runningState === "Running"),
+  };
+  return {
+    healthy: Object.values(checks).every(Boolean), checks, revision: revisionName,
+    mode: container?.env?.find((row) => row.name === "TRADING_MODE")?.value, image: compactDigest(container?.image),
+    trafficWeight: traffic.reduce((sum, row) => sum + Number(row.weight ?? 0), 0), replicas: replicas.length,
+    readyContainers: containers.filter((row) => row.ready).length, restarts: containers.reduce((sum, row) => sum + Number(row.restartCount ?? 0), 0),
+  };
+}
+
+function collectRunnerSummary(resourceGroup, appName, repository) {
+  const runnerName = appName.endsWith("-engine") ? `${appName.slice(0, -"-engine".length)}-github-runner` : `${appName}-github-runner`;
+  const app = azJson(["containerapp", "show", "--resource-group", resourceGroup, "--name", runnerName]);
+  const revision = app.properties?.latestRevisionName;
+  const replicas = revision ? azJson(["containerapp", "replica", "list", "--resource-group", resourceGroup, "--name", runnerName, "--revision", revision]) : [];
+  const githubRunners = runJson("gh", ["api", `repos/${repository}/actions/runners?per_page=100`])?.runners ?? [];
+  const secretNames = (runJson("gh", ["secret", "list", "--repo", repository, "--json", "name"]) ?? []).map((row) => row.name);
+  return { name: runnerName, ...summarizeRunner(app, replicas, githubRunners, secretNames) };
+}
+
+function failedLogExcerpt(repository, runId) {
+  const lines = run("gh", ["run", "view", String(runId), "--repo", repository, "--log-failed"]).split("\n").map((line) => line.trim()).filter(Boolean);
+  const diagnostic = lines.filter((line) => /error|failed|failure|exit code|not found|denied|unauthori[sz]ed/i.test(line));
+  return (diagnostic.length ? diagnostic : lines).slice(-12);
+}
+
+async function runInfrastructureCommand(options, resourceGroup, appName) {
+  const repository = run("gh", ["repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"]);
+  const runnerName = appName.endsWith("-engine") ? `${appName.slice(0, -"-engine".length)}-github-runner` : `${appName}-github-runner`;
+  let runner;
+  try { runner = collectRunnerSummary(resourceGroup, appName, repository); }
+  catch (error) {
+    runner = { name: runnerName, healthy: false, error: error.message, checks: { secretConfigured: false, provisioned: false, running: false, replicasReady: false, githubOnline: false }, revision: null, replicas: 0, readyContainers: 0, restarts: 0, github: [] };
+  }
+  if (options.command === "runner") {
+    const summary = { command: "runner", healthy: runner.healthy, target: { resourceGroup, app: runner.name, repository }, runner };
+    if (options.json) console.log(JSON.stringify(summary));
+    else {
+      const github = runner.github.map((row) => `${row.status}${row.busy ? "/busy" : "/idle"}`).join(",") || "missing";
+      console.log(`Runner: ${summary.healthy ? "HEALTHY" : "UNHEALTHY"} | azure=${runner.checks.provisioned && runner.checks.running ? "running" : "not-ready"} github=${github}`);
+      console.log(`Revision: ${runner.revision} | replicas=${runner.replicas} ready=${runner.readyContainers} restarts=${runner.restarts} secret=${runner.checks.secretConfigured ? "configured" : "missing"}`);
+      if (runner.error) console.log(`Error: ${runner.error}`);
+    }
+    if (!summary.healthy) process.exitCode = 2;
+    return summary;
+  }
+
+  const latest = runJson("gh", ["api", `repos/${repository}/actions/workflows/production-deploy.yml/runs?event=workflow_dispatch&per_page=1`])?.workflow_runs?.[0];
+  const runInfo = options.runId ? runJson("gh", ["api", `repos/${repository}/actions/runs/${options.runId}`]) : latest;
+  if (!runInfo) throw new Error("No production deployment run found");
+  if (runInfo.name !== "Production deploy" && !String(runInfo.path ?? "").endsWith("/production-deploy.yml")) throw new Error(`Run ${runInfo.id} is not a production deployment`);
+  const jobs = runJson("gh", ["api", `repos/${repository}/actions/runs/${runInfo.id}/jobs?per_page=100`])?.jobs ?? [];
+  const pending = runInfo.status === "completed" ? [] : runJson("gh", ["api", `repos/${repository}/actions/runs/${runInfo.id}/pending_deployments`]) ?? [];
+  const deployment = summarizeDeployment(runInfo, jobs, pending);
+  let runtime;
+  try { runtime = collectProductionRuntime(resourceGroup, appName); }
+  catch (error) { runtime = { healthy: false, error: error.message, revision: null, mode: null, image: null, trafficWeight: 0, replicas: 0, readyContainers: 0, restarts: 0 }; }
+  const summary = { command: "deploy", healthy: deployment.healthy && runtime.healthy && runner.healthy, target: { resourceGroup, app: appName, repository }, deployment, runtime, runner };
+  if (options.details && deployment.failedJobs.length) summary.failedLogExcerpt = failedLogExcerpt(repository, runInfo.id);
+  if (options.json) console.log(JSON.stringify(summary));
+  else {
+    console.log(`Deployment: run=${deployment.id} result=${deployment.state} commit=${deployment.commit?.slice(0, 7)} overall_healthy=${summary.healthy}`);
+    console.log(`Jobs: ${deployment.jobs.map((job) => `${job.name}=${job.status}/${job.conclusion ?? "pending"}${job.runner ? `@${job.runner}` : ""}`).join(" ") || "none"}`);
+    console.log(`Pending approvals: ${deployment.pendingEnvironments.join(",") || "none"}`);
+    console.log(`Production: ${runtime.revision} | ${runtime.mode} | traffic=${runtime.trafficWeight}% replicas=${runtime.replicas} ready=${runtime.readyContainers} restarts=${runtime.restarts} image=${runtime.image}`);
+    if (runtime.error) console.log(`Production error: ${runtime.error}`);
+    console.log(`Runner: ${runner.healthy ? "healthy" : "unhealthy"} | github=${runner.github.map((row) => row.status).join(",") || "missing"} busy=${runner.github.some((row) => row.busy)}`);
+    if (runner.error) console.log(`Runner error: ${runner.error}`);
+    if (deployment.failedJobs.length) console.log(`Failures: ${deployment.failedJobs.map((job) => `${job.name}[${job.failedSteps.join(",") || "unknown step"}]`).join(" ")}`);
+    if (summary.failedLogExcerpt?.length) console.log(`Failed log: ${summary.failedLogExcerpt.join(" | ")}`);
+    console.log(`URL: ${deployment.url}`);
+  }
+  if (!summary.healthy) process.exitCode = 2;
+  return summary;
+}
+
 export async function main(argv = process.argv.slice(2)) {
   const options = parseArgs(argv);
   const queryStartedAt = new Date().toISOString();
   const checkpointPath = run("git", ["rev-parse", "--git-path", "azure-ops-last-check.json"]);
+  const resourceGroup = options.resourceGroup ?? run("gh", ["variable", "get", "AZURE_RESOURCE_GROUP"]);
+  const appName = options.app ?? run("gh", ["variable", "get", "CONTAINER_APP_NAME"]);
+  if (["deploy", "runner"].includes(options.command)) return runInfrastructureCommand(options, resourceGroup, appName);
   let checkpointFallback = false;
   if (options.sinceLast) {
     const checkpoint = await readFile(checkpointPath, "utf8").then(JSON.parse).catch(() => null);
@@ -196,8 +334,6 @@ export async function main(argv = process.argv.slice(2)) {
   }
   const timeFilter = options.since ? `timestamp >= datetime(${options.since})` : `timestamp > ago(${options.minutes}m)`;
   const windowLabel = options.since ? `since ${options.since}` : `${options.minutes}m`;
-  const resourceGroup = options.resourceGroup ?? run("gh", ["variable", "get", "AZURE_RESOURCE_GROUP"]);
-  const appName = options.app ?? run("gh", ["variable", "get", "CONTAINER_APP_NAME"]);
   const appInsights = options.appInsights ?? (appName.endsWith("-cae-engine") ? `${appName.slice(0, -"-cae-engine".length)}-ai` : null);
   if (!appInsights) throw new Error("Pass --app-insights when it cannot be derived from the Container App name");
 
@@ -212,7 +348,7 @@ export async function main(argv = process.argv.slice(2)) {
   const currentDecisionQuery = "traces | where timestamp > ago(24h) | where message startswith 'trading_decision ' | extend instId=tostring(customDimensions.instId) | summarize arg_max(timestamp, customDimensions) by instId";
   const lifecycleQuery = `traces | where ${timeFilter} | where message startswith 'order_lifecycle BUY_' or message startswith 'trade_lifecycle BUY_' | project timestamp, message, customDimensions | order by timestamp desc | take 1000`;
   const blockQuery = `traces | where ${timeFilter} | where message startswith 'block_evidence ' | project timestamp, message, customDimensions | order by timestamp desc | take 5000`;
-  const errorQuery = `traces | where ${timeFilter} | where severityLevel >= 3 | project timestamp, message | order by timestamp desc | take 10`;
+  const errorQuery = `traces | where ${timeFilter} | where severityLevel >= 3 | project timestamp, message, cloudRoleInstance=cloud_RoleInstance, tradingMode=tostring(customDimensions.tradingMode) | order by timestamp desc | take 10`;
   const metric = appInsightsQuery(resourceGroup, appInsights, metricQuery)[0] ?? null;
   const needDecisions = options.command !== "snapshot";
   const needCurrentDecisions = options.command === "report" || options.command === "blocks";
@@ -234,6 +370,7 @@ export async function main(argv = process.argv.slice(2)) {
   const trading = summarizeTrading(decisionEvents, lifecycleEvents, routeByInst, currentDecisionEvents, blockEvents);
   const assessment = assessRuntime({ app, active, replicas, traffic, metric, expectedMode: options.expectedMode });
   const revision = active[0]; const container = revision?.properties?.template?.containers?.[0];
+  const severe = classifySevereTraces(errors, revision?.name);
   const replicaContainers = replicas.flatMap((replica) => replica.properties?.containers ?? []);
   const summary = {
     command: options.command,
@@ -249,8 +386,8 @@ export async function main(argv = process.argv.slice(2)) {
     },
     telemetry: { ...metric, configuredInstruments: artifact.enabled_count, observedInstruments: decisions.instruments, decisions: decisions.decisions, reasons: decisions.reasons },
     trading,
-    severeTraces: errors,
-    riskSignals: errors.filter((row) => /HALT|READY_FALSE|WATCHDOG|UNKNOWN|OWNER_LOST|STALE/.test(row.message ?? "")),
+    severeTraces: severe.traces, currentSevereTraces: severe.current, inactiveSevereTraces: severe.inactive, transitionTraces: severe.transitions,
+    riskSignals: [...severe.current, ...severe.inactive].filter((row) => /HALT|READY_FALSE|WATCHDOG|UNKNOWN|OWNER_LOST|STALE/i.test(row.message ?? "")),
     checks: assessment.checks,
   };
 
@@ -270,12 +407,12 @@ export async function main(argv = process.argv.slice(2)) {
       console.log(`Decisions: ${topReasons}`);
       console.log(`Trading: opportunities=${trading.events.queued} prepared=${trading.events.prepared} submitted=${trading.events.submitted} settled=${trading.events.settled}`);
       console.log(`Current states: waiting=${trading.currentStates.waiting} policy=${trading.currentStates.policy} blocked=${trading.currentStates.blocked} opportunity=${trading.currentStates.opportunity}`);
-      console.log(`Severe traces: ${errors.length}${errors.length ? ` | ${errors.slice(0, 3).map((row) => row.message).join("; ")}` : ""}`);
+      console.log(`Severe traces: current=${severe.current.length} inactive=${severe.inactive.length} expected_transition=${severe.transitions.length}${severe.current.length || severe.inactive.length ? ` | ${[...severe.current, ...severe.inactive].slice(0, 3).map((row) => row.message).join("; ")}` : ""}`);
     } else if (options.command === "snapshot") {
       console.log(`Azure production: ${summary.healthy ? "HEALTHY" : "UNHEALTHY"}`);
       console.log(`Revision: ${summary.runtime.revision} | ${summary.runtime.mode} | ${summary.runtime.runningState}/${summary.runtime.healthState}`);
       console.log(`Runtime: traffic=${summary.runtime.trafficWeight}% replicas=${summary.runtime.replicas} ready=${summary.runtime.readyContainers} restarts=${summary.runtime.restarts} image=${summary.runtime.image}`);
-      console.log(`Signals: ready=${metric?.ready ?? "missing"} source_lag_p99=${metric?.sourceLagP99 ?? "?"}ms severe_sample=${errors.length} risk_signals=${summary.riskSignals.length} exit_backlog=${metric?.exitBacklog ?? "?"}`);
+      console.log(`Signals: ready=${metric?.ready ?? "missing"} source_lag_p99=${metric?.sourceLagP99 ?? "?"}ms severe_current=${severe.current.length} inactive_severe=${severe.inactive.length} expected_transition=${severe.transitions.length} risk_signals=${summary.riskSignals.length} exit_backlog=${metric?.exitBacklog ?? "?"}`);
     } else if (options.command === "activity") {
       console.log(`Activity: opportunities=${trading.events.queued} prepared=${trading.events.prepared} submitted=${trading.events.submitted} settled=${trading.events.settled} unknown=${trading.events.unknown} not_created=${trading.events.notCreated}`);
       console.log(`Decision activity: instruments=${decisions.instruments}/${artifact.enabled_count} | ${topReasons}`);

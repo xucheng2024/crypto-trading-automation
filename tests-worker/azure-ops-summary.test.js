@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { assessRuntime, classifyBlock, classifyDecision, parseArgs, queryRows, summarizeDecisions, summarizeTrading, traceEvents } from "../scripts/azure-ops-summary.mjs";
+import { assessRuntime, classifyBlock, classifyDecision, classifySevereTraces, parseArgs, queryRows, summarizeDecisions, summarizeDeployment, summarizeRunner, summarizeTrading, traceEvents } from "../scripts/azure-ops-summary.mjs";
 
 test("Azure ops summary converts query tables and aggregates decisions", () => {
   assert.deepEqual(queryRows({ tables: [{ columns: [{ name: "reason" }, { name: "decisions" }], rows: [["WAIT", 2]] }] }), [{ reason: "WAIT", decisions: 2 }]);
@@ -12,11 +12,40 @@ test("Azure ops summary converts query tables and aggregates decisions", () => {
   ]), { decisions: 6, instruments: 2, latest: "2026-01-01T00:01:00Z", reasons: { PRICE_OUTSIDE: 5, CANDLE_PENDING: 1 } });
 });
 
-test("Azure ops summary accepts report, activity, and blocks commands", () => {
+test("Azure ops summary accepts trading, deployment, and runner commands", () => {
   assert.deepEqual(parseArgs(["report", "--since-last"]).command, "report");
   assert.deepEqual(parseArgs(["snapshot", "--minutes", "15"]).command, "snapshot");
   assert.deepEqual(parseArgs(["activity", "--minutes", "60"]).command, "activity");
   assert.deepEqual(parseArgs(["blocks", "--details"]).command, "blocks");
+  assert.deepEqual(parseArgs(["deploy", "--run-id", "123"]).runId, 123);
+  assert.deepEqual(parseArgs(["runner", "--json"]).command, "runner");
+  assert.throws(() => parseArgs(["deploy", "--run-id", "0"]), /positive integer/);
+});
+
+test("Azure ops summary attributes expected OFF transition traces without hiding other revisions", () => {
+  const severe = classifySevereTraces([
+    { message: "owner_lost SESSION_ADVISORY_LOCK_LOST", tradingMode: "OFF", cloudRoleInstance: "engine--off-old-pod" },
+    { message: "watchdog WATCHDOG", tradingMode: "FULL", cloudRoleInstance: "engine--full-old-pod" },
+    { message: "ready_false READY_FALSE", tradingMode: "FULL", cloudRoleInstance: "engine--full-new-pod" },
+  ], "engine--full-new");
+  assert.equal(severe.transitions.length, 1); assert.equal(severe.inactive.length, 1); assert.equal(severe.current.length, 1);
+  assert.equal(severe.transitions[0].classification, "EXPECTED_OFF_TRANSITION");
+});
+
+test("Azure ops summary compacts workflow failures, approvals, and runner readiness", () => {
+  const deployment = summarizeDeployment(
+    { id: 7, status: "completed", conclusion: "failure", head_sha: "abc", html_url: "https://example/run/7" },
+    [{ name: "migrate", status: "completed", conclusion: "failure", runner_name: "runner-1", steps: [{ name: "Plan", conclusion: "failure" }] }],
+    [{ environment: { name: "production-full" } }],
+  );
+  assert.equal(deployment.healthy, false); assert.equal(deployment.state, "FAILED"); assert.deepEqual(deployment.failedJobs[0].failedSteps, ["Plan"]); assert.deepEqual(deployment.pendingEnvironments, ["production-full"]);
+  const runner = summarizeRunner(
+    { properties: { provisioningState: "Succeeded", runningStatus: "Running", latestRevisionName: "runner--1" } },
+    [{ properties: { containers: [{ ready: true, runningState: "Running", restartCount: 2 }] } }],
+    [{ name: "runner-1", status: "online", busy: false, labels: [{ name: "crypto-remote-migration" }] }],
+    ["GH_RUNNER_PAT"],
+  );
+  assert.equal(runner.healthy, true); assert.equal(runner.restarts, 2); assert.equal(runner.github[0].status, "online");
 });
 
 test("Azure ops summary separates waiting, policy, opportunity, and safety blocks", () => {

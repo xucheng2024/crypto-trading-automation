@@ -76,6 +76,15 @@ npm run ops:status -- activity --since-last --details
 # Block reasons plus per-instrument time, route and market evidence.
 npm run ops:status -- blocks --since-last --details
 
+# Latest production workflow, compact job/approval status, active revision and migration Runner.
+npm run ops:status -- deploy
+
+# VNet Runner Container App, GitHub registration, readiness, restarts and PAT presence.
+npm run ops:status -- runner
+
+# A specific failed deployment with a bounded diagnostic excerpt.
+npm run ops:status -- deploy --run-id 31872057181 --details
+
 # Explicit historical boundary or machine-readable output.
 npm run ops:status -- report --since 2026-08-15T04:00:00Z --json
 ```
@@ -85,6 +94,8 @@ The report cursor is stored under `.git` and is not committed. Only a successful
 Decision telemetry distinguishes normal market waiting (`PRICE_OUTSIDE`, `BREAKOUT_NOT_CONFIRMED`, `CANDLE_PENDING`, `ASK_ABOVE_LIMIT`), policy states, safety/data blockers, opportunities and execution events. An admitted BUY receives a deterministic `decisionId`, which is carried through coordinator guards, the durable attempt, `clOrdId`, API outcome and confirmed fill. Structured `block_evidence` traces expose the stage, reason code and available market, freshness, capacity, sizing and routing evidence without parsing error text. Block reports classify events as `LIKELY_RECOVERABLE`, `MARKET_MOVED`, or `SAFETY_BOUNDARY`, summarize stage coverage, and report the smallest exact capacity gap when sizing evidence is available. With `--details`, activity and report output link each instrument through candidate, blocker, persistence, API and fill stages; default output remains a compact aggregate. Results remain limited to retained App Insights telemetry; unavailable evidence must not be inferred.
 
 Reads are bounded to a 4 MiB child-process buffer, 5,000 decision/block events, 1,000 lifecycle events and 10 severe traces. Block evidence records `decisionId`/`clOrdId`, stage, time, instrument, route, relevant prices, freshness, capacity and sizing gaps, and whether the event occurred before the API boundary, after database reservation, at API acknowledgement, or at confirmed exchange settlement. Raw logs should be queried only when the summary identifies an anomaly.
+
+`deploy` and `runner` are also read-only. `deploy` summarizes the latest production workflow (or `--run-id`), failed steps, pending environment approvals, the active production revision and the VNet migration Runner. It distinguishes `IN_PROGRESS`, `SUCCEEDED`, and `FAILED`; an unavailable Azure component is reported without hiding the workflow result. Failed log excerpts are fetched only with `--details` and are capped at 12 diagnostic lines. Runner restart counts include normal ephemeral one-job process cycles. `snapshot` attributes `owner_lost SESSION_ADVISORY_LOCK_LOST` from an inactive OFF revision to `EXPECTED_OFF_TRANSITION`; current-revision and other inactive-revision severe traces remain visible and actionable.
 
 ## Trading modes
 
