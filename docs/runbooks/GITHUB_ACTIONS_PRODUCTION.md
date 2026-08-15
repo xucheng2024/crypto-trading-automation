@@ -52,6 +52,9 @@ Before the first production deployment, run **Production runner bootstrap**
 from a GitHub-hosted runner. It builds a SHA-256-verified GitHub Actions runner
 image, pushes it to ACR by immutable digest, and deploys a no-ingress,
 single-replica Container App in the existing Container Apps Environment. The
+bootstrap uses the deployment identity through the `production-off`
+environment; it never grants resource deployment rights to the migration
+identity. The
 runner therefore shares the production VNet and fixed NAT IP already allowed
 by PostgreSQL. It registers with the `crypto-remote-migration` label, accepts
 one job with `--ephemeral`, clears its work directory, exits, and is restarted

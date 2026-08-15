@@ -20,7 +20,9 @@ env:
 jobs:
   deploy_runner:
     runs-on: ubuntu-latest
-    environment: production-migrate
+    # This job creates deployment resources and therefore uses the deployment
+    # identity's existing production-off OIDC subject, not the SQL identity.
+    environment: production-off
     steps:
       - uses: actions/checkout@v4
       - name: Require the dedicated runner registration credential
