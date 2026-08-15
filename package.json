@@ -12,6 +12,7 @@
     "migrate:rehearsal": "node scripts/migration-rehearsal.mjs && node --test tests-worker/postgres.integration.test.js",
     "import:rehearsal": "node --test tests-worker/postgres.integration.test.js",
     "read-only-preflight": "node scripts/read-only-preflight.mjs",
+    "ops:status": "node scripts/azure-ops-summary.mjs",
     "test:p4": "node --test tests-worker/p4-deployment.test.js",
     "test:p4-replay": "node --test tests-worker/p4-replay.test.js tests-worker/p4-scenario-harness.test.js tests-worker/p4-system-postgres.test.js tests-worker/p4-deployment.test.js tests-worker/p2-buy-runtime.test.js tests-worker/okx-infrastructure.test.js tests-worker/postgres.integration.test.js",
     "test:p4-slo": "node --test tests-worker/p4-slo.test.js",

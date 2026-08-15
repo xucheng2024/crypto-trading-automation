@@ -2,7 +2,7 @@
 
 Production trading runtime for OKX, implemented in Node.js and deployed to Azure Container Apps with PostgreSQL.
 
-The current deployment is intentionally configured with `TRADING_MODE=OFF`. Enabling `FULL` requires separate authorization and completion of the release gate in [`docs/runbooks/P4_AZURE_CANDIDATE.md`](docs/runbooks/P4_AZURE_CANDIDATE.md).
+Infrastructure defaults to `TRADING_MODE=OFF`. Enabling `FULL` requires separate authorization and completion of the release gate in [`docs/runbooks/P4_AZURE_CANDIDATE.md`](docs/runbooks/P4_AZURE_CANDIDATE.md).
 
 ## Current architecture
 
@@ -58,6 +58,33 @@ npm run trading-engine
 ```
 
 Do not use local startup as authorization to enable trading. Deployment and mode changes must follow the Azure candidate runbook.
+
+## Read-only production reports
+
+The operations helper runs locally and reads Azure Container Apps and Application Insights through authenticated `az`/`gh` CLIs. It does not run inside Azure and does not mutate production resources.
+
+```bash
+# Full health, trading activity and blocker report since the last successful report.
+npm run ops:status -- report --since-last --details --expect-mode FULL
+
+# Runtime, revision, restart, error, market-lag and risk snapshot.
+npm run ops:status -- snapshot --minutes 15
+
+# Trading opportunities, pre-submit, API submission and settlement activity.
+npm run ops:status -- activity --since-last --details
+
+# Block reasons plus per-instrument time, route and market evidence.
+npm run ops:status -- blocks --since-last --details
+
+# Explicit historical boundary or machine-readable output.
+npm run ops:status -- report --since 2026-08-15T04:00:00Z --json
+```
+
+The report cursor is stored under `.git` and is not committed. Only a successful `report` advances it; when no cursor exists, `--since-last` checks the latest 60 minutes. `activity` and `blocks` are read-only views and do not advance the cursor.
+
+Decision telemetry distinguishes normal market waiting (`PRICE_OUTSIDE`, `BREAKOUT_NOT_CONFIRMED`, `CANDLE_PENDING`, `ASK_ABOVE_LIMIT`), policy states, safety/data blockers, opportunities and execution events. Results are limited to retained App Insights telemetry; an internal guard that emits no telemetry cannot be reconstructed and must be reported as unavailable evidence rather than assumed absent.
+
+Reads are bounded to a 4 MiB child-process buffer, 5,000 decision events, 1,000 lifecycle events and 10 severe traces. Block evidence records time, instrument, configured route, relevant prices and gaps, and whether the event occurred before the API boundary, after database reservation, at API acknowledgement, or at confirmed exchange settlement. Raw logs should be queried only when the summary identifies an anomaly.
 
 ## Trading modes
 
