@@ -1,5 +1,7 @@
 import { spawnSync } from "node:child_process";
-import { readFile, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { compareDecimal, subtractDecimal } from "../src/decimal.js";
 
@@ -200,20 +202,21 @@ export function summarizeRunner(app, replicas = [], githubRunners = [], secretNa
 
 export function parseArgs(argv) {
   const args = [...argv];
-  const options = { command: "report", minutes: 15, json: false, details: false, expectedMode: null, since: null, sinceLast: false, runId: null };
-  if (["report", "snapshot", "activity", "blocks", "deploy", "runner"].includes(args[0])) options.command = args.shift();
+  const options = { command: "report", minutes: 15, json: false, details: false, expectedMode: null, since: null, sinceLast: false, runId: null, instrument: null, request: false };
+  if (["report", "snapshot", "activity", "blocks", "deploy", "runner", "trade"].includes(args[0])) options.command = args.shift();
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index];
     if (arg === "--json") options.json = true;
     else if (arg === "--details") options.details = true;
+    else if (arg === "--request") options.request = true;
     else if (arg === "--since-last") options.sinceLast = true;
     else if (arg === "--since") {
       const value = args[++index]; if (!value || Number.isNaN(Date.parse(value))) throw new Error("--since requires an ISO timestamp");
       options.since = new Date(value).toISOString();
     }
-    else if (["--minutes", "--resource-group", "--app", "--app-insights", "--expect-mode", "--run-id"].includes(arg)) {
+    else if (["--minutes", "--resource-group", "--app", "--app-insights", "--expect-mode", "--run-id", "--instrument"].includes(arg)) {
       const value = args[++index]; if (!value) throw new Error(`${arg} requires a value`);
-      const key = { "--minutes": "minutes", "--resource-group": "resourceGroup", "--app": "app", "--app-insights": "appInsights", "--expect-mode": "expectedMode", "--run-id": "runId" }[arg];
+      const key = { "--minutes": "minutes", "--resource-group": "resourceGroup", "--app": "app", "--app-insights": "appInsights", "--expect-mode": "expectedMode", "--run-id": "runId", "--instrument": "instrument" }[arg];
       options[key] = ["--minutes", "--run-id"].includes(arg) ? Number(value) : value;
     } else throw new Error(`Unknown argument: ${arg}`);
   }
@@ -221,7 +224,31 @@ export function parseArgs(argv) {
   if (options.expectedMode && !["OFF", "FULL", "EXIT_ONLY"].includes(options.expectedMode)) throw new Error("--expect-mode must be OFF, FULL, or EXIT_ONLY");
   if (options.runId !== null && (!Number.isSafeInteger(options.runId) || options.runId < 1)) throw new Error("--run-id must be a positive integer");
   if (options.since && options.sinceLast) throw new Error("Use only one of --since or --since-last");
+  if (options.command === "trade") {
+    if (!options.instrument || !/^[A-Z0-9]+-[A-Z0-9]+(?:-[A-Z0-9]+)?$/.test(options.instrument)) throw new Error("trade requires --instrument with an exact uppercase OKX instrument");
+    if (options.request === Boolean(options.runId)) throw new Error("trade requires exactly one of --request or --run-id");
+  } else if (options.instrument || options.request) throw new Error("--instrument and --request are only valid with trade");
   return options;
+}
+
+export async function runTradeCommand(options, { command = run, json = runJson, fs = { mkdtemp, readFile, rm }, tempDir = tmpdir() } = {}) {
+  const repository = command("gh", ["repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"]);
+  if (options.request) {
+    const branch = json("gh", ["api", `repos/${repository}`, "--jq", ".default_branch"]);
+    command("gh", ["workflow", "run", "production-ops-read.yml", "--repo", repository, "--ref", branch, "-f", `instrument=${options.instrument}`]);
+    return { command: "trade", requested: true, instrument: options.instrument, repository, branch };
+  }
+  const runInfo = json("gh", ["api", `repos/${repository}/actions/runs/${options.runId}`]);
+  if (!runInfo || !String(runInfo.path ?? "").endsWith("/production-ops-read.yml")) throw new Error(`Run ${options.runId} is not a production instrument timeline run`);
+  const directory = await fs.mkdtemp(join(tempDir, "crypto-remote-timeline-"));
+  try {
+    command("gh", ["run", "download", String(options.runId), "--repo", repository, "--name", "instrument-timeline", "--dir", directory]);
+    const artifact = JSON.parse(await fs.readFile(join(directory, "instrument-timeline.json"), "utf8"));
+    if (artifact?.instrument !== options.instrument || !Array.isArray(artifact?.timeline)) throw new Error("Timeline artifact does not match the requested instrument");
+    const allowed = ["eventTime", "eventType", "intent", "state", "reservationState", "executionMode", "executionRoute", "plannedSize", "reservedExposureUsd", "reservedBaseSize", "executionLimitPrice", "fillSize", "disposedSize", "fillPrice", "sellState", "allocationState"];
+    const timeline = artifact.timeline.map((row) => Object.fromEntries(allowed.filter((key) => Object.hasOwn(row, key)).map((key) => [key, row[key]])));
+    return { command: "trade", requested: false, runId: options.runId, instrument: artifact.instrument, timeline };
+  } finally { await fs.rm(directory, { recursive: true, force: true }); }
 }
 
 function azJson(args) { return runJson("az", [...args, "--only-show-errors", "--output", "json"]); }
@@ -321,6 +348,13 @@ async function runInfrastructureCommand(options, resourceGroup, appName) {
 
 export async function main(argv = process.argv.slice(2)) {
   const options = parseArgs(argv);
+  if (options.command === "trade") {
+    const summary = await runTradeCommand(options);
+    if (options.json) console.log(JSON.stringify(summary));
+    else if (summary.requested) console.log(`Requested redacted instrument timeline for ${summary.instrument} on ${summary.branch}`);
+    else console.log(`Instrument timeline: ${summary.instrument} | events=${summary.timeline.length} | run=${summary.runId}`);
+    return summary;
+  }
   const queryStartedAt = new Date().toISOString();
   const checkpointPath = run("git", ["rev-parse", "--git-path", "azure-ops-last-check.json"]);
   const resourceGroup = options.resourceGroup ?? run("gh", ["variable", "get", "AZURE_RESOURCE_GROUP"]);

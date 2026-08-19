@@ -97,6 +97,15 @@ test("P4 production deployment overlaps independent work without weakening safet
   assert.match(workflow, /\[ "\$state" = "RunningAtMaxScale Healthy" \]/);
 });
 
+test("P4 production timeline workflow is read-only, VNet-scoped, and artifact-limited", async () => {
+  const workflow = await readFile(".github/workflows/production-ops-read.yml", "utf8");
+  assert.match(workflow, /workflow_dispatch:[\s\S]+instrument:/); assert.doesNotMatch(workflow, /inputs:[\s\S]+\b(sql|migration|deploy|promote_full):/i); assert.doesNotMatch(workflow, /npm run migrate:apply|containerapp update|production-promote-full/i);
+  assert.match(workflow, /runs-on: \[self-hosted, linux, x64, crypto-remote-migration\]/); assert.match(workflow, /environment: production-migrate/);
+  assert.match(workflow, /github\.ref == format\('refs\/heads\/\{0\}', github\.event\.repository\.default_branch\)/);
+  assert.match(workflow, /node-version: 22/); assert.match(workflow, /id-token: write/); assert.match(workflow, /contents: read/);
+  assert.match(workflow, /query-instrument-timeline\.mjs --instrument "\$INSTRUMENT"/); assert.match(workflow, /INSTRUMENT: \$\{\{ inputs\.instrument \}\}/); assert.match(workflow, /retention-days: 1/); assert.match(workflow, /instrument-timeline\.json/);
+});
+
 test("P4 self-hosted migration runner is VNet-integrated, ephemeral and secret-scoped", async () => {
   const [workflow, bicep, entrypoint, dockerfile] = await Promise.all([
     readFile(".github/workflows/production-runner-bootstrap.yml", "utf8"),
