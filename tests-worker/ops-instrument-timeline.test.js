@@ -30,7 +30,7 @@ test("instrument timeline output retains decimal and state fields while excludin
 
 test("trade CLI dispatches only on explicit request and reads only a matching workflow artifact", async () => {
   const options = parseArgs(["trade", "--instrument", "BTC-USDT", "--request"]); const commands = [];
-  const requested = await runTradeCommand(options, { command: (...args) => { commands.push(args); return "owner/repo"; }, json: () => "main" });
+  const requested = await runTradeCommand(options, { command: (...args) => { commands.push(args); return args[0] === "gh" && args[1].includes(".default_branch") ? "main" : "owner/repo"; }, json: () => ({}) });
   assert.deepEqual(requested, { command: "trade", requested: true, instrument: "BTC-USDT", repository: "owner/repo", branch: "main" });
   assert.deepEqual(commands.at(-1), ["gh", ["workflow", "run", "production-ops-read.yml", "--repo", "owner/repo", "--ref", "main", "-f", "instrument=BTC-USDT"]]);
   await assert.rejects(runTradeCommand(parseArgs(["trade", "--instrument", "BTC-USDT", "--run-id", "8"]), { command: () => "owner/repo", json: () => ({ path: ".github/workflows/production-deploy.yml" }), fs: {} }), /not a production instrument timeline run/);

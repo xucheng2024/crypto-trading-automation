@@ -234,7 +234,7 @@ export function parseArgs(argv) {
 export async function runTradeCommand(options, { command = run, json = runJson, fs = { mkdtemp, readFile, rm }, tempDir = tmpdir() } = {}) {
   const repository = command("gh", ["repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"]);
   if (options.request) {
-    const branch = json("gh", ["api", `repos/${repository}`, "--jq", ".default_branch"]);
+    const branch = command("gh", ["api", `repos/${repository}`, "--jq", ".default_branch"]);
     command("gh", ["workflow", "run", "production-ops-read.yml", "--repo", repository, "--ref", branch, "-f", `instrument=${options.instrument}`]);
     return { command: "trade", requested: true, instrument: options.instrument, repository, branch };
   }
