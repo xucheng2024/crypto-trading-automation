@@ -16,27 +16,32 @@ export const INSTRUMENT_TIMELINE_SQL = `
     SELECT event_time, event_type, intent, state, reservation_state,
     execution_mode, execution_route, planned_size, reserved_exposure_usd,
     reserved_base_size, execution_limit_price, fill_size, disposed_size,
-    fill_price, sell_state, allocation_state
+    fill_price, sell_time, force_sell_time, protection_price, sell_state,
+    sell_trigger_reason, allocation_state
     FROM (
       SELECT created_at AS event_time, 'ORDER_ATTEMPT'::text AS event_type,
       intent, state, reservation_state, execution_mode, execution_route,
       planned_size::text, reserved_exposure_usd::text, reserved_base_size::text,
       execution_limit_price::text, NULL::text AS fill_size, NULL::text AS disposed_size,
-      NULL::text AS fill_price, NULL::text AS sell_state, NULL::text AS allocation_state
+      NULL::text AS fill_price, NULL::bigint AS sell_time, NULL::bigint AS force_sell_time,
+      NULL::text AS protection_price, NULL::text AS sell_state, NULL::text AS sell_trigger_reason,
+      NULL::text AS allocation_state
       FROM order_attempts
       WHERE inst_id = $1
       UNION ALL
       SELECT to_timestamp(fill_time / 1000.0), 'FILL'::text,
       side, source, NULL::text, execution_mode, execution_route,
       NULL::text, NULL::text, NULL::text, NULL::text,
-      fill_size::text, disposed_size::text, fill_price::text, sell_state, allocation_state
+      fill_size::text, disposed_size::text, fill_price::text, sell_time, force_sell_time,
+      protection_price::text, sell_state, sell_trigger_reason, allocation_state
       FROM filled_orders
       WHERE inst_id = $1
       UNION ALL
       SELECT updated_at, 'PROTECTION'::text,
       NULL::text, state, NULL::text, NULL::text, NULL::text,
       NULL::text, NULL::text, NULL::text, NULL::text,
-      NULL::text, NULL::text, NULL::text, NULL::text, NULL::text
+      NULL::text, NULL::text, NULL::text, NULL::bigint, NULL::bigint,
+      NULL::text, NULL::text, NULL::text, NULL::text
       FROM instrument_protection
       WHERE inst_id = $1
     ) events
@@ -62,8 +67,10 @@ export function redactTimeline(instrument, rows) {
       executionRoute: row.execution_route, plannedSize: row.planned_size,
       reservedExposureUsd: row.reserved_exposure_usd, reservedBaseSize: row.reserved_base_size,
       executionLimitPrice: row.execution_limit_price, fillSize: row.fill_size,
-      disposedSize: row.disposed_size, fillPrice: row.fill_price,
-      sellState: row.sell_state, allocationState: row.allocation_state,
+      disposedSize: row.disposed_size, fillPrice: row.fill_price, sellTime: row.sell_time,
+      forceSellTime: row.force_sell_time, protectionPrice: row.protection_price,
+      sellState: row.sell_state, sellTriggerReason: row.sell_trigger_reason,
+      allocationState: row.allocation_state,
     })),
   };
 }

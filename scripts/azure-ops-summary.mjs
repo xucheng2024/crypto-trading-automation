@@ -245,7 +245,7 @@ export async function runTradeCommand(options, { command = run, json = runJson, 
     command("gh", ["run", "download", String(options.runId), "--repo", repository, "--name", "instrument-timeline", "--dir", directory]);
     const artifact = JSON.parse(await fs.readFile(join(directory, "instrument-timeline.json"), "utf8"));
     if (artifact?.instrument !== options.instrument || !Array.isArray(artifact?.timeline)) throw new Error("Timeline artifact does not match the requested instrument");
-    const allowed = ["eventTime", "eventType", "intent", "state", "reservationState", "executionMode", "executionRoute", "plannedSize", "reservedExposureUsd", "reservedBaseSize", "executionLimitPrice", "fillSize", "disposedSize", "fillPrice", "sellState", "allocationState"];
+    const allowed = ["eventTime", "eventType", "intent", "state", "reservationState", "executionMode", "executionRoute", "plannedSize", "reservedExposureUsd", "reservedBaseSize", "executionLimitPrice", "fillSize", "disposedSize", "fillPrice", "sellTime", "forceSellTime", "protectionPrice", "sellState", "sellTriggerReason", "allocationState"];
     const timeline = artifact.timeline.map((row) => Object.fromEntries(allowed.filter((key) => Object.hasOwn(row, key)).map((key) => [key, row[key]])));
     return { command: "trade", requested: false, runId: options.runId, instrument: artifact.instrument, timeline };
   } finally { await fs.rm(directory, { recursive: true, force: true }); }

@@ -23,8 +23,8 @@ test("instrument timeline uses a parameterized constant SELECT inside a read-onl
 });
 
 test("instrument timeline output retains decimal and state fields while excluding secret ledger fields", () => {
-  const output = redactTimeline("BTC-USDT", [{ event_time: "2026-01-01T00:00:00Z", event_type: "ORDER_ATTEMPT", intent: "BUY", state: "PREPARED", reservation_state: "ACTIVE", execution_mode: "cross", execution_route: "margin", planned_size: "0.123456789", reserved_exposure_usd: "12.34", execution_limit_price: "99.99", account_id: "forbidden", trade_id: "forbidden", cl_ord_id: "forbidden", decision_id: "forbidden", payload_hash: "forbidden", fee: "forbidden", strategy_config_hash: "forbidden", error_message: "forbidden" }]);
-  const encoded = JSON.stringify(output); assert.match(encoded, /0.123456789/); assert.match(encoded, /PREPARED/);
+  const output = redactTimeline("BTC-USDT", [{ event_time: "2026-01-01T00:00:00Z", event_type: "ORDER_ATTEMPT", intent: "BUY", state: "PREPARED", reservation_state: "ACTIVE", execution_mode: "cross", execution_route: "margin", planned_size: "0.123456789", reserved_exposure_usd: "12.34", execution_limit_price: "99.99", sell_time: "1", force_sell_time: "2", protection_price: "98.5", sell_trigger_reason: "PRICE_BREAKDOWN", account_id: "forbidden", trade_id: "forbidden", cl_ord_id: "forbidden", decision_id: "forbidden", payload_hash: "forbidden", fee: "forbidden", strategy_config_hash: "forbidden", error_message: "forbidden" }]);
+  const encoded = JSON.stringify(output); assert.match(encoded, /0.123456789/); assert.match(encoded, /PREPARED/); assert.match(encoded, /PRICE_BREAKDOWN/);
   for (const forbidden of ["account_id", "trade_id", "cl_ord_id", "decision_id", "payload_hash", "fee", "strategy_config_hash", "error_message", "forbidden"]) assert.doesNotMatch(encoded, new RegExp(forbidden));
 });
 
