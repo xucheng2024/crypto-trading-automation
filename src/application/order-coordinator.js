@@ -447,7 +447,8 @@ export class OrderCoordinator {
   _exitGuard(intent, kind) {
     if (this.mode() === "OFF") return { allowed: false, reason: "MODE" };
     if (!this.ownerGuard.isHeld()) return { allowed: false, reason: "OWNER" };
-    if (!this.readyGate.ready || !this.account.fresh(this.config.accountFreshMs)) return { allowed: false, reason: "NOT_READY" };
+    const exitReady = this.readyGate.exitReady ?? this.readyGate.ready;
+    if (!exitReady || !this.account.fresh(this.config.accountFreshMs)) return { allowed: false, reason: "NOT_READY" };
     const instrument = this.market.instrument(intent.instId);
     if (!instrument || (kind !== "DELIST" && instrument.state !== "live")) return { allowed: false, reason: "INSTRUMENT_NOT_TRADABLE" };
     if (intent.pendingAccountSell) return { allowed: false, reason: "ACCOUNT_SELL_PENDING" };

@@ -10,7 +10,7 @@ import { SellService } from "./sell-service.js";
 import { InstrumentProtectionService } from "./instrument-protection-service.js";
 import { DelistOrchestrator } from "./delist-orchestrator.js";
 import { OkxRestClient, OKX_PROFILES, validateAccountProfile, CLOCK_SYNC_STALE_AFTER_MS } from "../infrastructure/okx/rest-client.js";
-import { OkxPublicWsClient, OkxPrivateWsClient, OkxBusinessWsClient } from "../infrastructure/okx/ws-client.js";
+import { OkxPublicWsClient, OkxPrivateWsClient, OkxBusinessWsClient, OkxWsReconnectBudget } from "../infrastructure/okx/ws-client.js";
 import { VirtualSloMetrics } from "./slo-metrics.js";
 import { EngineRecurringWork } from "./engine-recurring-work.js";
 import { EngineWorkLoop } from "./engine-work-loop.js";
@@ -149,7 +149,8 @@ export async function composeProductionRuntime(env, injected = {}) {
   };
   const observePrivate = (row) => { if (row.type === "account" && account.update(row)) readyGate.set("account", true); else if (row.type === "orders") engine.receiveOrder(row); };
   const observeBusiness = (row) => { if (row.type === "candle3m") engine.receiveCandle(row); };
-  const ws = injected.ws ?? { public: new OkxPublicWsClient({ instIds, socketFactory, profile, clock: runtime.clock, onObservation: observePublic, onState: (s) => readyGate.set("public", s.fresh) }), private: new OkxPrivateWsClient({ socketFactory, credentials, profile, clock: runtime.clock, clockSkewMs: () => rest.clockSkewMs, onObservation: observePrivate, onState: (s) => readyGate.set("private", s.fresh) }), business: new OkxBusinessWsClient({ instIds, socketFactory, profile, clock: runtime.clock, onObservation: observeBusiness, onState: (s) => readyGate.set("business", s.fresh) }) };
+  const reconnectBudget = injected.reconnectBudget ?? new OkxWsReconnectBudget();
+  const ws = injected.ws ?? { public: new OkxPublicWsClient({ instIds, socketFactory, profile, clock: runtime.clock, reconnectBudget, onObservation: observePublic, onState: (s) => readyGate.set("public", s.fresh) }), private: new OkxPrivateWsClient({ socketFactory, credentials, profile, clock: runtime.clock, clockSkewMs: () => rest.clockSkewMs, reconnectBudget, onObservation: observePrivate, onState: (s) => readyGate.set("private", s.fresh) }), business: new OkxBusinessWsClient({ instIds, socketFactory, profile, clock: runtime.clock, reconnectBudget, onObservation: observeBusiness, onState: (s) => readyGate.set("business", s.fresh) }) };
   const migrationCheck = injected.migrationCheck ?? (async () => {
     const result = await pool.query(`SELECT to_regclass('public.order_attempts') AS attempts, to_regclass('public.filled_orders') AS fills,
       to_regclass('public.sync_watermarks') AS watermarks,

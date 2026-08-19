@@ -52,6 +52,9 @@ export class ReadyGate {
   constructor(required = ["owner", "database", "public", "private", "business", "account", "instruments", "strategy"]) { this.required = new Set(required); this.states = new Map([...this.required].map((name) => [name, false])); }
   set(name, healthy) { this.states.set(name, healthy === true); }
   get ready() { return [...this.required].every((name) => this.states.get(name) === true); }
+  // Exit orders use their own account/instrument guards. A stale market WS must
+  // stop new entries, but cannot suppress an already-triggered protective exit.
+  get exitReady() { return ["database", "account", "instruments"].every((name) => this.states.get(name) === true); }
   snapshot() { return { ready: this.ready, dependencies: Object.fromEntries(this.states) }; }
 }
 

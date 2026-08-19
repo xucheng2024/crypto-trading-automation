@@ -10,6 +10,18 @@ const subscriptions = {
 };
 
 function key(arg, row = {}) { return `${arg.channel}:${row.instId || row.ccy || arg.instId || arg.instType || ""}`; }
+export class OkxWsReconnectBudget {
+  constructor({ windowMs = 300_000, maxImmediateReconnects = 3 } = {}) { this.windowMs = windowMs; this.maxImmediateReconnects = maxImmediateReconnects; this.attemptedAt = []; }
+  prune(nowMs) { this.attemptedAt = this.attemptedAt.filter((at) => at + this.windowMs > nowMs); }
+  reserve(nowMs) {
+    this.prune(nowMs);
+    // The third attempted reconnect is held until the first one leaves the window.
+    const windowDelayMs = this.attemptedAt.length >= this.maxImmediateReconnects - 1 ? Math.max(0, this.attemptedAt[0] + this.windowMs - nowMs) : 0;
+    this.attemptedAt.push(nowMs);
+    return { windowDelayMs, attemptedInWindow: this.attemptedAt.length };
+  }
+  snapshot(nowMs) { this.prune(nowMs); return { attemptedInWindow: this.attemptedAt.length, windowMs: this.windowMs, maxImmediateReconnects: this.maxImmediateReconnects }; }
+}
 function normalize(kind, arg, row) {
   if (kind === "public" && arg.channel === "tickers") return { type: "ticker", instId: row.instId, ts: Number(row.ts), last: row.last, askPx: row.askPx, bidPx: row.bidPx };
   if (kind === "public" && arg.channel === "instruments") return { type: "instrument", instId: row.instId, ts: Number(row.uTime || row.ts || 0), state: row.state, tickSz: row.tickSz, lotSz: row.lotSz, minSz: row.minSz, expTime: row.expTime, base: row.baseCcy ?? row.instId?.split("-")[0], quote: row.quoteCcy ?? row.instId?.split("-")[1], version: row.uTime ?? row.ts ?? "1" };
@@ -24,14 +36,14 @@ function normalize(kind, arg, row) {
 }
 
 export class OkxWsClient {
-  constructor({ kind, instIds = [], credentials = {}, profile = OKX_PROFILES.GLOBAL, socketFactory, clock = { nowMs: () => Date.now() }, clockSkewMs = () => 0, random = Math.random, timers = globalThis, idleMs = 20_000, onObservation = () => {}, onState = () => {} }) {
+  constructor({ kind, instIds = [], credentials = {}, profile = OKX_PROFILES.GLOBAL, socketFactory, clock = { nowMs: () => Date.now() }, clockSkewMs = () => 0, timers = globalThis, idleMs = 20_000, reconnectBaseMs = 1_000, reconnectCapMs = 60_000, tooFrequentMinMs = 5_000, stableMs = 60_000, reconnectBudget = new OkxWsReconnectBudget(), onObservation = () => {}, onState = () => {} }) {
     if (!subscriptions[kind] || typeof socketFactory !== "function") throw new TypeError("kind and socketFactory are required");
-    this.kind = kind; this.instIds = instIds; this.credentials = credentials; this.profile = profile; this.socketFactory = socketFactory; this.clock = clock; this.clockSkewMs = clockSkewMs; this.random = random; this.timers = timers; this.idleMs = idleMs; this.onObservation = onObservation; this.onState = onState;
-    this.generation = 0; this.connected = false; this.baseline = false; this.lastMessageAt = 0; this.lastTs = new Map(); this.pendingAcks = new Set(); this.retry = 0; this.socket = null; this.pingTimer = null; this.reconnectTimer = null;
+    this.kind = kind; this.instIds = instIds; this.credentials = credentials; this.profile = profile; this.socketFactory = socketFactory; this.clock = clock; this.clockSkewMs = clockSkewMs; this.timers = timers; this.idleMs = idleMs; this.reconnectBaseMs = reconnectBaseMs; this.reconnectCapMs = reconnectCapMs; this.tooFrequentMinMs = tooFrequentMinMs; this.stableMs = stableMs; this.reconnectBudget = reconnectBudget; this.onObservation = onObservation; this.onState = onState;
+    this.generation = 0; this.connected = false; this.baseline = false; this.lastMessageAt = 0; this.lastTs = new Map(); this.pendingAcks = new Set(); this.retry = 0; this.socket = null; this.pingTimer = null; this.reconnectTimer = null; this.stableTimer = null; this.stableSince = null; this.nextReconnectAt = null; this.stormLimited = false; this.reconnectTooFrequent = false;
   }
   get url() { return this.profile[`${this.kind}WsUrl`]; }
   get fresh() { return this.connected && this.baseline && this.clock.nowMs() - this.lastMessageAt <= this.idleMs; }
-  snapshot() { return { kind: this.kind, generation: this.generation, connected: this.connected, baseline: this.baseline, fresh: this.fresh }; }
+  snapshot() { return { kind: this.kind, generation: this.generation, connected: this.connected, baseline: this.baseline, fresh: this.fresh, retry: this.retry, pendingAcks: this.pendingAcks.size, stableSince: this.stableSince, nextReconnectAt: this.nextReconnectAt, stormLimited: this.stormLimited, ...this.reconnectBudget.snapshot(this.clock.nowMs()) }; }
   emitState() { this.onState(this.snapshot()); }
   connect() {
     if (this.socket) return;
@@ -66,19 +78,33 @@ export class OkxWsClient {
     const args = subscriptions[this.kind](this.instIds);
     this.pendingAcks = new Set(args.map(key));
     this.socket.send(JSON.stringify({ op: "subscribe", args }));
-    if (this.pendingAcks.size === 0) { this.baseline = true; this.retry = 0; this.emitState(); }
+    if (this.pendingAcks.size === 0) this.confirmBaseline();
   }
+  confirmBaseline() {
+    this.baseline = true; this.stableSince = this.clock.nowMs(); this.armStableReset(); this.emitState();
+  }
+  armStableReset() {
+    if (this.stableTimer) this.timers.clearTimeout(this.stableTimer);
+    const generation = this.generation;
+    this.stableTimer = this.timers.setTimeout(() => {
+      this.stableTimer = null;
+      if (generation !== this.generation || !this.fresh || !this.baseline || this.pendingAcks.size) return;
+      this.retry = 0; this.stormLimited = false; this.emitState();
+    }, this.stableMs);
+  }
+  clearStableReset() { if (this.stableTimer) this.timers.clearTimeout(this.stableTimer); this.stableTimer = null; this.stableSince = null; }
   message(socket, event) {
     if (socket !== this.socket) return;
     this.lastMessageAt = this.clock.nowMs();
     const raw = typeof event.data === "string" ? event.data : String(event.data);
     if (raw === "pong") return;
     let message; try { message = JSON.parse(raw); } catch { return; }
-    if (message.code === "64008") return this.reconnect();
-    if (message.event === "login") { if (message.code !== "0") return this.reconnect(); this.subscribe(); return; }
+    const tooFrequent = String(message.code) === "60014" || /too\s*frequent/i.test(String(message.msg ?? message.sMsg ?? ""));
+    if (String(message.code) === "64008") return this.reconnect({ tooFrequent });
+    if (message.event === "login") { if (message.code !== "0") return this.reconnect({ tooFrequent }); this.subscribe(); return; }
     if (message.event === "subscribe") {
-      if ((message.code !== undefined && message.code !== "0") || !message.arg || !this.pendingAcks.delete(key(message.arg))) return this.reconnect();
-      if (this.pendingAcks.size === 0) { this.baseline = true; this.retry = 0; this.emitState(); }
+      if ((message.code !== undefined && message.code !== "0") || !message.arg || !this.pendingAcks.delete(key(message.arg))) return this.reconnect({ tooFrequent });
+      if (this.pendingAcks.size === 0) this.confirmBaseline();
       return;
     }
     const arg = message.arg;
@@ -91,10 +117,18 @@ export class OkxWsClient {
       this.onObservation({ ...observation, generation: this.generation });
     }
   }
-  close(socket) { if (socket !== this.socket) return; this.socket = null; this.connected = false; this.baseline = false; if (this.pingTimer) this.timers.clearInterval(this.pingTimer); this.pingTimer = null; this.emitState(); this.scheduleReconnect(); }
-  reconnect() { if (this.socket?.close) this.socket.close(); else this.close(this.socket); }
-  scheduleReconnect() { if (this.reconnectTimer) return; const delay = Math.min(30_000, 500 * 2 ** this.retry) * (0.5 + this.random()); this.retry += 1; this.reconnectTimer = this.timers.setTimeout(() => { this.reconnectTimer = null; this.connect(); }, delay); }
-  stop() { if (this.reconnectTimer) this.timers.clearTimeout(this.reconnectTimer); if (this.pingTimer) this.timers.clearInterval(this.pingTimer); this.reconnectTimer = this.pingTimer = null; const socket = this.socket; this.socket = null; if (socket?.close) socket.close(); this.connected = this.baseline = false; this.emitState(); }
+  close(socket) { if (socket !== this.socket) return; this.socket = null; this.connected = false; this.baseline = false; this.clearStableReset(); if (this.pingTimer) this.timers.clearInterval(this.pingTimer); this.pingTimer = null; this.emitState(); this.scheduleReconnect({ tooFrequent: this.reconnectTooFrequent }); this.reconnectTooFrequent = false; }
+  reconnect({ tooFrequent = false } = {}) { this.reconnectTooFrequent ||= tooFrequent; if (this.socket?.close) this.socket.close(); else this.close(this.socket); }
+  scheduleReconnect({ tooFrequent = false } = {}) {
+    if (this.reconnectTimer) return;
+    const nowMs = this.clock.nowMs(); const { windowDelayMs } = this.reconnectBudget.reserve(nowMs);
+    const exponentialDelayMs = Math.min(this.reconnectCapMs, this.reconnectBaseMs * 2 ** Math.min(this.retry, 30));
+    const delay = Math.max(exponentialDelayMs, tooFrequent ? this.tooFrequentMinMs : 0, windowDelayMs);
+    this.retry += 1; this.stormLimited = windowDelayMs > 0; this.nextReconnectAt = nowMs + delay;
+    this.reconnectTimer = this.timers.setTimeout(() => { this.reconnectTimer = null; this.nextReconnectAt = null; this.emitState(); this.connect(); }, delay);
+    this.emitState();
+  }
+  stop() { if (this.reconnectTimer) this.timers.clearTimeout(this.reconnectTimer); if (this.pingTimer) this.timers.clearInterval(this.pingTimer); this.clearStableReset(); this.reconnectTimer = this.pingTimer = null; this.nextReconnectAt = null; const socket = this.socket; this.socket = null; if (socket?.close) socket.close(); this.connected = this.baseline = false; this.emitState(); }
 }
 
 export class OkxPublicWsClient extends OkxWsClient { constructor(options) { super({ ...options, kind: "public" }); } }
