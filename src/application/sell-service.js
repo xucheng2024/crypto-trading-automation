@@ -36,11 +36,17 @@ export class SellService {
   }
   rebuild(fills) {
     this.fills.clear(); this.byInst.clear(); this.latches.clear();
+    const snapshot = { total: 0, instruments: new Set(), waiting: 0, triggered: 0, dustPending: 0 };
     for (const fill of fills) {
       if (field(fill, "side", "side") !== "BUY" || !["WAITING", "SELL_TRIGGERED", "DUST_PENDING"].includes(field(fill, "sell_state", "sellState"))) continue;
       const key = this.key(fill); this.fills.set(key, { ...fill });
       const instId = field(fill, "inst_id", "instId"); const rows = this.byInst.get(instId) ?? []; rows.push(key); this.byInst.set(instId, rows);
+      snapshot.total += 1; snapshot.instruments.add(instId);
+      if (field(fill, "sell_state", "sellState") === "WAITING") snapshot.waiting += 1;
+      else if (field(fill, "sell_state", "sellState") === "SELL_TRIGGERED") snapshot.triggered += 1;
+      else snapshot.dustPending += 1;
     }
+    this._emit({ type: "sell_watch_loaded", reason: "SELL_WATCH_SNAPSHOT", total: snapshot.total, instruments: snapshot.instruments.size, waiting: snapshot.waiting, triggered: snapshot.triggered, dustPending: snapshot.dustPending });
   }
   resumeTriggered(activeSourceTradeIds = new Set()) {
     const events = [];

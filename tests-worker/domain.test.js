@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { normalizeInstrument } from "../src/domain/instrument.js";
 import { assertAttemptState, createClOrdId, createDecisionId, payloadHash } from "../src/domain/order.js";
-import { assessLeverage, buySignal, CANDLE_STALE_HARD_MS, candleFreshness, dailyLimit, delistPlan, expectedClosedCandleTs, normalizeHoldHours, sellBreakdownPrice, strategyDay } from "../src/domain/rules.js";
+import { buySignal, CANDLE_STALE_HARD_MS, candleFreshness, dailyLimit, delistPlan, expectedClosedCandleTs, normalizeHoldHours, sellBreakdownPrice, strategyDay } from "../src/domain/rules.js";
 
 test("domain instrument and order contracts normalize deterministically", async () => {
   assert.deepEqual(normalizeInstrument({ instId: "btc-usdt", tickSz: "0.1", lotSz: "0.001", state: "live" }), { instId: "BTC-USDT", base: "BTC", quote: "USDT", tickSz: "0.1", lotSz: "0.001", minSz: "0.001", state: "live", expTime: null });
@@ -29,9 +29,6 @@ test("daily, duration, clock, buy, leverage and exit boundaries are pure", () =>
   assert.equal(buySignal({ last: "89.267", askPx: "89.267", limitPrice: "90", previousClosedHigh: "89" }).reason, "BREAKOUT_NOT_CONFIRMED");
   assert.equal(buySignal({ last: "90", askPx: "90.1", limitPrice: "90", previousClosedHigh: "89" }).reason, "ASK_ABOVE_LIMIT");
   assert.equal(sellBreakdownPrice("100"), "99.7");
-  assert.equal(assessLeverage({ committedExposure: "295", candidateCost: "0", totalEq: "100", adjEq: "100" }).admitted, true);
-  assert.equal(assessLeverage({ committedExposure: "295", candidateCost: "0.01", totalEq: "100", adjEq: "100" }).admitted, false);
-  assert.equal(assessLeverage({ committedExposure: "300", totalEq: "100", adjEq: "100" }).hardStopped, true);
   assert.deepEqual(delistPlan({ fillSize: "2", disposedSize: "0.5", availableSize: "1.2", availSell: "1", lotSz: "0.1", minSz: "0.1", price: "10" }), { executable: true, size: "1" });
 });
 

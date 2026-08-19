@@ -64,7 +64,7 @@ export function traceEvents(rows) {
   });
 }
 
-export function summarizeTrading(decisionEvents, lifecycleEvents, routeByInst = new Map(), currentDecisionEvents = decisionEvents, blockEvents = []) {
+export function summarizeTrading(decisionEvents, lifecycleEvents, routeByInst = new Map(), currentDecisionEvents = decisionEvents, blockEvents = [], observabilityEvents = []) {
   const latest = new Map();
   for (const event of currentDecisionEvents) if (event.instId && (!latest.has(event.instId) || event.timestamp > latest.get(event.instId).timestamp)) latest.set(event.instId, event);
   const states = { waiting: 0, policy: 0, blocked: 0, opportunity: 0 };
@@ -72,7 +72,7 @@ export function summarizeTrading(decisionEvents, lifecycleEvents, routeByInst = 
   const preparedByOrder = new Map(lifecycleEvents.filter((event) => event.reason === "BUY_PREPARED" && event.clOrdId).map((event) => [event.clOrdId, event]));
   const executions = lifecycleEvents.map((event) => {
     const prepared = preparedByOrder.get(event.clOrdId); const instId = event.instId ?? prepared?.instId;
-    const apiBoundary = { BUY_PREPARED: "DB_RESERVED_BEFORE_API", BUY_SUBMITTED: "API_ACKNOWLEDGED", BUY_UNKNOWN: "API_RESULT_AMBIGUOUS", BUY_NOT_CREATED: "API_REJECTED_OR_NOT_SENT", BUY_SETTLED: "EXCHANGE_FILL_CONFIRMED" }[event.reason] ?? "EXECUTION_LIFECYCLE";
+    const apiBoundary = { BUY_PREPARED: "DB_RESERVED_BEFORE_API", BUY_SUBMITTED: "API_ACKNOWLEDGED", BUY_UNKNOWN: "API_RESULT_AMBIGUOUS", BUY_NOT_CREATED: "API_REJECTED_OR_NOT_SENT", BUY_SETTLED: "EXCHANGE_FILL_CONFIRMED", BUY_LEDGER_CONFIRMED: "DURABLE_LEDGER_CONFIRMED" }[event.reason] ?? "EXECUTION_LIFECYCLE";
     return { timestamp: event.timestamp, reason: event.reason, decisionId: event.decisionId ?? prepared?.decisionId, instId, route: event.executionRoute ?? routeByInst.get(instId), clOrdId: event.clOrdId, exchangeReason: event.exchangeReason, apiBoundary };
   });
   const gap = (left, right) => {
@@ -90,7 +90,7 @@ export function summarizeTrading(decisionEvents, lifecycleEvents, routeByInst = 
       quoteAgeMs: event.quoteAgeMs, candleAgeMs: event.candleAgeMs, availBuy: event.availBuy,
       remainingCapacity: event.remainingCapacity, plannedSize: event.plannedSize, minSize: event.minSize,
       availableCapacity: event.availableCapacity, minimumCapacity: event.minimumCapacity, capacityGap: event.capacityGap,
-      adjustedEquity: event.adjustedEquity, managedExposure: event.managedExposure, riskVersion: event.riskVersion,
+      adjustedEquity: event.adjustedEquity, managedExposure: event.managedExposure, leverage: event.leverage, exposureScope: event.exposureScope, equityBasis: event.equityBasis, riskVersion: event.riskVersion,
       optimizationClass: isBlock ? classifyBlock(event.reason) : undefined,
     };
   };
@@ -115,11 +115,14 @@ export function summarizeTrading(decisionEvents, lifecycleEvents, routeByInst = 
   };
   for (const event of decisionEvents) if (event.decisionId) appendAttempt(event, event.reason === "BUY_QUEUED" ? "CANDIDATE" : "DECISION");
   for (const event of blockEvents) appendAttempt(event, event.stage ?? "BLOCKED");
-  for (const event of lifecycleEvents) appendAttempt(event, ({ BUY_PREPARED: "PERSISTED", BUY_SUBMITTED: "API", BUY_UNKNOWN: "API", BUY_NOT_CREATED: "API", BUY_SETTLED: "FILLED" })[event.reason] ?? "LIFECYCLE");
+  for (const event of lifecycleEvents) appendAttempt(event, ({ BUY_PREPARED: "PERSISTED", BUY_SUBMITTED: "API", BUY_UNKNOWN: "API", BUY_NOT_CREATED: "API", BUY_SETTLED: "FILLED", BUY_LEDGER_CONFIRMED: "LEDGER_CONFIRMED" })[event.reason] ?? "LIFECYCLE");
   const attemptTimelines = [...attempts.values()].map((attempt) => {
     attempt.timeline.sort((a, b) => String(a.timestamp).localeCompare(String(b.timestamp)));
     const latest = attempt.timeline.at(-1); return { ...attempt, outcome: latest?.reason, latest: latest?.timestamp };
   }).sort((a, b) => String(b.latest).localeCompare(String(a.latest)));
+  const reconciliation = observabilityEvents.filter((event) => event.type === "fill_reconciliation" && event.reason === "FILL_BATCH_COMMITTED");
+  const watchSnapshots = observabilityEvents.filter((event) => event.type === "sell_watch_loaded" && event.reason === "SELL_WATCH_SNAPSHOT");
+  const latestWatchSnapshot = watchSnapshots.at(-1);
   return {
     currentStates: states,
     currentStateCoverage: latest.size,
@@ -128,8 +131,16 @@ export function summarizeTrading(decisionEvents, lifecycleEvents, routeByInst = 
       prepared: lifecycleEvents.filter((event) => event.reason === "BUY_PREPARED").length,
       submitted: lifecycleEvents.filter((event) => event.reason === "BUY_SUBMITTED").length,
       settled: lifecycleEvents.filter((event) => event.reason === "BUY_SETTLED").length,
+      ledgerConfirmed: lifecycleEvents.filter((event) => event.reason === "BUY_LEDGER_CONFIRMED").length,
       unknown: lifecycleEvents.filter((event) => event.reason === "BUY_UNKNOWN").length,
       notCreated: lifecycleEvents.filter((event) => event.reason === "BUY_NOT_CREATED").length,
+    },
+    observability: {
+      lifecycleCoverage: "TELEMETRY_ONLY",
+      reconciliationCoverage: reconciliation.length ? "PARTIAL_DURABLE_CONFIRMATION" : "UNAVAILABLE_IN_WINDOW",
+      recoveredInserted: reconciliation.reduce((sum, event) => sum + Number(event.inserted ?? 0), 0),
+      recoveredLinked: reconciliation.reduce((sum, event) => sum + Number(event.linked ?? 0), 0),
+      sellWatchSnapshot: latestWatchSnapshot ? { total: Number(latestWatchSnapshot.total ?? 0), instruments: Number(latestWatchSnapshot.instruments ?? 0), waiting: Number(latestWatchSnapshot.waiting ?? 0), triggered: Number(latestWatchSnapshot.triggered ?? 0), dustPending: Number(latestWatchSnapshot.dustPending ?? 0) } : { coverage: "UNAVAILABLE_IN_WINDOW" },
     },
     blocked, blockedReasons, blockClasses, blockStages, minimumCapacityGap, policy, executions, attemptTimelines,
   };
@@ -245,9 +256,13 @@ export async function runTradeCommand(options, { command = run, json = runJson, 
     command("gh", ["run", "download", String(options.runId), "--repo", repository, "--name", "instrument-timeline", "--dir", directory]);
     const artifact = JSON.parse(await fs.readFile(join(directory, "instrument-timeline.json"), "utf8"));
     if (artifact?.instrument !== options.instrument || !Array.isArray(artifact?.timeline)) throw new Error("Timeline artifact does not match the requested instrument");
-    const allowed = ["eventTime", "eventType", "intent", "state", "reservationState", "executionMode", "executionRoute", "plannedSize", "reservedExposureUsd", "reservedBaseSize", "executionLimitPrice", "fillSize", "disposedSize", "fillPrice", "sellTime", "forceSellTime", "protectionPrice", "sellState", "sellTriggerReason", "allocationState"];
+    const allowed = ["eventTime", "eventType", "recordKind", "stateObservedAt", "attemptRef", "intent", "state", "reservationState", "executionMode", "executionRoute", "plannedSize", "reservedExposureUsd", "reservedBaseSize", "executionLimitPrice", "fillSize", "disposedSize", "fillPrice", "sellTime", "forceSellTime", "protectionPrice", "sellState", "sellTriggerReason", "allocationState"];
     const timeline = artifact.timeline.map((row) => Object.fromEntries(allowed.filter((key) => Object.hasOwn(row, key)).map((key) => [key, row[key]])));
-    return { command: "trade", requested: false, runId: options.runId, instrument: artifact.instrument, timeline };
+    const summary = artifact?.summary && typeof artifact.summary === "object" ? {
+      attemptSnapshots: artifact.summary.attemptSnapshots, fills: artifact.summary.fills,
+      protectionSnapshots: artifact.summary.protectionSnapshots, attemptStates: artifact.summary.attemptStates,
+    } : undefined;
+    return { command: "trade", requested: false, runId: options.runId, instrument: artifact.instrument, attemptRefScope: artifact.attemptRefScope === "QUERY_SNAPSHOT" ? artifact.attemptRefScope : undefined, summary, timeline };
   } finally { await fs.rm(directory, { recursive: true, force: true }); }
 }
 
@@ -381,6 +396,7 @@ export async function main(argv = process.argv.slice(2)) {
   const decisionQuery = `traces | where ${timeFilter} | where message startswith 'trading_decision ' | project timestamp, message, customDimensions | order by timestamp desc | take 5000`;
   const currentDecisionQuery = "traces | where timestamp > ago(24h) | where message startswith 'trading_decision ' | extend instId=tostring(customDimensions.instId) | summarize arg_max(timestamp, customDimensions) by instId";
   const lifecycleQuery = `traces | where ${timeFilter} | where message startswith 'order_lifecycle BUY_' or message startswith 'trade_lifecycle BUY_' | project timestamp, message, customDimensions | order by timestamp desc | take 1000`;
+  const observabilityQuery = `traces | where ${timeFilter} | where message startswith 'fill_reconciliation FILL_BATCH_COMMITTED' or message startswith 'sell_watch_loaded SELL_WATCH_SNAPSHOT' | project timestamp, message, customDimensions | order by timestamp desc | take 1000`;
   const blockQuery = `traces | where ${timeFilter} | where message startswith 'block_evidence ' | project timestamp, message, customDimensions | order by timestamp desc | take 5000`;
   const errorQuery = `traces | where ${timeFilter} | where severityLevel >= 3 | project timestamp, message, cloudRoleInstance=cloud_RoleInstance, tradingMode=tostring(customDimensions.tradingMode) | order by timestamp desc | take 10`;
   const metric = appInsightsQuery(resourceGroup, appInsights, metricQuery)[0] ?? null;
@@ -391,6 +407,7 @@ export async function main(argv = process.argv.slice(2)) {
   const decisionEvents = needDecisions ? traceEvents(appInsightsQuery(resourceGroup, appInsights, decisionQuery)) : [];
   const currentDecisionEvents = needCurrentDecisions ? traceEvents(appInsightsQuery(resourceGroup, appInsights, currentDecisionQuery)) : [];
   const lifecycleEvents = needLifecycle ? traceEvents(appInsightsQuery(resourceGroup, appInsights, lifecycleQuery)) : [];
+  const observabilityEvents = needLifecycle ? traceEvents(appInsightsQuery(resourceGroup, appInsights, observabilityQuery)) : [];
   const blockEvents = needDecisions ? traceEvents(appInsightsQuery(resourceGroup, appInsights, blockQuery)) : [];
   const groupedDecisions = new Map();
   for (const event of decisionEvents) {
@@ -401,7 +418,7 @@ export async function main(argv = process.argv.slice(2)) {
   const errors = needErrors ? appInsightsQuery(resourceGroup, appInsights, errorQuery) : [];
   const artifact = JSON.parse(await readFile(new URL("../infrastructure/config/p5-enabled-instruments.json", import.meta.url), "utf8"));
   const routeByInst = new Map([...(artifact.routes?.margin ?? []).map((instId) => [instId, "margin"]), ...(artifact.routes?.spot ?? []).map((instId) => [instId, "spot"])]);
-  const trading = summarizeTrading(decisionEvents, lifecycleEvents, routeByInst, currentDecisionEvents, blockEvents);
+  const trading = summarizeTrading(decisionEvents, lifecycleEvents, routeByInst, currentDecisionEvents, blockEvents, observabilityEvents);
   const assessment = assessRuntime({ app, active, replicas, traffic, metric, expectedMode: options.expectedMode });
   const revision = active[0]; const container = revision?.properties?.template?.containers?.[0];
   const severe = classifySevereTraces(errors, revision?.name);
@@ -439,7 +456,8 @@ export async function main(argv = process.argv.slice(2)) {
       console.log(`Latency: enqueue_p99=${metric?.eventP99 ?? "?"}ms decision_p99=${metric?.decisionP99 ?? "?"}ms source_lag_p99=${metric?.sourceLagP99 ?? "?"}ms`);
       console.log(`Queues: current=${metric?.queueDepth ?? "?"} pending_buy=${metric?.pendingBuy ?? "?"} exit_backlog=${metric?.exitBacklog ?? "?"}`);
       console.log(`Decisions: ${topReasons}`);
-      console.log(`Trading: opportunities=${trading.events.queued} prepared=${trading.events.prepared} submitted=${trading.events.submitted} settled=${trading.events.settled}`);
+      console.log(`Trading telemetry: opportunities=${trading.events.queued} prepared=${trading.events.prepared} submitted=${trading.events.submitted} settled=${trading.events.settled} ledger_confirmed=${trading.events.ledgerConfirmed} coverage=${trading.observability.lifecycleCoverage}`);
+      console.log(`Durable recovery confirmation: coverage=${trading.observability.reconciliationCoverage} inserted=${trading.observability.recoveredInserted} linked=${trading.observability.recoveredLinked}`);
       console.log(`Current states: waiting=${trading.currentStates.waiting} policy=${trading.currentStates.policy} blocked=${trading.currentStates.blocked} opportunity=${trading.currentStates.opportunity}`);
       console.log(`Severe traces: current=${severe.current.length} inactive=${severe.inactive.length} expected_transition=${severe.transitions.length}${severe.current.length || severe.inactive.length ? ` | ${[...severe.current, ...severe.inactive].slice(0, 3).map((row) => row.message).join("; ")}` : ""}`);
     } else if (options.command === "snapshot") {
@@ -448,7 +466,8 @@ export async function main(argv = process.argv.slice(2)) {
       console.log(`Runtime: traffic=${summary.runtime.trafficWeight}% replicas=${summary.runtime.replicas} ready=${summary.runtime.readyContainers} restarts=${summary.runtime.restarts} image=${summary.runtime.image}`);
       console.log(`Signals: ready=${metric?.ready ?? "missing"} source_lag_p99=${metric?.sourceLagP99 ?? "?"}ms severe_current=${severe.current.length} inactive_severe=${severe.inactive.length} expected_transition=${severe.transitions.length} risk_signals=${summary.riskSignals.length} exit_backlog=${metric?.exitBacklog ?? "?"}`);
     } else if (options.command === "activity") {
-      console.log(`Activity: opportunities=${trading.events.queued} prepared=${trading.events.prepared} submitted=${trading.events.submitted} settled=${trading.events.settled} unknown=${trading.events.unknown} not_created=${trading.events.notCreated}`);
+      console.log(`Activity telemetry: opportunities=${trading.events.queued} prepared=${trading.events.prepared} submitted=${trading.events.submitted} settled=${trading.events.settled} ledger_confirmed=${trading.events.ledgerConfirmed} unknown=${trading.events.unknown} not_created=${trading.events.notCreated}`);
+      console.log(`Durable recovery confirmation: coverage=${trading.observability.reconciliationCoverage} inserted=${trading.observability.recoveredInserted} linked=${trading.observability.recoveredLinked}`);
       console.log(`Decision activity: instruments=${decisions.instruments}/${artifact.enabled_count} | ${topReasons}`);
     } else {
       const blockReasons = Object.entries(trading.blockedReasons).map(([reason, count]) => `${reason}=${count}`).join(", ") || "none";
@@ -466,7 +485,8 @@ export async function main(argv = process.argv.slice(2)) {
       row.availBuy !== undefined && `avail_buy=${row.availBuy}`, row.remainingCapacity !== undefined && `remaining_capacity=${row.remainingCapacity}`,
       row.availableCapacity !== undefined && `available_capacity=${row.availableCapacity}`, row.minimumCapacity !== undefined && `minimum_capacity=${row.minimumCapacity}`, row.capacityGap !== undefined && `capacity_gap=${row.capacityGap}`,
       row.plannedSize !== undefined && `planned_size=${row.plannedSize}`, row.minSize !== undefined && `min_size=${row.minSize}`,
-      row.adjustedEquity !== undefined && `equity=${row.adjustedEquity}`, row.managedExposure !== undefined && `exposure=${row.managedExposure}`, row.riskVersion !== undefined && `risk_version=${row.riskVersion}`,
+      row.adjustedEquity !== undefined && `equity=${row.adjustedEquity}`, row.managedExposure !== undefined && `exposure=${row.managedExposure}`, row.leverage !== undefined && `effective_leverage=${row.leverage}`,
+      row.exposureScope && `exposure_scope=${row.exposureScope}`, row.equityBasis && `equity_basis=${row.equityBasis}`, row.riskVersion !== undefined && `risk_version=${row.riskVersion}`,
       `class=${row.optimizationClass}`, `boundary=${row.apiBoundary}`,
     ].filter(Boolean).join(" ");
     if (options.details && options.command !== "activity") {

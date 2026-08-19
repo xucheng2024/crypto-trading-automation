@@ -1,0 +1,4 @@
+interface:
+  display_name: "Production Trade Ops"
+  short_description: "Read-only production trading diagnosis"
+  default_prompt: "Check production trading health, blockers, and one instrument using the approved read-only operations workflow."

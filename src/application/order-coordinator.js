@@ -1,5 +1,5 @@
 import { compareDecimal, divideDecimal, multiplyDecimal, parseDecimal, formatDecimal, roundToStep, subtractDecimal } from "../decimal.js";
-import { BUY_ADMISSION_LEVERAGE, TRADE_FEE_RATE, adjustedEquity, assessLeverage, buySignal, candleFreshness } from "../domain/rules.js";
+import { TRADE_FEE_RATE, buySignal, candleFreshness } from "../domain/rules.js";
 import { CLOCK_SYNC_STALE_AFTER_MS } from "../infrastructure/okx/rest-client.js";
 import { createClOrdId, payloadHash } from "../domain/order.js";
 
@@ -78,16 +78,17 @@ export class OrderCoordinator {
     }
     if (!eligible.length) return [];
     const maxAvailStarted = this.clock.nowMs();
-    const routed = eligible.map((intent) => { const executionRoute = this._executionRoute(intent); return { intent, executionRoute, executionMode: executionRoute ? "cross" : null, tradeQuoteCcy: intent.tradeQuoteCcy ?? this.tradeQuoteCurrency(intent.instId) }; }).filter(({ intent, executionRoute, executionMode }) => {
+    const routed = eligible.map((intent) => { const executionRoute = this._executionRoute(intent); const executionMode = executionRoute ? "cross" : null; const tradeQuoteCcy = intent.tradeQuoteCcy ?? this.tradeQuoteCurrency(intent.instId); const capacityCcy = tradeQuoteCcy ?? intent.instId.split("-").at(-1); return { intent, executionRoute, executionMode, tradeQuoteCcy, capacityCcy }; }).filter(({ intent, executionRoute, executionMode }) => {
       if (executionRoute && executionMode) return true;
       this._emitBuyBlock(intent, "ROUTING", "EXECUTION_ROUTE_UNAVAILABLE"); return false;
     });
-    const groups = Map.groupBy(routed, (row) => row.executionMode);
+    const groups = Map.groupBy(routed, (row) => `${row.executionMode}:${row.executionMode === "cross" ? row.capacityCcy : ""}`);
     const modeByInst = new Map(routed.map(({ intent, executionMode }) => [intent.instId, executionMode]));
     const routeByInst = new Map(routed.map(({ intent, executionRoute }) => [intent.instId, executionRoute]));
     const quoteByInst = new Map(routed.map(({ intent, tradeQuoteCcy }) => [intent.instId, tradeQuoteCcy]));
+    const capacityCcyByInst = new Map(routed.map(({ intent, capacityCcy }) => [intent.instId, capacityCcy]));
     let avail;
-    try { avail = (await Promise.all([...groups].map(([tdMode, rows]) => this.transport.maxAvailSize(rows.map(({ intent }) => intent.instId).join(","), { tdMode })))).flat(); }
+    try { avail = (await Promise.all([...groups].map(([, rows]) => { const { executionMode: tdMode, capacityCcy } = rows[0]; return this.transport.maxAvailSize(rows.map(({ intent }) => intent.instId).join(","), tdMode === "cross" ? { tdMode, ccy: capacityCcy } : { tdMode }); }))).flat(); }
     catch (error) {
       for (const { intent, executionMode, executionRoute } of routed) this._emitBuyBlock({ ...intent, executionMode, executionRoute }, "AVAILABILITY", "MAX_AVAIL_FAILED", { error: error?.message });
       return [];
@@ -100,7 +101,7 @@ export class OrderCoordinator {
         intent.waitForRiskVersion = riskVersion;
         this._emitBuyBlock(intent, "AVAILABILITY", "INSUFFICIENT_FUNDS_WAIT_RISK_VERSION", { availBuy: availBuy ?? "0", riskVersion });
       }
-      return available ? [{ ...intent, availBuy, executionMode: modeByInst.get(intent.instId), executionRoute: routeByInst.get(intent.instId), tradeQuoteCcy: quoteByInst.get(intent.instId) }] : [];
+      return available ? [{ ...intent, availBuy, capacityCcy: capacityCcyByInst.get(intent.instId), executionMode: modeByInst.get(intent.instId), executionRoute: routeByInst.get(intent.instId), tradeQuoteCcy: quoteByInst.get(intent.instId) }] : [];
     });
   }
   async submitBuys(candidates) {
@@ -116,14 +117,12 @@ export class OrderCoordinator {
         const { instrument, quote, candle } = guard;
         const executionPrice = roundToStep(intent.dailyLimitPrice, instrument.tickSz, "down");
         if (compareDecimal(quote.askPx, executionPrice) > 0) { this._emitBuyBlock(intent, "SIZING", "ASK_ABOVE_LIMIT", { askPx: quote.askPx, dailyLimitPrice: executionPrice, priceLimitGap: subtractDecimal(executionPrice, quote.askPx) }); continue; }
-        const frozenTarget = intent.frozenTargetUsd ?? multiplyDecimal(BUY_ADMISSION_LEVERAGE, adjustedEquity(this.account.value));
-        const remainingTarget = intent.remainingTargetUsd ?? frozenTarget;
-        const maxNotional = min(remainingTarget, intent.availBuy, this._remainingCapacity(intent.managedExposure ?? "0"));
+        const maxNotional = intent.availBuy;
         const feeMultiplier = add("1", TRADE_FEE_RATE);
         const size = roundToStep(divideDecimal(maxNotional, multiplyDecimal(executionPrice, feeMultiplier)), instrument.lotSz, "down");
         if (compareDecimal(size, instrument.minSz) < 0) {
           const minimumCapacity = multiplyDecimal(multiplyDecimal(instrument.minSz, executionPrice), feeMultiplier);
-          this._emitBuyBlock(intent, "SIZING", "MINIMUM_SIZE", { availBuy: intent.availBuy, remainingCapacity: this._remainingCapacity(intent.managedExposure ?? "0"), availableCapacity: maxNotional, minimumCapacity, capacityGap: subtractDecimal(minimumCapacity, maxNotional), plannedSize: size, minSize: instrument.minSz, notional: multiplyDecimal(size, executionPrice), dailyLimitPrice: executionPrice }); continue;
+          this._emitBuyBlock(intent, "SIZING", "MINIMUM_SIZE", { availBuy: intent.availBuy, availableCapacity: maxNotional, minimumCapacity, capacityGap: subtractDecimal(minimumCapacity, maxNotional), plannedSize: size, minSize: instrument.minSz, notional: multiplyDecimal(size, executionPrice), dailyLimitPrice: executionPrice }); continue;
         }
         const executionRoute = this._executionRoute(intent);
         const executionMode = executionRoute ? "cross" : null;
@@ -136,18 +135,18 @@ export class OrderCoordinator {
         const attempt = {
           accountId: this.config.accountId, intent: "BUY", instId: intent.instId, baseCcy: instrument.base, decisionId: intent.decisionId, clOrdId, payloadHash: hash,
           strategyDay: intent.strategyDay, generation: intent.generation, plannedSize: size, reservedExposureUsd: multiplyDecimal(multiplyDecimal(size, executionPrice), feeMultiplier),
-          frozenTargetUsd: frozenTarget, decisionQuoteTs: quote.ts, decisionQuoteHash: await payloadHash(quote), decisionCandleTs: candle.ts, decisionCandleHash: await payloadHash(candle), decisionMarketKey: marketKey,
+          decisionQuoteTs: quote.ts, decisionQuoteHash: await payloadHash(quote), decisionCandleTs: candle.ts, decisionCandleHash: await payloadHash(candle), decisionMarketKey: marketKey,
           executionLimitPrice: executionPrice, instrumentVersion: String(instrument.version ?? "1"), holdHours: intent.holdHours, maxHoldHours: intent.maxHoldHours, strategyConfigHash: intent.configHash,
-          admissionEquity: adjustedEquity(this.account.value), admissionExposure: intent.managedExposure ?? "0", accountSnapshotVersion: String(this.account.value.version), executionMode, executionRoute,
+          accountSnapshotVersion: String(this.account.value?.version ?? "capacity"), executionMode, executionRoute,
           decisionTriggerPrice: quote.last, decisionReferencePrice: guard.signal.breakoutPrice, decisionReason: "BUY_BREAKOUT_CONFIRMED",
         };
         try {
           const reserveStarted = this.clock.nowMs();
           let reserve;
-          try { reserve = await this.orders.reserveBuy(tx, attempt, { managedExposure: intent.managedExposure ?? "0", maxExposure: multiplyDecimal(BUY_ADMISSION_LEVERAGE, attempt.admissionEquity) }); }
+          try { reserve = await this.orders.reserveBuy(tx, attempt); }
           finally { this.slo?.record("buy_reserve_db", reserveStarted); }
           if (reserve.authorized) rows.push({ intent: { ...intent, clOrdId }, attempt, payload });
-          else this._emitBuyBlock({ ...intent, clOrdId }, "RESERVATION", reserve.reason ?? "RESERVATION_DENIED", { adjustedEquity: attempt.admissionEquity, managedExposure: intent.managedExposure ?? "0", reservedExposure: attempt.reservedExposureUsd, remainingCapacity: this._remainingCapacity(intent.managedExposure ?? "0") });
+          else this._emitBuyBlock({ ...intent, clOrdId }, "RESERVATION", reserve.reason ?? "RESERVATION_DENIED", { availBuy: intent.availBuy, reservedExposure: attempt.reservedExposureUsd });
         } catch (error) {
           // A lost COMMIT acknowledgement is resolved by the deterministic business key.
           // Never turn that ambiguity into a second generation or a second HTTP submit.
@@ -417,7 +416,6 @@ export class OrderCoordinator {
     if (this.onBuySettled) await this.onBuySettled({ attempt, fills, exchangeState, accFillSz });
     return { settled: true };
   }
-  _remainingCapacity(managedExposure = "0") { const snapshot = this.account.value; if (!snapshot) return "0"; const equity = adjustedEquity(snapshot); const remaining = subtractDecimal(multiplyDecimal(BUY_ADMISSION_LEVERAGE, equity), managedExposure); return compareDecimal(remaining, "0") > 0 ? remaining : "0"; }
   _executionMode(intent) {
     const value = intent.executionMode ?? intent.execution_mode ?? (this._executionRoute(intent) ? "cross" : null);
     return value === "cross" || value === "cash" ? value : null;
@@ -440,8 +438,6 @@ export class OrderCoordinator {
     if (!quote || !candle || !instrument || instrument.state !== "live" || intent.protected || intent.enabled === false || intent.dailyReady === false || !this.isBuyAllowed(intent.instId)) return { allowed: false, reason: "MARKET", evidence: marketEvidence };
     const candleState = candleFreshness({ candle, exchangeNowMs }).state;
     if (candleState !== "FRESH") return { allowed: false, reason: "MARKET", evidence: { ...marketEvidence, candleState } };
-    const risk = assessLeverage({ committedExposure: intent.managedExposure ?? "0", ...this.account.value });
-    if (risk.hardStopped) return { allowed: false, reason: "HARD_STOP", evidence: { adjustedEquity: risk.equity, leverage: risk.effective, managedExposure: intent.managedExposure ?? "0", hardStop: true } };
     const limitPrice = roundToStep(intent.dailyLimitPrice, instrument.tickSz, "down");
     const signal = buySignal({ last: quote.last, askPx: quote.askPx, limitPrice, previousClosedHigh: candle.high });
     // The same snapshot backs both the allow/deny decision and attempt construction in

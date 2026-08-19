@@ -12,32 +12,39 @@ export const INSTRUMENT_TIMELINE_SQL = `
     SELECT account_id FROM order_attempts WHERE inst_id = $1
     UNION
     SELECT account_id FROM filled_orders WHERE inst_id = $1
+  ), attempts AS (
+    SELECT id,cl_ord_id,created_at,updated_at,intent,state,reservation_state,execution_mode,execution_route,
+      planned_size,reserved_exposure_usd,reserved_base_size,execution_limit_price,
+      concat('A',row_number() OVER (ORDER BY created_at,id)) AS attempt_ref
+    FROM order_attempts WHERE inst_id = $1
   ), timeline AS (
-    SELECT event_time, event_type, intent, state, reservation_state,
+    SELECT event_time, event_type, record_kind, state_observed_at, attempt_ref, intent, state, reservation_state,
     execution_mode, execution_route, planned_size, reserved_exposure_usd,
     reserved_base_size, execution_limit_price, fill_size, disposed_size,
     fill_price, sell_time, force_sell_time, protection_price, sell_state,
     sell_trigger_reason, allocation_state
     FROM (
       SELECT created_at AS event_time, 'ORDER_ATTEMPT'::text AS event_type,
+      'CURRENT_STATE_SNAPSHOT'::text AS record_kind, updated_at AS state_observed_at, attempt_ref,
       intent, state, reservation_state, execution_mode, execution_route,
       planned_size::text, reserved_exposure_usd::text, reserved_base_size::text,
       execution_limit_price::text, NULL::text AS fill_size, NULL::text AS disposed_size,
       NULL::text AS fill_price, NULL::bigint AS sell_time, NULL::bigint AS force_sell_time,
       NULL::text AS protection_price, NULL::text AS sell_state, NULL::text AS sell_trigger_reason,
       NULL::text AS allocation_state
-      FROM order_attempts
-      WHERE inst_id = $1
+      FROM attempts
       UNION ALL
-      SELECT to_timestamp(fill_time / 1000.0), 'FILL'::text,
-      side, source, NULL::text, execution_mode, execution_route,
+      SELECT to_timestamp(f.fill_time / 1000.0), 'FILL'::text,
+      'DURABLE_EVENT'::text, to_timestamp(f.fill_time / 1000.0), a.attempt_ref,
+      f.side, f.source, NULL::text, f.execution_mode, f.execution_route,
       NULL::text, NULL::text, NULL::text, NULL::text,
-      fill_size::text, disposed_size::text, fill_price::text, sell_time, force_sell_time,
-      protection_price::text, sell_state, sell_trigger_reason, allocation_state
-      FROM filled_orders
-      WHERE inst_id = $1
+      f.fill_size::text, f.disposed_size::text, f.fill_price::text, f.sell_time, f.force_sell_time,
+      f.protection_price::text, f.sell_state, f.sell_trigger_reason, f.allocation_state
+      FROM filled_orders f LEFT JOIN attempts a ON a.cl_ord_id=f.source_attempt_cl_ord_id
+      WHERE f.inst_id = $1
       UNION ALL
       SELECT updated_at, 'PROTECTION'::text,
+      'CURRENT_STATE_SNAPSHOT'::text, updated_at, NULL::text,
       NULL::text, state, NULL::text, NULL::text, NULL::text,
       NULL::text, NULL::text, NULL::text, NULL::text,
       NULL::text, NULL::text, NULL::text, NULL::bigint, NULL::bigint,
@@ -58,20 +65,29 @@ export function validateInstrument(instrument) {
 }
 
 export function redactTimeline(instrument, rows) {
+  const timeline = rows.map((row) => ({
+    eventTime: row.event_time instanceof Date ? row.event_time.toISOString() : row.event_time,
+    eventType: row.event_type, recordKind: row.record_kind, stateObservedAt: row.state_observed_at instanceof Date ? row.state_observed_at.toISOString() : row.state_observed_at,
+    attemptRef: row.attempt_ref, intent: row.intent, state: row.state,
+    reservationState: row.reservation_state, executionMode: row.execution_mode,
+    executionRoute: row.execution_route, plannedSize: row.planned_size,
+    reservedExposureUsd: row.reserved_exposure_usd, reservedBaseSize: row.reserved_base_size,
+    executionLimitPrice: row.execution_limit_price, fillSize: row.fill_size,
+    disposedSize: row.disposed_size, fillPrice: row.fill_price, sellTime: row.sell_time,
+    forceSellTime: row.force_sell_time, protectionPrice: row.protection_price,
+    sellState: row.sell_state, sellTriggerReason: row.sell_trigger_reason,
+    allocationState: row.allocation_state,
+  }));
   return {
     instrument: validateInstrument(instrument),
-    timeline: rows.map((row) => ({
-      eventTime: row.event_time instanceof Date ? row.event_time.toISOString() : row.event_time,
-      eventType: row.event_type, intent: row.intent, state: row.state,
-      reservationState: row.reservation_state, executionMode: row.execution_mode,
-      executionRoute: row.execution_route, plannedSize: row.planned_size,
-      reservedExposureUsd: row.reserved_exposure_usd, reservedBaseSize: row.reserved_base_size,
-      executionLimitPrice: row.execution_limit_price, fillSize: row.fill_size,
-      disposedSize: row.disposed_size, fillPrice: row.fill_price, sellTime: row.sell_time,
-      forceSellTime: row.force_sell_time, protectionPrice: row.protection_price,
-      sellState: row.sell_state, sellTriggerReason: row.sell_trigger_reason,
-      allocationState: row.allocation_state,
-    })),
+    attemptRefScope: "QUERY_SNAPSHOT",
+    summary: {
+      attemptSnapshots: timeline.filter((row) => row.eventType === "ORDER_ATTEMPT").length,
+      fills: timeline.filter((row) => row.eventType === "FILL").length,
+      protectionSnapshots: timeline.filter((row) => row.eventType === "PROTECTION").length,
+      attemptStates: Object.fromEntries(timeline.filter((row) => row.eventType === "ORDER_ATTEMPT").reduce((counts, row) => counts.set(row.state, (counts.get(row.state) ?? 0) + 1), new Map())),
+    },
+    timeline,
   };
 }
 

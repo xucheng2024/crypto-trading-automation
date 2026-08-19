@@ -1,7 +1,5 @@
 import { compareDecimal, divideDecimal, multiplyDecimal, roundToStep } from "../decimal.js";
 
-export const BUY_ADMISSION_LEVERAGE = "2.95";
-export const MAX_STRATEGY_EFFECTIVE_LEVERAGE = "3";
 export const TRADE_FEE_RATE = "0.0005";
 export const CANDLE_INTERVAL_MS = 180_000;
 export const CANDLE_STALE_HARD_MS = 390_000;
@@ -56,20 +54,6 @@ export function buySignal({ last, askPx, limitPrice, previousClosedHigh }) {
 export function sellBreakdownPrice(previousClosedLow) {
   if (compareDecimal(previousClosedLow, "0") <= 0) throw new Error("previous closed low must be positive");
   return multiplyDecimal(previousClosedLow, SELL_BREAKDOWN_MULTIPLIER);
-}
-
-export function adjustedEquity({ totalEq, adjEq }) {
-  if (compareDecimal(totalEq, "0") <= 0 || compareDecimal(adjEq, "0") <= 0) throw new Error("equity must be positive");
-  return compareDecimal(totalEq, adjEq) < 0 ? totalEq : adjEq;
-}
-
-export function assessLeverage({ committedExposure, totalEq, adjEq, candidateCost = "0" }) {
-  const equity = adjustedEquity({ totalEq, adjEq });
-  const projected = multiplyDecimal("1", committedExposure); // canonical decimal validation
-  const candidate = multiplyDecimal("1", candidateCost);
-  const exposure = addDecimal(projected, candidate);
-  const effective = divideDecimal(exposure, equity);
-  return { equity, effective, hardStopped: compareDecimal(divideDecimal(projected, equity), MAX_STRATEGY_EFFECTIVE_LEVERAGE) >= 0, admitted: compareDecimal(effective, BUY_ADMISSION_LEVERAGE) <= 0 };
 }
 
 function addDecimal(left, right) {

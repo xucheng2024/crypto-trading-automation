@@ -16,7 +16,7 @@ import { expectedClosedCandleTs } from "../src/domain/rules.js";
 const run = promisify(execFile);
 async function port() { return new Promise((resolve, reject) => { const s = net.createServer(); s.once("error", reject); s.listen(0, "127.0.0.1", () => { const value = s.address().port; s.close((error) => error ? reject(error) : resolve(value)); }); }); }
 async function transaction(client, fn) { await client.query("BEGIN"); try { const value = await fn(client); await client.query("COMMIT"); return value; } catch (error) { await client.query("ROLLBACK"); throw error; } }
-function buy(id) { return { accountId: "p4", intent: "BUY", instId: "BTC-USDT", baseCcy: "BTC", clOrdId: id, payloadHash: `hash-${id}`, strategyDay: "2026-08-14", generation: 0, plannedSize: "0.1", reservedExposureUsd: "10", frozenTargetUsd: "100", decisionQuoteTs: 1, decisionQuoteHash: "quote", decisionCandleTs: 1, decisionCandleHash: "candle", decisionMarketKey: "market", executionLimitPrice: "100", instrumentVersion: "v1", holdHours: "24", strategyConfigHash: "cfg", admissionEquity: "100", admissionExposure: "0", accountSnapshotVersion: "v1" }; }
+function buy(id) { return { accountId: "p4", intent: "BUY", instId: "BTC-USDT", baseCcy: "BTC", clOrdId: id, payloadHash: `hash-${id}`, strategyDay: "2026-08-14", generation: 0, plannedSize: "0.1", reservedExposureUsd: "10", decisionQuoteTs: 1, decisionQuoteHash: "quote", decisionCandleTs: 1, decisionCandleHash: "candle", decisionMarketKey: "market", executionLimitPrice: "100", instrumentVersion: "v1", holdHours: "24", strategyConfigHash: "cfg", accountSnapshotVersion: "v1" }; }
 
 test("P4 system harness persists a real PostgreSQL lifecycle across restart", { timeout: 60_000 }, async () => {
   const dir = await mkdtemp(join(tmpdir(), "crypto-p4-system-")); const pgPort = await port(); const log = join(dir, "postgres.log"); let client; let running = false;
@@ -25,10 +25,10 @@ test("P4 system harness persists a real PostgreSQL lifecycle across restart", { 
   const stop = async () => { await client?.end(); client = null; if (running) { await run("pg_ctl", ["-D", dir, "-m", "immediate", "-w", "stop"]); running = false; } };
   try {
     await run("initdb", ["-D", dir, "--no-locale", "-E", "UTF8", "-A", "trust"]); await start();
-    for (const name of ["0001_p1_core.sql", "0002_p3_exit.sql", "0003_p4_import.sql", "0004_hybrid_execution.sql", "0005_execution_route.sql", "0006_decision_observability.sql", "0007_sell_force_hold.sql", "0008_buy_decision_correlation.sql"]) await client.query(await readFile(new URL(`../migrations/postgres/${name}`, import.meta.url), "utf8"));
+    for (const name of ["0001_p1_core.sql", "0002_p3_exit.sql", "0003_p4_import.sql", "0004_hybrid_execution.sql", "0005_execution_route.sql", "0006_decision_observability.sql", "0007_sell_force_hold.sql", "0008_buy_decision_correlation.sql", "0009_okx_capacity_admission.sql"]) await client.query(await readFile(new URL(`../migrations/postgres/${name}`, import.meta.url), "utf8"));
     const harness = new P4SystemHarness({ postgres: { stop, start } });
     await client.query("INSERT INTO daily_limit_cache(inst_id,strategy_day,status,input_hash) VALUES('P4-USDT','2026-01-01','READY','p4')");
-    const orders = new OrderRepository(); await transaction(client, (tx) => orders.reserveBuy(tx, buy("p4-restart-attempt"), { managedExposure: "0", maxExposure: "100" }));
+    const orders = new OrderRepository(); await transaction(client, (tx) => orders.reserveBuy(tx, buy("p4-restart-attempt")));
     await harness.stopPostgres(); await harness.startPostgres();
     await harness.run({ id: "P4_REAL_PG_RESTART", assertionId: "PG_RESTART_DURABLE", execute: async (h) => { const row = await client.query("SELECT status,input_hash FROM daily_limit_cache WHERE inst_id='P4-USDT'"); const attempt = await orders.findByClOrdId(client, "p4-restart-attempt"); h.assert("PG_RESTART_DURABLE", row.rows.length === 1 && row.rows[0].input_hash === "p4" && attempt.state === "PREPARED" && attempt.reservation_state === "ACTIVE"); } });
     const events = []; const owner = new PostgresOwnerGuard(client, "p4-composition-owner");
@@ -49,7 +49,7 @@ test("P4 full runtime uses one PostgreSQL, fake OKX WS/REST, five-order Coordina
   };
   try {
     await run("initdb", ["-D", dir, "--no-locale", "-E", "UTF8", "-A", "trust"]); await start();
-    for (const name of ["0001_p1_core.sql", "0002_p3_exit.sql", "0003_p4_import.sql", "0004_hybrid_execution.sql", "0005_execution_route.sql", "0006_decision_observability.sql", "0007_sell_force_hold.sql", "0008_buy_decision_correlation.sql"]) await client.query(await readFile(new URL(`../migrations/postgres/${name}`, import.meta.url), "utf8"));
+    for (const name of ["0001_p1_core.sql", "0002_p3_exit.sql", "0003_p4_import.sql", "0004_hybrid_execution.sql", "0005_execution_route.sql", "0006_decision_observability.sql", "0007_sell_force_hold.sql", "0008_buy_decision_correlation.sql", "0009_okx_capacity_admission.sql"]) await client.query(await readFile(new URL(`../migrations/postgres/${name}`, import.meta.url), "utf8"));
     const ids = Array.from({ length: 50 }, (_, index) => `Q${index}-USDT`); const owner = new PostgresOwnerGuard(client, "p4-real-runtime");
     const day = new Date(Date.now() + 8 * 3_600_000).toISOString().slice(0, 10); const dayStart = Date.parse(`${day}T00:00:00+08:00`); const priorStart = dayStart - 86_400_000; const closedTs = expectedClosedCandleTs(Date.now());
     let submitted = []; const rest = {

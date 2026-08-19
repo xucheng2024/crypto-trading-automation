@@ -69,7 +69,7 @@ async function startPostgres() {
     await run("pg_ctl", ["-D", dir, "-l", logPath, "-o", `-p ${port} -h 127.0.0.1`, "-w", "start"]);
     started = true;
     let admin = await connect();
-    const migrations = ["0001_p1_core.sql", "0002_p3_exit.sql", "0003_p4_import.sql", "0004_hybrid_execution.sql", "0005_execution_route.sql", "0006_decision_observability.sql", "0007_sell_force_hold.sql", "0008_buy_decision_correlation.sql"];
+    const migrations = ["0001_p1_core.sql", "0002_p3_exit.sql", "0003_p4_import.sql", "0004_hybrid_execution.sql", "0005_execution_route.sql", "0006_decision_observability.sql", "0007_sell_force_hold.sql", "0008_buy_decision_correlation.sql", "0009_okx_capacity_admission.sql"];
     for (const migration of migrations) {
       const sql = await readFile(new URL(`../migrations/postgres/${migration}`, import.meta.url), "utf8");
       await admin.query(sql); await admin.query(sql);
@@ -107,10 +107,10 @@ function buy(id, { accountId = "a", instId = "BTC-USDT", baseCcy = "BTC", genera
   return {
     accountId, intent: "BUY", instId, baseCcy, clOrdId: id, payloadHash: `hash-${id}`,
     strategyDay: "2026-08-14", generation, plannedSize: "0.1", reservedExposureUsd: exposure,
-    frozenTargetUsd: "100", decisionQuoteTs: 1, decisionQuoteHash: "quote-hash",
+    decisionQuoteTs: 1, decisionQuoteHash: "quote-hash",
     decisionCandleTs: 1, decisionCandleHash: "candle-hash", decisionMarketKey: `market-${id}`,
     executionLimitPrice: "100", instrumentVersion: "instrument-v1", holdHours: "24",
-    strategyConfigHash: "config-v1", admissionEquity: "100", admissionExposure: "0",
+    strategyConfigHash: "config-v1",
     accountSnapshotVersion: "account-v1", executionMode, executionRoute, decisionId,
   };
 }
@@ -121,8 +121,6 @@ function exitAttempt(id, { accountId = "a", intent = "SELL", instId = "BTC-USDT"
     sourceBuyTradeId: source, generation, plannedSize: "1", reservedBaseSize: "1",
   };
 }
-
-const admission = (maxExposure, managedExposure = "0") => ({ managedExposure, maxExposure });
 
 test("temporary PostgreSQL enforces P1-B invariants", { timeout: 60_000 }, async (t) => {
   const db = await startPostgres();
@@ -139,7 +137,7 @@ test("temporary PostgreSQL enforces P1-B invariants", { timeout: 60_000 }, async
       const columnNames = new Set(columns.rows.map((row) => row.column_name));
       for (const forbidden of ["active_attempt_id", "remaining_size", "sell_generation", "breach_latched", "exit_mode", "confirmed_sold_size", "external_disposed_size", "interest", "debt"]) assert.equal(columnNames.has(forbidden), false);
       for (const required of ["reservation_state", "decision_market_key", "decision_id", "failure_fingerprint", "account_snapshot_version", "execution_mode", "execution_route", "fill_price", "fee", "fee_ccy", "max_adverse_pct", "decision_trigger_price", "decision_reference_price", "max_hold_hours", "force_sell_time", "sell_trigger_reason"]) assert.equal(columnNames.has(required), true);
-      await tx(db.admin, (client) => orders.reserveBuy(client, buy("cash-mode", { accountId: "mode", executionMode: "cash", executionRoute: "spot", decisionId: "decision-cash" }), admission("100")));
+      await tx(db.admin, (client) => orders.reserveBuy(client, buy("cash-mode", { accountId: "mode", executionMode: "cash", executionRoute: "spot", decisionId: "decision-cash" })));
       await tx(db.admin, (client) => state.insertFill(client, { accountId: "mode", instId: "BTC-USDT", baseCcy: "BTC", tradeId: "cash-fill", source: "SYSTEM", side: "BUY", fillSize: "1", fillTime: 1, holdHours: "24", strategyConfigHash: "cfg", sellTime: 2, sellState: "WAITING", executionMode: "cash", executionRoute: "spot" }));
       assert.equal((await db.admin.query("SELECT execution_mode FROM order_attempts WHERE cl_ord_id='cash-mode'")).rows[0].execution_mode, "cash");
       assert.equal((await db.admin.query("SELECT decision_id FROM order_attempts WHERE cl_ord_id='cash-mode'")).rows[0].decision_id, "decision-cash");
@@ -148,48 +146,46 @@ test("temporary PostgreSQL enforces P1-B invariants", { timeout: 60_000 }, async
       await assert.rejects(db.admin.query("UPDATE filled_orders SET execution_mode='isolated' WHERE trade_id='cash-fill'"), (error) => error.code === "23514");
     });
 
-    await t.test("two real transactions cannot reuse account exposure", async () => {
+    await t.test("two real transactions preserve independent durable BUY attempts", async () => {
       const left = await db.connect();
       const right = await db.connect();
       try {
         const results = await Promise.all([
-          tx(left, (client) => orders.reserveBuy(client, buy("concurrent-left", { accountId: "concurrent", instId: "BTC-USDT", baseCcy: "BTC" }), admission("15"))),
-          tx(right, (client) => orders.reserveBuy(client, buy("concurrent-right", { accountId: "concurrent", instId: "ETH-USDT", baseCcy: "ETH" }), admission("15"))),
+          tx(left, (client) => orders.reserveBuy(client, buy("concurrent-left", { accountId: "concurrent", instId: "BTC-USDT", baseCcy: "BTC" }))),
+          tx(right, (client) => orders.reserveBuy(client, buy("concurrent-right", { accountId: "concurrent", instId: "ETH-USDT", baseCcy: "ETH" }))),
         ]);
-        assert.deepEqual(results.map((result) => result.authorized).sort(), [false, true]);
-        assert.equal((await db.admin.query("SELECT count(*)::int AS count FROM order_attempts WHERE account_id='concurrent'")).rows[0].count, 1);
+        assert.deepEqual(results.map((result) => result.authorized), [true, true]);
+        assert.equal((await db.admin.query("SELECT count(*)::int AS count FROM order_attempts WHERE account_id='concurrent'")).rows[0].count, 2);
       } finally {
         await db.close(left);
         await db.close(right);
       }
     });
 
-    await t.test("spot then margin and margin then spot share the same 2.95 exposure ceiling", async () => {
+    await t.test("spot and margin BUY attempts retain independent lifecycle reservations", async () => {
       const cases = [
         { accountId: "spot-first", first: "spot", second: "margin" },
         { accountId: "margin-first", first: "margin", second: "spot" },
       ];
       for (const row of cases) {
-        assert.equal((await tx(db.admin, (client) => orders.reserveBuy(client, buy(`${row.accountId}-one`, { accountId: row.accountId, instId: "BTC-USDT", baseCcy: "BTC", exposure: "100", executionRoute: row.first }), admission("295")))).authorized, true);
-        assert.equal((await tx(db.admin, (client) => orders.reserveBuy(client, buy(`${row.accountId}-two`, { accountId: row.accountId, instId: "ETH-USDT", baseCcy: "ETH", exposure: "195", executionRoute: row.second }), admission("295")))).authorized, true);
-        assert.deepEqual(await tx(db.admin, (client) => orders.reserveBuy(client, buy(`${row.accountId}-three`, { accountId: row.accountId, instId: "SOL-USDT", baseCcy: "SOL", exposure: "0.01", executionRoute: "spot" }), admission("295"))), { authorized: false, reason: "EXPOSURE_LIMIT" });
+        assert.equal((await tx(db.admin, (client) => orders.reserveBuy(client, buy(`${row.accountId}-one`, { accountId: row.accountId, instId: "BTC-USDT", baseCcy: "BTC", exposure: "100", executionRoute: row.first })))).authorized, true);
+        assert.equal((await tx(db.admin, (client) => orders.reserveBuy(client, buy(`${row.accountId}-two`, { accountId: row.accountId, instId: "ETH-USDT", baseCcy: "ETH", exposure: "195", executionRoute: row.second })))).authorized, true);
+        assert.equal((await tx(db.admin, (client) => orders.reserveBuy(client, buy(`${row.accountId}-three`, { accountId: row.accountId, instId: "SOL-USDT", baseCcy: "SOL", exposure: "0.01", executionRoute: "spot" })))).authorized, true);
         const routes = (await db.admin.query("SELECT execution_route FROM order_attempts WHERE account_id=$1 ORDER BY id", [row.accountId])).rows.map((item) => item.execution_route);
-        assert.deepEqual(routes, [row.first, row.second]);
+        assert.deepEqual(routes, [row.first, row.second, "spot"]);
       }
     });
 
-    await t.test("numeric admission never converts through JavaScript Number", async () => {
-      assert.deepEqual(await tx(db.admin, (client) => orders.reserveBuy(client, buy("precise-one", { accountId: "precise", exposure: "9007199254740993.00000000" }), admission("9007199254740993.00000001"))), { authorized: true });
-      assert.deepEqual(await tx(db.admin, (client) => orders.reserveBuy(client, buy("precise-two", { accountId: "precise", instId: "ETH-USDT", baseCcy: "ETH", exposure: "0.00000002" }), admission("9007199254740993.00000001"))), { authorized: false, reason: "EXPOSURE_LIMIT" });
-      assert.deepEqual(await tx(db.admin, (client) => orders.reserveBuy(client, buy("managed-exposure", { accountId: "managed", exposure: "10" }), admission("15", "6"))), { authorized: false, reason: "EXPOSURE_LIMIT" });
-      assert.deepEqual(await tx(db.admin, (client) => orders.reserveBuy(client, buy("negative-exposure", { accountId: "negative" }), admission("15", "-1"))), { authorized: false, reason: "EXPOSURE_LIMIT" });
+    await t.test("large decimal reservations persist without JavaScript Number conversion", async () => {
+      assert.deepEqual(await tx(db.admin, (client) => orders.reserveBuy(client, buy("precise-one", { accountId: "precise", exposure: "9007199254740993.00000000" }))), { authorized: true });
+      assert.deepEqual(await tx(db.admin, (client) => orders.reserveBuy(client, buy("precise-two", { accountId: "precise", instId: "ETH-USDT", baseCcy: "ETH", exposure: "0.00000002" }))), { authorized: true });
     });
 
     await t.test("attempt, fill, generation and active-exit constraints are durable", async () => {
-      await tx(db.admin, (client) => orders.reserveBuy(client, buy("active-buy", { accountId: "unique" }), admission("100")));
-      await assert.rejects(tx(db.admin, (client) => orders.reserveBuy(client, buy("active-buy-2", { accountId: "unique", generation: 1 }), admission("100"))), (error) => error.code === "23505");
+      await tx(db.admin, (client) => orders.reserveBuy(client, buy("active-buy", { accountId: "unique" })));
+      await assert.rejects(tx(db.admin, (client) => orders.reserveBuy(client, buy("active-buy-2", { accountId: "unique", generation: 1 }))), (error) => error.code === "23505");
       await db.admin.query("UPDATE order_attempts SET state='SETTLED',reservation_state='RELEASED' WHERE cl_ord_id='active-buy'");
-      await assert.rejects(tx(db.admin, (client) => orders.reserveBuy(client, buy("same-generation", { accountId: "unique" }), admission("100"))), (error) => error.code === "23505");
+      await assert.rejects(tx(db.admin, (client) => orders.reserveBuy(client, buy("same-generation", { accountId: "unique" }))), (error) => error.code === "23505");
 
       await tx(db.admin, (client) => state.insertFill(client, { accountId: "exit", instId: "BTC-USDT", baseCcy: "BTC", tradeId: "trade1", source: "SYSTEM", side: "BUY", fillSize: "2", fillTime: 1, holdHours: "24", strategyConfigHash: "cfg", sellTime: 2, sellState: "WAITING" }));
       await tx(db.admin, (client) => orders.reserveExit(client, exitAttempt("sell-one", { accountId: "exit" })));
@@ -203,6 +199,12 @@ test("temporary PostgreSQL enforces P1-B invariants", { timeout: 60_000 }, async
       assert.equal((await tx(db.admin, (client) => state.compareAndSetFill(client, row.id, row.version, "1.5"))).rowCount, 0);
       const currentVersion = (BigInt(row.version) + 1n).toString();
       await assert.rejects(tx(db.admin, (client) => state.compareAndSetFill(client, row.id, currentVersion, "3")), (error) => error.code === "23514");
+
+      await tx(db.admin, (client) => orders.reserveBuy(client, buy("recovered-attempt", { accountId: "recovery", exposure: "20" })));
+      await tx(db.admin, (client) => state.insertFill(client, { accountId: "recovery", instId: "BTC-USDT", baseCcy: "BTC", tradeId: "recovered-fill", source: "SYSTEM", side: "BUY", fillSize: "1", fillTime: 2, fillPrice: "10", holdHours: "24", strategyConfigHash: "cfg", sellTime: 3, sellState: "WAITING" }));
+      assert.equal((await tx(db.admin, (client) => state.attachSystemFillAttempt(client, { accountId: "recovery", instId: "BTC-USDT", tradeId: "recovered-fill", sourceAttemptClOrdId: "recovered-attempt" }))).rowCount, 1);
+      assert.equal((await tx(db.admin, (client) => state.attachSystemFillAttempt(client, { accountId: "recovery", instId: "BTC-USDT", tradeId: "recovered-fill", sourceAttemptClOrdId: "different-attempt" }))).rowCount, 0, "replay cannot overwrite a verified link");
+      assert.equal((await tx(db.admin, (client) => orders.listBuyCycle(client, "recovery", "BTC-USDT", "2026-08-14"))).consumedUsd, "10.0050");
     });
 
     await t.test("latest confirmed 3m SELL threshold only ratchets upward and keeps CAS versions current", async () => {
@@ -215,7 +217,7 @@ test("temporary PostgreSQL enforces P1-B invariants", { timeout: 60_000 }, async
 
     await t.test("attempt and reservation roll back together", async () => {
       await assert.rejects(tx(db.admin, async (client) => {
-        await orders.reserveBuy(client, buy("rollback-buy", { accountId: "rollback" }), admission("100"));
+        await orders.reserveBuy(client, buy("rollback-buy", { accountId: "rollback" }));
         throw new Error("force rollback");
       }), /force rollback/);
       assert.equal((await db.admin.query("SELECT count(*)::int AS count FROM order_attempts WHERE cl_ord_id='rollback-buy'")).rows[0].count, 0);
@@ -252,13 +254,13 @@ test("temporary PostgreSQL enforces P1-B invariants", { timeout: 60_000 }, async
     await t.test("database unavailability rejects reservation before authorization", async () => {
       const dead = await db.connect();
       await db.close(dead);
-      await assert.rejects(tx(dead, (client) => orders.reserveBuy(client, buy("dead-db", { accountId: "dead" }), admission("100"))));
+      await assert.rejects(tx(dead, (client) => orders.reserveBuy(client, buy("dead-db", { accountId: "dead" }))));
       assert.equal((await db.admin.query("SELECT count(*)::int AS count FROM order_attempts WHERE cl_ord_id='dead-db'")).rows[0].count, 0);
     });
 
     await t.test("P2 coordinator transitions preserve reservation semantics in a real transaction", async () => {
       await tx(db.admin, async (client) => {
-        await orders.reserveBuy(client, buy("p2-submit", { accountId: "p2", exposure: "10" }), admission("100"));
+        await orders.reserveBuy(client, buy("p2-submit", { accountId: "p2", exposure: "10" }));
         await orders.markSubmitted(client, "p2-submit", "okx-1");
         await state.insertFill(client, { accountId: "p2", instId: "BTC-USDT", baseCcy: "BTC", tradeId: "p2-fill", source: "SYSTEM", side: "BUY", fillSize: "0.1", fillTime: 10, holdHours: "24", strategyConfigHash: "cfg", sellTime: 11, sellState: "WAITING" });
         await orders.markSettled(client, "p2-submit", "filled", "CONVERTED");
@@ -266,7 +268,7 @@ test("temporary PostgreSQL enforces P1-B invariants", { timeout: 60_000 }, async
       const settled = (await db.admin.query("SELECT state,reservation_state,ord_id FROM order_attempts WHERE cl_ord_id='p2-submit'")).rows[0];
       assert.deepEqual(settled, { state: "SETTLED", reservation_state: "CONVERTED", ord_id: "okx-1" });
       await tx(db.admin, async (client) => {
-        await orders.reserveBuy(client, buy("p2-not-created", { accountId: "p2", instId: "ETH-USDT", baseCcy: "ETH", generation: 0 }), admission("100"));
+        await orders.reserveBuy(client, buy("p2-not-created", { accountId: "p2", instId: "ETH-USDT", baseCcy: "ETH", generation: 0 }));
         await orders.markNotCreated(client, "p2-not-created", "OWNER_NOT_HELD");
       });
       const released = (await db.admin.query("SELECT state,reservation_state FROM order_attempts WHERE cl_ord_id='p2-not-created'")).rows[0];
@@ -274,10 +276,10 @@ test("temporary PostgreSQL enforces P1-B invariants", { timeout: 60_000 }, async
     });
 
     await t.test("P2 real PostgreSQL survives commit-ack-loss and SETTLED replay without duplicate exposure", async () => {
-      await tx(db.admin, (client) => orders.reserveBuy(client, buy("ack-prepared", { accountId: "ack", exposure: "10" }), admission("100")));
+      await tx(db.admin, (client) => orders.reserveBuy(client, buy("ack-prepared", { accountId: "ack", exposure: "10" })));
       // The first caller has no COMMIT acknowledgement. A retry sees the durable business key,
       // rather than manufacturing another attempt/generation.
-      await assert.rejects(tx(db.admin, (client) => orders.reserveBuy(client, buy("ack-prepared", { accountId: "ack", exposure: "10" }), admission("100"))), (error) => error.code === "23505");
+      await assert.rejects(tx(db.admin, (client) => orders.reserveBuy(client, buy("ack-prepared", { accountId: "ack", exposure: "10" }))), (error) => error.code === "23505");
       const prepared = await tx(db.admin, (client) => orders.findByClOrdId(client, "ack-prepared"));
       assert.equal(prepared.state, "PREPARED"); assert.equal(prepared.generation, 0);
       assert.equal((await db.admin.query("SELECT count(*)::int AS count FROM order_attempts WHERE account_id='ack'")).rows[0].count, 1);
@@ -296,16 +298,16 @@ test("temporary PostgreSQL enforces P1-B invariants", { timeout: 60_000 }, async
       assert.equal((await db.admin.query("SELECT count(*)::int AS count FROM filled_orders WHERE account_id='ack' AND trade_id='ack-trade'")).rows[0].count, 1);
     });
 
-    await t.test("P2 fifty concurrent reservations use the real account transaction advisory lock and stay within 2.95", async () => {
+    await t.test("P2 fifty concurrent lifecycle reservations preserve every independently admitted IOC", async () => {
       const clients = await Promise.all(Array.from({ length: 50 }, () => db.connect()));
       try {
         const results = await Promise.all(clients.map((client, index) => tx(client, (txClient) => orders.reserveBuy(txClient, buy(`fifty-${index}`, {
           accountId: "fifty", instId: `C${String(index).padStart(2, "0")}-USDT`, baseCcy: `C${index}`, exposure: "15",
-        }), admission("442.5")))));
+        })))));
         const authorized = results.filter((result) => result.authorized).length;
-        assert.equal(authorized, 29, "each ACTIVE reservation includes its fee-inflated exposure and must stop before 2.95x");
+        assert.equal(authorized, 50);
         const active = (await db.admin.query("SELECT COALESCE(sum(reserved_exposure_usd),0)::text AS exposure FROM order_attempts WHERE account_id='fifty' AND reservation_state='ACTIVE'" )).rows[0].exposure;
-        assert.equal(active, "435"); assert.ok(Number(active) <= 442.5);
+        assert.equal(active, "750");
       } finally {
         await Promise.all(clients.map((client) => db.close(client)));
       }
@@ -330,7 +332,7 @@ test("temporary PostgreSQL enforces P1-B invariants", { timeout: 60_000 }, async
 
     await t.test("P2 real repository pagination commits fills and watermarks only after every SPOT/MARGIN page succeeds", async () => {
       await tx(db.admin, async (client) => {
-        await orders.reserveBuy(client, buy("page-unknown", { accountId: "pages", exposure: "10" }), admission("100"));
+        await orders.reserveBuy(client, buy("page-unknown", { accountId: "pages", exposure: "10" }));
         await orders.markUnknown(client, "page-unknown", "timeout");
       });
       let fail = true;
@@ -381,7 +383,7 @@ test("temporary PostgreSQL enforces P1-B invariants", { timeout: 60_000 }, async
           submitBatchOrders: async (payload) => { batches.push(payload); batchNo += 1; return payload.map((item, index) => batchNo === 1 && index === 0 ? { clOrdId: item.clOrdId, status: "UNKNOWN", reason: "timeout" } : batchNo === 2 && index === 0 ? { clOrdId: item.clOrdId, status: "NOT_CREATED", reason: "rejected" } : { clOrdId: item.clOrdId, status: "SUBMITTED", ordId: `o-${item.clOrdId}` }); },
         },
       });
-      for (let index = 1; index <= 50; index += 1) coordinator.enqueue({ intent: "BUY", instId: `C${String(index).padStart(2, "0")}-USDT`, generation: 0, eligibleSince: index, strategyDay: "2026-08-14", dailyLimitPrice: "100", holdHours: "24", configHash: "cfg", managedExposure: "0" });
+      for (let index = 1; index <= 50; index += 1) coordinator.enqueue({ intent: "BUY", instId: `C${String(index).padStart(2, "0")}-USDT`, generation: 0, eligibleSince: index, strategyDay: "2026-08-14", dailyLimitPrice: "100", holdHours: "24", configHash: "cfg" });
       for (let batch = 0; batch < 10; batch += 1) assert.equal((await coordinator.drainOnce()).count, 5);
       assert.equal(batches.length, 10); assert.deepEqual(batches[0].map((row) => row.instId), ["C01-USDT", "C02-USDT", "C03-USDT", "C04-USDT", "C05-USDT"]);
       assert.ok(batches.every((batch) => batch.length >= 1 && batch.length <= 5));
@@ -413,9 +415,9 @@ test("temporary PostgreSQL enforces P1-B invariants", { timeout: 60_000 }, async
     await t.test("P3 fixed retention only removes aged terminal attempts and preserves live ledger evidence", async () => {
       assert.equal(P3_RETENTION_VERSION, "p3-retention-v1"); assert.match(P3_DELETE_TERMINAL_ATTEMPTS_SQL, /state IN \('NOT_CREATED','SETTLED'\)/);
       await tx(db.admin, async (client) => {
-        await orders.reserveBuy(client, buy("retain-terminal", { accountId: "retention" }), admission("100"));
+        await orders.reserveBuy(client, buy("retain-terminal", { accountId: "retention" }));
         await orders.markSubmitted(client, "retain-terminal", "retained-order"); await orders.markSettled(client, "retain-terminal", "filled", "CONVERTED");
-        await orders.reserveBuy(client, buy("retain-active", { accountId: "retention", instId: "ETH-USDT", baseCcy: "ETH" }), admission("100"));
+        await orders.reserveBuy(client, buy("retain-active", { accountId: "retention", instId: "ETH-USDT", baseCcy: "ETH" }));
         await state.insertFill(client, { accountId: "retention", instId: "BTC-USDT", baseCcy: "BTC", tradeId: "retain-account-sell", billId: "9", source: "ACCOUNT", side: "SELL", fillSize: "1", fillTime: 1, allocationState: "PENDING" });
         await state.claimAnnouncement(client, { title: "Spot delisting BTC", pTime: 1 });
         await orders.upsertWatermark(client, { accountId: "retention", instType: "SPOT", endpoint: "fills", watermark: 1, overlapBegin: 0, healthy: true });
@@ -432,7 +434,7 @@ test("temporary PostgreSQL enforces P1-B invariants", { timeout: 60_000 }, async
       await db.admin.query("CREATE ROLE p4_maintenance_test NOLOGIN");
       await db.admin.query("GRANT USAGE ON SCHEMA public TO p4_maintenance_test");
       await db.admin.query("GRANT EXECUTE ON FUNCTION p4_retain_terminal_attempts(timestamptz, integer) TO p4_maintenance_test");
-      await orders.reserveBuy(db.admin, buy("p4-maintenance-terminal", { accountId: "p4-maintenance" }), admission("100"));
+      await orders.reserveBuy(db.admin, buy("p4-maintenance-terminal", { accountId: "p4-maintenance" }));
       await orders.markNotCreated(db.admin, "p4-maintenance-terminal", "fixture");
       await db.admin.query("UPDATE order_attempts SET updated_at='2019-01-01' WHERE cl_ord_id='p4-maintenance-terminal'");
       await db.admin.query("SET ROLE p4_maintenance_test");

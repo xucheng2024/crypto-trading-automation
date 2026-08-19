@@ -1,5 +1,5 @@
 import { classifyManagedFill } from "../infrastructure/okx/rest-client.js";
-import { addDecimal, compareDecimal } from "../decimal.js";
+import { addDecimal, compareDecimal, divideDecimal, multiplyDecimal } from "../decimal.js";
 
 // Observability must never become part of the reconciliation correctness path.
 // Ports are intentionally fire-and-forget: both a synchronous throw and a
@@ -9,6 +9,24 @@ function emit(port, event) { try { Promise.resolve(port(event)).catch(() => {});
 function keyOf(fill) { return `${fill.instId}:${fill.tradeId}`; }
 function fillKey(fill) { return [Number(fill.fillTime), /^\d+$/.test(String(fill.billId ?? "")) ? BigInt(fill.billId) : -1n, String(fill.tradeId)].map(String).join(":"); }
 function normalizePage(value) { return Array.isArray(value) ? { rows: value, cursor: null } : { rows: value?.data ?? value?.rows ?? [], cursor: value?.next ?? value?.cursor ?? null }; }
+
+function recordConfirmedBuy(groups, { managed, fill, attempt, sellTime }) {
+  const clOrdId = attempt?.cl_ord_id ?? attempt?.clOrdId ?? null;
+  const key = [managed.source, managed.instId, clOrdId ?? "UNLINKED"].join(":");
+  const current = groups.get(key) ?? { source: managed.source, instId: managed.instId, clOrdId, decisionId: attempt?.decision_id ?? attempt?.decisionId, executionMode: managed.executionMode, executionRoute: managed.executionRoute, fillCount: 0, filledSize: "0", fillNotional: "0", priced: true, minFillPrice: null, maxFillPrice: null, firstFillTime: null, lastFillTime: null, sellTime, sellState: "WAITING" };
+  const price = fill.fillPx;
+  current.fillCount += 1; current.filledSize = addDecimal(current.filledSize, managed.sz);
+  if (price && compareDecimal(price, "0") > 0) {
+    current.fillNotional = addDecimal(current.fillNotional, multiplyDecimal(managed.sz, price));
+    current.minFillPrice = !current.minFillPrice || compareDecimal(price, current.minFillPrice) < 0 ? price : current.minFillPrice;
+    current.maxFillPrice = !current.maxFillPrice || compareDecimal(price, current.maxFillPrice) > 0 ? price : current.maxFillPrice;
+  } else current.priced = false;
+  const fillTime = Number(managed.fillTime);
+  current.firstFillTime = current.firstFillTime == null ? fillTime : Math.min(current.firstFillTime, fillTime);
+  current.lastFillTime = current.lastFillTime == null ? fillTime : Math.max(current.lastFillTime, fillTime);
+  current.sellTime = current.sellTime == null ? sellTime : Math.min(current.sellTime, sellTime);
+  groups.set(key, current);
+}
 
 /** Read-only reconciliation and ACCOUNT fill ingestion; it never invokes mutation transport. */
 export class ReconciliationService {
@@ -60,14 +78,30 @@ export class ReconciliationService {
     const unique = [...new Map(raw.filter((fill) => fill?.instId && fill?.tradeId).map((fill) => [keyOf(fill), fill])).values()]
       .sort((a, b) => fillKey(a).localeCompare(fillKey(b), undefined, { numeric: true }));
     const accountBuys = new Set();
+    const batch = { observed: unique.length, managed: 0, inserted: 0, linked: 0, alreadyPresent: 0, ignored: 0, systemBuys: 0, systemSells: 0, accountBuys: 0, accountSells: 0 };
+    const confirmedBuys = new Map();
     await this.transaction(async (tx) => {
       for (const fill of unique) {
         const order = typeof this.transport.order === "function" ? await this.transport.order({ instId: fill.instId, ordId: fill.ordId, clOrdId: fill.clOrdId }) : null;
-        await this.ingestFill(tx, fill, order, accountBuys);
+        await this.ingestFill(tx, fill, order, accountBuys, batch, confirmedBuys);
       }
       for (const instType of instTypes) await this.orders.upsertWatermark?.(tx, { accountId, instType, endpoint: "fills", watermark: unique.at(-1)?.fillTime ?? overlapBegin, overlapBegin, healthy: true });
     });
     for (const instId of accountBuys) await this.refreshAccountBuy(instId);
+    // This deliberately reports only post-commit aggregate counts. It is safe
+    // to retain, useful when recovery is the only path that sees a fill, and
+    // contains no account, order, trade, or exchange identifiers.
+    emit(this.telemetry, { type: "fill_reconciliation", reason: "FILL_BATCH_COMMITTED", ...batch });
+    for (const row of confirmedBuys.values()) emit(this.telemetry, {
+      type: "trade_lifecycle", reason: "BUY_LEDGER_CONFIRMED", intent: "BUY", source: row.source,
+      instId: row.instId, clOrdId: row.clOrdId ?? undefined, decisionId: row.decisionId ?? undefined,
+      executionMode: row.executionMode, executionRoute: row.executionRoute,
+      fillCount: row.fillCount, filledSize: row.filledSize,
+      fillNotional: row.priced ? row.fillNotional : undefined,
+      weightedAvgPrice: row.priced ? divideDecimal(row.fillNotional, row.filledSize) : undefined,
+      minFillPrice: row.priced ? row.minFillPrice : undefined, maxFillPrice: row.priced ? row.maxFillPrice : undefined,
+      firstFillTime: row.firstFillTime, lastFillTime: row.lastFillTime, sellTime: row.sellTime, sellState: row.sellState,
+    });
     return unique;
   }
   async reconcileAll({ accountId, attempts, watermarks }) {
@@ -159,15 +193,22 @@ export class ReconciliationService {
     try { await this.onAccountBuy(instId); }
     catch (error) { emit(this.telemetry, { type: "account_fill", reason: "ACCOUNT_BUY_PROJECTION_REFRESH_FAILED", instId, error: error?.message }); }
   }
-  async ingestFill(tx, fill, order, accountBuys = null) {
+  async ingestFill(tx, fill, order, accountBuys = null, batch = null, confirmedBuys = null) {
     const managed = classifyManagedFill(fill, order, this.ownership);
-    if (!managed) return false;
+    if (!managed) { if (batch) batch.ignored += 1; return false; }
+    if (batch) batch.managed += 1;
+    let sourceAttemptClOrdId = null; let attempt = null;
     if (order?.clOrdId && typeof this.orders.findByClOrdId === "function") {
-      const attempt = await this.orders.findByClOrdId(tx, order.clOrdId);
-      if (attempt) { managed.source = "SYSTEM"; managed.executionMode = attempt.execution_mode ?? attempt.executionMode ?? managed.executionMode; managed.executionRoute = attempt.execution_route ?? attempt.executionRoute ?? managed.executionRoute; }
+      attempt = await this.orders.findByClOrdId(tx, order.clOrdId);
+      if (attempt) {
+        managed.source = "SYSTEM";
+        sourceAttemptClOrdId = attempt.cl_ord_id ?? attempt.clOrdId;
+        managed.executionMode = attempt.execution_mode ?? attempt.executionMode ?? managed.executionMode;
+        managed.executionRoute = attempt.execution_route ?? attempt.executionRoute ?? managed.executionRoute;
+      }
     }
     const isBuy = managed.side === "buy";
-    if (isBuy && !this.ownership.holdHoursByInst?.[managed.instId]) { emit(this.telemetry, { type: "account_fill", reason: "STRATEGY_CONFIG_MISSING", instId: managed.instId }); return false; }
+    if (isBuy && !this.ownership.holdHoursByInst?.[managed.instId]) { if (batch) batch.ignored += 1; emit(this.telemetry, { type: "account_fill", reason: "STRATEGY_CONFIG_MISSING", instId: managed.instId }); return false; }
     const baseCcy = managed.instId.split("-")[0];
     if (managed.source === "ACCOUNT" && !isBuy) await this.orders.lockExitBase?.(tx, this.ownership.accountId, baseCcy);
     const inserted = await this.state.insertFill(tx, {
@@ -175,8 +216,23 @@ export class ReconciliationService {
       source: managed.source, side: isBuy ? "BUY" : "SELL", fillSize: managed.sz, fillTime: managed.fillTime, fillPrice: fill.fillPx, fee: fill.fee, feeCcy: fill.feeCcy,
       executionMode: managed.executionMode,
       executionRoute: managed.executionRoute,
+      sourceAttemptClOrdId,
       ...(isBuy ? { holdHours: this.ownership.holdHoursByInst?.[managed.instId], maxHoldHours: this.ownership.maxHoldHoursByInst?.[managed.instId] ?? null, strategyConfigHash: this.ownership.configHash, sellTime: Number(managed.fillTime) + Number(this.ownership.holdHoursByInst?.[managed.instId] ?? 0) * 3_600_000, forceSellTime: this.ownership.maxHoldHoursByInst?.[managed.instId] ? Number(managed.fillTime) + Number(this.ownership.maxHoldHoursByInst[managed.instId]) * 3_600_000 : null, sellState: "WAITING" } : { allocationState: "PENDING" }),
     });
+    let linked = 0;
+    if (managed.source === "SYSTEM" && sourceAttemptClOrdId && inserted?.rowCount === 0) {
+      linked = (await this.state.attachSystemFillAttempt?.(tx, { accountId: this.ownership.accountId, instId: managed.instId, tradeId: managed.tradeId, sourceAttemptClOrdId }))?.rowCount ?? 0;
+    }
+    if (batch) {
+      if (inserted?.rowCount) batch.inserted += 1; else batch.alreadyPresent += 1;
+      batch.linked += linked;
+      if (managed.source === "SYSTEM") { if (isBuy) batch.systemBuys += 1; else batch.systemSells += 1; }
+      else if (isBuy) batch.accountBuys += 1; else batch.accountSells += 1;
+    }
+    if (isBuy && inserted?.rowCount === 1 && confirmedBuys) {
+      const sellTime = Number(managed.fillTime) + Number(this.ownership.holdHoursByInst?.[managed.instId] ?? 0) * 3_600_000;
+      recordConfirmedBuy(confirmedBuys, { managed, fill, attempt, sellTime });
+    }
     if (managed.source === "ACCOUNT" && isBuy && inserted?.rowCount !== 0) {
       // Refresh the in-memory risk and exit indexes only after the durable
       // transaction commits. A callback failure must not roll back or invalidate

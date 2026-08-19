@@ -68,6 +68,16 @@ test("Azure ops summary separates waiting, policy, opportunity, and safety block
   assert.deepEqual(trading.blockClasses, { LIKELY_RECOVERABLE: 2, MARKET_MOVED: 0, SAFETY_BOUNDARY: 0 }); assert.deepEqual(trading.blockStages, { PLANNER: 1, AVAILABILITY: 1 });
 });
 
+test("Azure ops summary labels lifecycle telemetry separately from durable recovery confirmation", () => {
+  const trading = summarizeTrading([], [], new Map(), [], [], [
+    { type: "fill_reconciliation", reason: "FILL_BATCH_COMMITTED", inserted: "2", linked: "1" },
+    { type: "sell_watch_loaded", reason: "SELL_WATCH_SNAPSHOT", total: "3", instruments: "1", waiting: "2", triggered: "1", dustPending: "0" },
+  ]);
+  assert.equal(trading.observability.lifecycleCoverage, "TELEMETRY_ONLY"); assert.equal(trading.observability.reconciliationCoverage, "PARTIAL_DURABLE_CONFIRMATION");
+  assert.equal(trading.observability.recoveredInserted, 2); assert.equal(trading.observability.recoveredLinked, 1);
+  assert.deepEqual(trading.observability.sellWatchSnapshot, { total: 3, instruments: 1, waiting: 2, triggered: 1, dustPending: 0 });
+});
+
 test("Azure ops summary calculates the smallest exact capacity gap", () => {
   const trading = summarizeTrading([], [], new Map(), [], [
     { timestamp: "1", stage: "SIZING", reason: "MINIMUM_SIZE", instId: "BTC-USDT", availableCapacity: "3.7", minimumCapacity: "10", capacityGap: "6.3" },
@@ -86,6 +96,18 @@ test("Azure ops summary links one BUY from candidate through API and fill", () =
   const attempt = summarizeTrading(decisions, lifecycle).attemptTimelines[0];
   assert.equal(attempt.outcome, "BUY_SETTLED"); assert.equal(attempt.clOrdId, "O1");
   assert.deepEqual(attempt.timeline.map((event) => event.stage), ["CANDIDATE", "PERSISTED", "API", "FILLED"]);
+});
+
+test("Azure ops summary exposes a post-commit recovery fill as durable ledger confirmation", () => {
+  const decisions = [{ timestamp: "1", reason: "BUY_QUEUED", decisionId: "D1", instId: "BTC-USDT" }];
+  const lifecycle = [
+    { timestamp: "2", reason: "BUY_PREPARED", decisionId: "D1", clOrdId: "O1", instId: "BTC-USDT" },
+    { timestamp: "3", reason: "BUY_LEDGER_CONFIRMED", decisionId: "D1", clOrdId: "O1", instId: "BTC-USDT", executionRoute: "margin", filledSize: "1", weightedAvgPrice: "2" },
+  ];
+  const trading = summarizeTrading(decisions, lifecycle);
+  assert.equal(trading.events.settled, 0); assert.equal(trading.events.ledgerConfirmed, 1);
+  assert.equal(trading.executions[1].apiBoundary, "DURABLE_LEDGER_CONFIRMED");
+  assert.deepEqual(trading.attemptTimelines[0].timeline.map((event) => event.stage), ["CANDIDATE", "PERSISTED", "LEDGER_CONFIRMED"]);
 });
 
 test("Azure ops summary fails closed on unsafe runtime state", () => {

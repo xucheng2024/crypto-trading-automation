@@ -100,6 +100,16 @@ test("P3 SELL uses a strict 3m breakdown: equality does not trigger", async () =
   assert.equal(sell.observeTicker("BTC-USDT").length, 1);
 });
 
+test("P3 rebuild reports a redacted sell-watch state snapshot", () => {
+  const telemetry = []; const sell = new SellService({ market: new MarketProjection({ clock: { nowMs: () => 1 } }), coordinator: { enqueue: () => true }, telemetry: (event) => telemetry.push(event) });
+  sell.rebuild([
+    { account_id: "secret", inst_id: "BTC-USDT", base_ccy: "BTC", trade_id: "one", side: "BUY", sell_state: "WAITING" },
+    { account_id: "secret", inst_id: "BTC-USDT", base_ccy: "BTC", trade_id: "two", side: "BUY", sell_state: "SELL_TRIGGERED" },
+    { account_id: "secret", inst_id: "ETH-USDT", base_ccy: "ETH", trade_id: "three", side: "BUY", sell_state: "DUST_PENDING" },
+  ]);
+  assert.deepEqual(telemetry.at(-1), { type: "sell_watch_loaded", reason: "SELL_WATCH_SNAPSHOT", total: 3, instruments: 2, waiting: 1, triggered: 1, dustPending: 1 });
+});
+
 test("P3 force hold fires at its boundary without a candle, fresh quote, or clock sync", () => {
   const now = { value: 100, nowMs() { return this.value; } }; const market = new MarketProjection({ clock: now });
   market.updateInstrument({ instId: "BTC-USDT", ts: 1, state: "live", tickSz: "0.1", lotSz: "0.1", minSz: "0.1", base: "BTC" });

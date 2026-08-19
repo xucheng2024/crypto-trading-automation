@@ -64,6 +64,15 @@ export class TradingStateRepository {
     ]);
   }
 
+  // Recovery may replay a fill that was first persisted before its matching
+  // order was available. Only fill the missing SYSTEM correlation; never
+  // overwrite an existing association or reclassify an ACCOUNT fill.
+  async attachSystemFillAttempt(tx, { accountId, instId, tradeId, sourceAttemptClOrdId }) {
+    return tx.query(`UPDATE filled_orders SET source_attempt_cl_ord_id=$4,version=version+1
+      WHERE account_id=$1 AND inst_id=$2 AND trade_id=$3 AND source='SYSTEM'
+        AND source_attempt_cl_ord_id IS NULL`, [accountId, instId, tradeId, sourceAttemptClOrdId]);
+  }
+
   async recordAdversePrice(tx, { accountId, instId, price }) {
     return tx.query(`UPDATE filled_orders SET
       min_price_after_fill=LEAST(COALESCE(min_price_after_fill,fill_price),$3::numeric),
@@ -195,19 +204,9 @@ export class OrderRepository {
       managed_fill_start_time=COALESCE(sync_watermarks.managed_fill_start_time,EXCLUDED.managed_fill_start_time),healthy=EXCLUDED.healthy,updated_at=now()`,
     [accountId, instType, endpoint, watermark, overlapBegin, managedFillStartTime, healthy]);
   }
-  async reserveBuy(tx, attempt, { managedExposure, maxExposure }) {
+  async reserveBuy(tx, attempt) {
     await tx.query("SELECT pg_advisory_xact_lock(hashtext($1))", [`buy:${attempt.accountId}`]);
-    const decision = await tx.query(`SELECT
-      (COALESCE(sum(reserved_exposure_usd) FILTER (
-        WHERE intent='BUY' AND state IN ('PREPARED','SUBMITTED','UNKNOWN') AND reservation_state='ACTIVE'
-      ), 0::numeric) + $2::numeric)::text AS committed_exposure,
-      ($2::numeric >= 0 AND $3::numeric > 0 AND $4::numeric > 0 AND
-      COALESCE(sum(reserved_exposure_usd) FILTER (
-        WHERE intent='BUY' AND state IN ('PREPARED','SUBMITTED','UNKNOWN') AND reservation_state='ACTIVE'
-      ), 0::numeric) + $2::numeric + $3::numeric <= $4::numeric) AS authorized
-    FROM order_attempts WHERE account_id=$1`, [attempt.accountId, managedExposure, attempt.reservedExposureUsd, maxExposure]);
-    if (decision.rows[0].authorized !== true) return { authorized: false, reason: "EXPOSURE_LIMIT" };
-    await this.insertAttempt(tx, { ...attempt, admissionExposure: decision.rows[0].committed_exposure });
+    await this.insertAttempt(tx, attempt);
     return { authorized: true };
   }
 
@@ -238,12 +237,12 @@ export class OrderRepository {
       attempt.payloadHash, attempt.sourceBuyTradeId ?? null, attempt.strategyDay ?? null,
       attempt.generation ?? 0, attempt.plannedSize ?? null,
       attempt.reservedExposureUsd ?? null, attempt.reservedBaseSize ?? null,
-      attempt.frozenTargetUsd ?? null, attempt.decisionQuoteTs ?? null,
+      null, attempt.decisionQuoteTs ?? null,
       attempt.decisionQuoteHash ?? null, attempt.decisionCandleTs ?? null,
       attempt.decisionCandleHash ?? null, attempt.decisionMarketKey ?? null,
       attempt.executionLimitPrice ?? null, attempt.instrumentVersion ?? null,
       attempt.holdHours ?? null, attempt.maxHoldHours ?? null, attempt.strategyConfigHash ?? null,
-      attempt.admissionEquity ?? null, attempt.admissionExposure ?? null,
+      null, null,
       attempt.accountSnapshotVersion ?? null, attempt.executionMode ?? "cross", attempt.executionRoute ?? "margin",
       attempt.decisionTriggerPrice ?? null, attempt.decisionReferencePrice ?? null, attempt.decisionReason ?? null,
       attempt.decisionId ?? null,
