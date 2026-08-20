@@ -46,6 +46,8 @@ test("positions CLI starts the VNet job and redacts log JSON", async () => {
   assert.ok(!calls.some((row) => row.includes("production-positions-read.yml")));
   assert.deepEqual(redactPositionsArtifact({ summary: { instruments: 1, openFills: 2, forbidden: "no" }, positions: [{ instrument: "BTC-USDT", remainingCostUsd: "100", openFills: 2, accountId: "forbidden" }] }).positions[0], { instrument: "BTC-USDT", remainingCostUsd: "100", openFills: 2 });
   assert.throws(() => parseManagedPositionsLog("no marker"), /missing the redacted JSON marker/);
+  const envelope = JSON.stringify({ TimeStamp: "t", Log: `F MANAGED_POSITIONS_JSON:${JSON.stringify({ summary: { instruments: 1, openFills: 1 }, positions: [{ instrument: "ETH-USDT", remainingCostUsd: "2", openFills: 1 }] })}` });
+  assert.deepEqual(parseManagedPositionsLog(envelope).positions[0].instrument, "ETH-USDT");
 });
 
 test("positions CLI still reads a matching redacted GitHub artifact", async () => {

@@ -271,11 +271,39 @@ export async function runTradeCommand(options, { command = run, json = runJson, 
   } finally { await fs.rm(directory, { recursive: true, force: true }); }
 }
 
+function extractJsonObject(text) {
+  let depth = 0, inString = false, escape = false;
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text[i];
+    if (inString) {
+      if (escape) { escape = false; continue; }
+      if (ch === "\\") { escape = true; continue; }
+      if (ch === "\"") inString = false;
+      continue;
+    }
+    if (ch === "\"") { inString = true; continue; }
+    if (ch === "{") depth += 1;
+    else if (ch === "}") {
+      depth -= 1;
+      if (depth === 0) return text.slice(0, i + 1);
+    }
+  }
+  throw new Error("Managed-positions job log JSON is truncated");
+}
+
 export function parseManagedPositionsLog(text) {
   const prefix = "MANAGED_POSITIONS_JSON:";
   const line = String(text).split(/\r?\n/).map((row) => row.trim()).find((row) => row.includes(prefix));
   if (!line) throw new Error("Managed-positions job log is missing the redacted JSON marker");
-  return JSON.parse(line.slice(line.indexOf(prefix) + prefix.length));
+  let source = line;
+  try {
+    const envelope = JSON.parse(line);
+    if (typeof envelope?.Log === "string") source = envelope.Log;
+  } catch {}
+  const payload = source.slice(source.indexOf(prefix) + prefix.length);
+  const start = payload.indexOf("{");
+  if (start < 0) throw new Error("Managed-positions job log is missing the redacted JSON marker");
+  return JSON.parse(extractJsonObject(payload.slice(start)));
 }
 
 export function redactPositionsArtifact(artifact) {
