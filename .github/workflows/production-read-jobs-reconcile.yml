@@ -45,7 +45,7 @@ jobs:
             if az containerapp job show --name "$name" --resource-group "$RESOURCE_GROUP" --output none 2>/dev/null; then
               az containerapp job update --name "$name" --resource-group "$RESOURCE_GROUP" --image "$image" --command node "$command" --set-env-vars "TRADING_MODE=OFF" "POSTGRES_URL=$url" --output none
             else
-              az containerapp job create --name "$name" --resource-group "$RESOURCE_GROUP" --environment "$environment_id" --trigger-type Manual --replica-timeout 60 --replica-retry-limit 0 --replica-completion-count 1 --parallelism 1 --image "$image" --cpu 0.25 --memory 0.5Gi --command node "$command" --env-vars "TRADING_MODE=OFF" "POSTGRES_URL=$url" --mi-system-assigned --registry-server "$ACR_LOGIN_SERVER" --registry-identity "$registry_identity" --output none
+              az containerapp job create --name "$name" --resource-group "$RESOURCE_GROUP" --environment "$environment_id" --trigger-type Manual --replica-timeout 60 --replica-retry-limit 0 --replica-completion-count 1 --parallelism 1 --image "$image" --cpu 0.25 --memory 0.5Gi --command node "$command" --env-vars "TRADING_MODE=OFF" "POSTGRES_URL=$url" --mi-system-assigned --mi-user-assigned "$registry_identity" --registry-server "$ACR_LOGIN_SERVER" --registry-identity "$registry_identity" --output none
             fi
           }
           reconcile "${prefix}-positions-read" scripts/query-managed-positions.mjs "${prefix}-positions-read"
