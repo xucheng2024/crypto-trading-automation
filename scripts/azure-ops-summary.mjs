@@ -271,24 +271,78 @@ export async function runTradeCommand(options, { command = run, json = runJson, 
   } finally { await fs.rm(directory, { recursive: true, force: true }); }
 }
 
-export async function runPositionsCommand(options, { command = run, json = runJson, fs = { mkdtemp, readFile, rm }, tempDir = tmpdir() } = {}) {
-  const repository = command("gh", ["repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"]);
+export function parseManagedPositionsLog(text) {
+  const prefix = "MANAGED_POSITIONS_JSON:";
+  const line = String(text).split(/\r?\n/).map((row) => row.trim()).find((row) => row.includes(prefix));
+  if (!line) throw new Error("Managed-positions job log is missing the redacted JSON marker");
+  return JSON.parse(line.slice(line.indexOf(prefix) + prefix.length));
+}
+
+export function redactPositionsArtifact(artifact) {
+  if (!artifact?.summary || !Array.isArray(artifact?.positions)) throw new Error("Managed-positions artifact is invalid");
+  const allowed = ["instrument", "remainingCostUsd", "openFills", "sellStates", "nextSellTime", "nextForceSellTime", "protectedFills", "dustPendingFills"];
+  const positions = artifact.positions.map((row) => Object.fromEntries(allowed.filter((key) => Object.hasOwn(row, key)).map((key) => [key, row[key]])));
+  const summary = { instruments: Number(artifact.summary.instruments), openFills: Number(artifact.summary.openFills) };
+  if (!Number.isSafeInteger(summary.instruments) || summary.instruments < 0 || !Number.isSafeInteger(summary.openFills) || summary.openFills < 0 || summary.instruments !== positions.length) throw new Error("Managed-positions artifact summary is invalid");
+  return { summary, positions };
+}
+
+export function positionsReadJobName(appName) {
+  return appName.endsWith("-engine") ? `${appName.slice(0, -"-engine".length)}-positions-read` : `${appName}-positions-read`;
+}
+
+function jobExecutionName(started) {
+  const name = started?.name;
+  if (typeof name === "string" && name && !name.includes("/")) return name;
+  const id = String(started?.id ?? "");
+  const marker = "/executions/";
+  const index = id.toLowerCase().lastIndexOf(marker);
+  if (index >= 0) return decodeURIComponent(id.slice(index + marker.length));
+  throw new Error("Managed-positions job start did not return an execution name");
+}
+
+function sleepMs(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+export async function runPositionsCommand(options, { command = run, json = runJson, fs = { mkdtemp, readFile, rm }, tempDir = tmpdir(), sleep = sleepMs, now = Date.now, timeoutMs = 60_000 } = {}) {
   if (options.request) {
-    const branch = command("gh", ["api", `repos/${repository}`, "--jq", ".default_branch"]);
-    command("gh", ["workflow", "run", "production-positions-read.yml", "--repo", repository, "--ref", branch]);
-    return { command: "positions", requested: true, repository, branch };
+    const resourceGroup = options.resourceGroup ?? command("gh", ["variable", "get", "AZURE_RESOURCE_GROUP"]);
+    const appName = options.app ?? command("gh", ["variable", "get", "CONTAINER_APP_NAME"]);
+    const jobName = positionsReadJobName(appName);
+    const started = json("az", ["containerapp", "job", "start", "--name", jobName, "--resource-group", resourceGroup, "--only-show-errors", "--output", "json"]);
+    const executionName = jobExecutionName(started);
+    let status = "Running";
+    const deadline = now() + timeoutMs;
+    while (now() < deadline) {
+      const execution = json("az", ["containerapp", "job", "execution", "show", "--name", jobName, "--resource-group", resourceGroup, "--job-execution-name", executionName, "--only-show-errors", "--output", "json"]);
+      status = execution?.properties?.status ?? execution?.status ?? "Unknown";
+      if (status === "Succeeded") break;
+      if (status === "Failed" || status === "Cancelled") throw new Error(`Managed-positions job ${executionName} ${status}`);
+      await sleep(2000);
+    }
+    if (status !== "Succeeded") throw new Error(`Managed-positions job ${executionName} timed out`);
+    let logs = "";
+    while (now() < deadline) {
+      logs = command("az", ["containerapp", "job", "logs", "show", "--name", jobName, "--resource-group", resourceGroup, "--container", "positions-read", "--execution", executionName, "--only-show-errors"]);
+      try {
+        const { summary, positions } = redactPositionsArtifact(parseManagedPositionsLog(logs));
+        return { command: "positions", requested: false, job: jobName, execution: executionName, summary, positions };
+      } catch (error) {
+        if (!/missing the redacted JSON marker/.test(error.message)) throw error;
+        await sleep(2000);
+      }
+    }
+    throw new Error(`Managed-positions job ${executionName} log is missing the redacted JSON marker`);
   }
+  const repository = command("gh", ["repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"]);
   const runInfo = json("gh", ["api", `repos/${repository}/actions/runs/${options.runId}`]);
   if (!runInfo || !String(runInfo.path ?? "").endsWith("/production-positions-read.yml")) throw new Error(`Run ${options.runId} is not a production managed-positions run`);
   const directory = await fs.mkdtemp(join(tempDir, "crypto-remote-positions-"));
   try {
     command("gh", ["run", "download", String(options.runId), "--repo", repository, "--name", "managed-positions", "--dir", directory]);
     const artifact = JSON.parse(await fs.readFile(join(directory, "managed-positions.json"), "utf8"));
-    if (!artifact?.summary || !Array.isArray(artifact?.positions)) throw new Error("Managed-positions artifact is invalid");
-    const allowed = ["instrument", "remainingCostUsd", "openFills", "sellStates", "nextSellTime", "nextForceSellTime", "protectedFills", "dustPendingFills"];
-    const positions = artifact.positions.map((row) => Object.fromEntries(allowed.filter((key) => Object.hasOwn(row, key)).map((key) => [key, row[key]])));
-    const summary = { instruments: Number(artifact.summary.instruments), openFills: Number(artifact.summary.openFills) };
-    if (!Number.isSafeInteger(summary.instruments) || summary.instruments < 0 || !Number.isSafeInteger(summary.openFills) || summary.openFills < 0 || summary.instruments !== positions.length) throw new Error("Managed-positions artifact summary is invalid");
+    const { summary, positions } = redactPositionsArtifact(artifact);
     return { command: "positions", requested: false, runId: options.runId, summary, positions };
   } finally { await fs.rm(directory, { recursive: true, force: true }); }
 }
@@ -401,7 +455,10 @@ export async function main(argv = process.argv.slice(2)) {
     const summary = await runPositionsCommand(options);
     if (options.json) console.log(JSON.stringify(summary));
     else if (summary.requested) console.log(`Requested redacted managed-position summary on ${summary.branch}`);
-    else console.log(`Managed positions: instruments=${summary.summary.instruments} open_fills=${summary.summary.openFills} | run=${summary.runId}`);
+    else {
+      const source = summary.execution ? `job=${summary.job} execution=${summary.execution}` : `run=${summary.runId}`;
+      console.log(`Managed positions: instruments=${summary.summary.instruments} open_fills=${summary.summary.openFills} | ${source}`);
+    }
     return summary;
   }
   const queryStartedAt = new Date().toISOString();

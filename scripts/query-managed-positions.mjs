@@ -68,9 +68,17 @@ export function parseArgs(argv) {
   return {};
 }
 
+export const MANAGED_POSITIONS_JSON_PREFIX = "MANAGED_POSITIONS_JSON:";
+
+export function extractManagedPositionsJson(text) {
+  const line = String(text).split(/\r?\n/).map((row) => row.trim()).find((row) => row.includes(MANAGED_POSITIONS_JSON_PREFIX));
+  if (!line) throw new Error("Managed-positions output is missing the redacted JSON marker");
+  return JSON.parse(line.slice(line.indexOf(MANAGED_POSITIONS_JSON_PREFIX) + MANAGED_POSITIONS_JSON_PREFIX.length));
+}
+
 export async function main(argv = process.argv.slice(2)) {
   const result = await queryManagedPositions(parseArgs(argv));
-  console.log(JSON.stringify(result));
+  console.log(`${MANAGED_POSITIONS_JSON_PREFIX}${JSON.stringify(result)}`);
   return result;
 }
 

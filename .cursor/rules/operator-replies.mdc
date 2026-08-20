@@ -1,0 +1,21 @@
+---
+description: Keep operator replies plain; keep Codex Speeder visible as product status
+alwaysApply: true
+---
+
+# Operator replies
+
+User-facing replies are for the operator. Routing notes, model lists, and other internal tool lines stay hidden.
+
+Codex Speeder is a user-facing product. Always show its one-line status in ordinary English so the operator can tell it is working. Keep the `↳ Codex Speeder:` brand. Never say "skipped".
+
+- Lead with the answer: what is true, what changed, or what to do next.
+- Use the same words the operator used (deploy, positions, SQL, revision).
+- Hide internal status such as `workflow-saver`, `STATUS: APPROVE`, `CACHE_HANDOFF`, or participating models.
+- Do not explain which other skill, plugin, or subagent ran unless the operator asked.
+
+```text
+Bad Speeder:  ↳ Codex Speeder: skipped, already known; continue with the current file and test
+Good Speeder: ↳ Codex Speeder: already has this file's context; continuing the edit and tests
+Good Speeder: ↳ Codex Speeder: prepared 3 related files; Codex can edit from these files
+```

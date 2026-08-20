@@ -32,7 +32,7 @@ jobs:
       - name: Query the redacted managed-position summary
         env:
           POSTGRES_URL: ${{ vars.POSTGRES_MIGRATION_URL }}
-        run: node scripts/query-managed-positions.mjs > managed-positions.json
+        run: node scripts/query-managed-positions.mjs | sed -n 's/^MANAGED_POSITIONS_JSON://p' > managed-positions.json
       - uses: actions/upload-artifact@v4
         with:
           name: managed-positions

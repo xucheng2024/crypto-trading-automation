@@ -87,8 +87,10 @@ module postgres 'modules/postgres.bicep' = {
 }
 var enginePrincipalName = '${names.env}-engine'
 var maintenancePrincipalName = '${names.env}-maintenance'
+var positionsReadPrincipalName = '${names.env}-positions-read'
 var enginePostgresUrl = 'postgresql://${uriComponent(enginePrincipalName)}@${postgres.outputs.fqdn}:5432/${postgresDatabase}'
 var maintenancePostgresUrl = 'postgresql://${uriComponent(maintenancePrincipalName)}@${postgres.outputs.fqdn}:5432/${postgresDatabase}'
+var positionsReadPostgresUrl = 'postgresql://${uriComponent(positionsReadPrincipalName)}@${postgres.outputs.fqdn}:5432/${postgresDatabase}'
 module apps 'modules/apps.bicep' = {
   name: 'apps'
   params: {
@@ -106,6 +108,7 @@ module apps 'modules/apps.bicep' = {
     keyVaultUri: 'https://${vault.outputs.name}${environment().suffixes.keyvaultDns}'
     enginePostgresUrl: enginePostgresUrl
     maintenancePostgresUrl: maintenancePostgresUrl
+    positionsReadPostgresUrl: positionsReadPostgresUrl
     okxAccountId: okxAccountId
     okxInstruments: okxInstruments
     managedFillStartMs: managedFillStartMs
@@ -155,5 +158,7 @@ output keyVaultName string = vault.outputs.name
 output postgresFqdn string = postgres.outputs.fqdn
 output enginePrincipalId string = apps.outputs.enginePrincipalId
 output maintenancePrincipalId string = apps.outputs.maintenancePrincipalId
+output positionsReadPrincipalId string = apps.outputs.positionsReadPrincipalId
 output enginePrincipalName string = apps.outputs.enginePrincipalName
 output maintenancePrincipalName string = apps.outputs.maintenancePrincipalName
+output positionsReadPrincipalName string = apps.outputs.positionsReadPrincipalName

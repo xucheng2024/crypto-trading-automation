@@ -5,6 +5,7 @@ for (const required of [
   "npm ci --omit=dev",
   "COPY src/decimal.js ./src/decimal.js",
   "COPY src/infrastructure/azure ./src/infrastructure/azure",
+  "scripts/query-managed-positions.mjs",
   "USER trading",
   "TRADING_MODE=OFF",
   "HEALTHCHECK",

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { assessRuntime, classifyBlock, classifyDecision, classifySevereTraces, parseArgs, queryRows, runPositionsCommand, summarizeDecisions, summarizeDeployment, summarizeRunner, summarizeTrading, traceEvents } from "../scripts/azure-ops-summary.mjs";
+import { assessRuntime, classifyBlock, classifyDecision, classifySevereTraces, parseArgs, parseManagedPositionsLog, positionsReadJobName, queryRows, redactPositionsArtifact, runPositionsCommand, summarizeDecisions, summarizeDeployment, summarizeRunner, summarizeTrading, traceEvents } from "../scripts/azure-ops-summary.mjs";
 
 test("Azure ops summary converts query tables and aggregates decisions", () => {
   assert.deepEqual(queryRows({ tables: [{ columns: [{ name: "reason" }, { name: "decisions" }], rows: [["WAIT", 2]] }] }), [{ reason: "WAIT", decisions: 2 }]);
@@ -24,11 +24,31 @@ test("Azure ops summary accepts trading, deployment, and runner commands", () =>
   assert.throws(() => parseArgs(["deploy", "--run-id", "0"]), /positive integer/);
 });
 
-test("positions CLI dispatches only on explicit request and reads a matching redacted artifact", async () => {
-  const commands = [];
-  const requested = await runPositionsCommand(parseArgs(["positions", "--request"]), { command: (...args) => { commands.push(args); return args[0] === "gh" && args[1].includes(".default_branch") ? "main" : "owner/repo"; }, json: () => ({}) });
-  assert.deepEqual(requested, { command: "positions", requested: true, repository: "owner/repo", branch: "main" });
-  assert.deepEqual(commands.at(-1), ["gh", ["workflow", "run", "production-positions-read.yml", "--repo", "owner/repo", "--ref", "main"]]);
+test("positions CLI starts the VNet job and redacts log JSON", async () => {
+  const calls = [];
+  const requested = await runPositionsCommand(parseArgs(["positions", "--request", "--resource-group", "rg", "--app", "trading-cae-engine"]), {
+    command: (bin, args) => {
+      calls.push([bin, ...args]);
+      if (bin === "az" && args.includes("logs")) return 'ts MANAGED_POSITIONS_JSON:{"summary":{"instruments":1,"openFills":2,"forbidden":"no"},"positions":[{"instrument":"BTC-USDT","remainingCostUsd":"100","openFills":2,"sellStates":["WAITING"],"nextSellTime":1,"accountId":"forbidden"}]}';
+      throw new Error(`unexpected command ${bin} ${args.join(" ")}`);
+    },
+    json: (bin, args) => {
+      calls.push([bin, ...args]);
+      if (bin === "az" && args.includes("start")) return { name: "trading-cae-positions-read-abc" };
+      if (bin === "az" && args.includes("execution")) return { properties: { status: "Succeeded" } };
+      throw new Error(`unexpected json ${bin} ${args.join(" ")}`);
+    },
+    sleep: async () => {},
+  });
+  assert.deepEqual(requested, { command: "positions", requested: false, job: "trading-cae-positions-read", execution: "trading-cae-positions-read-abc", summary: { instruments: 1, openFills: 2 }, positions: [{ instrument: "BTC-USDT", remainingCostUsd: "100", openFills: 2, sellStates: ["WAITING"], nextSellTime: 1 }] });
+  assert.equal(positionsReadJobName("trading-cae-engine"), "trading-cae-positions-read");
+  assert.ok(calls.some((row) => row[0] === "az" && row.includes("start")));
+  assert.ok(!calls.some((row) => row.includes("production-positions-read.yml")));
+  assert.deepEqual(redactPositionsArtifact({ summary: { instruments: 1, openFills: 2, forbidden: "no" }, positions: [{ instrument: "BTC-USDT", remainingCostUsd: "100", openFills: 2, accountId: "forbidden" }] }).positions[0], { instrument: "BTC-USDT", remainingCostUsd: "100", openFills: 2 });
+  assert.throws(() => parseManagedPositionsLog("no marker"), /missing the redacted JSON marker/);
+});
+
+test("positions CLI still reads a matching redacted GitHub artifact", async () => {
   await assert.rejects(runPositionsCommand(parseArgs(["positions", "--run-id", "8"]), { command: () => "owner/repo", json: () => ({ path: ".github/workflows/production-deploy.yml" }), fs: {} }), /not a production managed-positions run/);
   const result = await runPositionsCommand(parseArgs(["positions", "--run-id", "7"]), {
     command: () => "owner/repo", json: () => ({ path: ".github/workflows/production-positions-read.yml" }),

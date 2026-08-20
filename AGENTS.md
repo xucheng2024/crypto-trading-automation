@@ -56,4 +56,5 @@ Choose checks based on the changed paths:
 # Communication
 
 - Keep progress updates, command output, findings, and final responses concise.
+- Write for the operator in plain English. Keep the Codex Speeder one-line status visible and understandable; hide other internal skill, routing, or tool status lines.
 - Report only actionable failures, material risks, deployment mode, revision, health, commit, and workflow URL.

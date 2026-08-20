@@ -115,6 +115,33 @@ test("P4 managed-positions workflow is read-only, VNet-scoped, and artifact-limi
   assert.match(workflow, /query-managed-positions\.mjs/); assert.match(workflow, /retention-days: 1/); assert.match(workflow, /managed-positions\.json/);
 });
 
+test("P4 positions-read job is manual, image-backed, and SELECT-only", async () => {
+  const [apps, main, dockerfile, deploy] = await Promise.all([
+    readFile("infrastructure/bicep/modules/apps.bicep", "utf8"),
+    readFile("infrastructure/bicep/main.bicep", "utf8"),
+    readFile("Dockerfile", "utf8"),
+    readFile(".github/workflows/production-deploy.yml", "utf8"),
+  ]);
+  const job = apps.slice(apps.indexOf("resource positionsRead 'Microsoft.App/jobs"), apps.indexOf("\n// AcrPull, maintenance"));
+  assert.match(job, /name: '\$\{environmentName\}-positions-read'/);
+  assert.match(job, /triggerType: 'Manual'/);
+  assert.match(job, /replicaTimeout: 60/);
+  assert.match(job, /command: \['node', 'scripts\/query-managed-positions\.mjs'\]/);
+  assert.match(job, /POSTGRES_URL', value: positionsReadPostgresUrl/);
+  assert.doesNotMatch(job, /KEY_VAULT|APPLICATIONINSIGHTS|MAINTENANCE_ADAPTER_MODULE/);
+  assert.match(apps, /guid\(acrId, positionsRead\.id/);
+  assert.doesNotMatch(apps, /guid\(keyVaultId, positionsRead\.id/);
+  assert.match(main, /positionsReadPostgresUrl/);
+  assert.match(dockerfile, /scripts\/query-managed-positions\.mjs/);
+  assert.match(deploy, /containerapp job update/);
+  assert.match(deploy, /positions-read/);
+  assert.match(deploy, /  deploy_off:[\s\S]*az containerapp job update[\s\S]*promote_full:/);
+  assert.equal([...deploy.matchAll(/containerapp job update/g)].length, 1);
+  const sql = await readFile("docs/runbooks/P4_POSTGRES_ENTRA_BOOTSTRAP.sql", "utf8");
+  assert.match(sql, /GRANT SELECT ON TABLE filled_orders TO "<POSITIONS_READ_MI_NAME>"/);
+  assert.doesNotMatch(sql, /GRANT EXECUTE ON FUNCTION[\s\S]*POSITIONS_READ/);
+});
+
 test("P4 self-hosted migration runner is VNet-integrated, ephemeral and secret-scoped", async () => {
   const [workflow, bicep, entrypoint, dockerfile] = await Promise.all([
     readFile(".github/workflows/production-runner-bootstrap.yml", "utf8"),

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { MANAGED_POSITIONS_SQL, parseArgs, queryManagedPositions, redactManagedPositions } from "../scripts/query-managed-positions.mjs";
+import { MANAGED_POSITIONS_JSON_PREFIX, MANAGED_POSITIONS_SQL, extractManagedPositionsJson, parseArgs, queryManagedPositions, redactManagedPositions } from "../scripts/query-managed-positions.mjs";
 
 test("managed-position summary is a read-only redacted aggregate", async () => {
   const calls = []; let ended = 0; let released = 0;
@@ -13,4 +13,6 @@ test("managed-position summary is a read-only redacted aggregate", async () => {
   assert.match(MANAGED_POSITIONS_SQL, /fill_price/);
   assert.throws(() => redactManagedPositions([{ account_count: 2 }]), /ambiguous across accounts/);
   assert.deepEqual(parseArgs([]), {}); assert.throws(() => parseArgs(["--bad"]), /does not accept/);
+  assert.deepEqual(extractManagedPositionsJson(`noise\n${MANAGED_POSITIONS_JSON_PREFIX}${JSON.stringify(result)}\n`), result);
+  assert.throws(() => extractManagedPositionsJson("no marker"), /missing the redacted JSON marker/);
 });

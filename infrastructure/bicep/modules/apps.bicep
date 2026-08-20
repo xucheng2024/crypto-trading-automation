@@ -14,6 +14,7 @@ param keyVaultId string
 param keyVaultUri string
 param enginePostgresUrl string
 param maintenancePostgresUrl string
+param positionsReadPostgresUrl string
 param okxAccountId string
 param okxInstruments string
 param managedFillStartMs string
@@ -108,6 +109,35 @@ resource maintenance 'Microsoft.App/jobs@2024-03-01' = {
   }
   tags: tags
 }
+resource positionsRead 'Microsoft.App/jobs@2024-03-01' = {
+  name: '${environmentName}-positions-read'
+  location: location
+  identity: { type: 'SystemAssigned' }
+  properties: {
+    environmentId: env.id
+    configuration: {
+      triggerType: 'Manual'
+      replicaTimeout: 60
+      manualTriggerConfig: { parallelism: 1, replicaCompletionCount: 1 }
+      registries: [{ server: registryServer, identity: 'system' }]
+    }
+    template: {
+      containers: [
+        {
+          name: 'positions-read'
+          image: image
+          resources: { cpu: json('0.25'), memory: '0.5Gi' }
+          command: ['node', 'scripts/query-managed-positions.mjs']
+          env: [
+            { name: 'TRADING_MODE', value: 'OFF' }
+            { name: 'POSTGRES_URL', value: positionsReadPostgresUrl }
+          ]
+        }
+      ]
+    }
+  }
+  tags: tags
+}
 
 // AcrPull, maintenance deliberately receives no Key Vault role.
 var acrPullRole = subscriptionResourceId(
@@ -146,6 +176,15 @@ resource maintenanceAcrPull 'Microsoft.Authorization/roleAssignments@2022-04-01'
     principalType: 'ServicePrincipal'
   }
 }
+resource positionsReadAcrPull 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(acrId, positionsRead.id, acrPullRole)
+  scope: acr
+  properties: {
+    principalId: positionsRead.identity.principalId
+    roleDefinitionId: acrPullRole
+    principalType: 'ServicePrincipal'
+  }
+}
 resource engineVaultRead 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
   name: guid(keyVaultId, engine.id, keyVaultSecretsUserRole)
   scope: vault
@@ -166,7 +205,10 @@ resource maintenanceMonitoringReader 'Microsoft.Authorization/roleAssignments@20
 }
 output engineId string = engine.id
 output jobId string = maintenance.id
+output positionsReadJobId string = positionsRead.id
 output enginePrincipalId string = engine.identity.principalId
 output maintenancePrincipalId string = maintenance.identity.principalId
+output positionsReadPrincipalId string = positionsRead.identity.principalId
 output enginePrincipalName string = engine.name
 output maintenancePrincipalName string = maintenance.name
+output positionsReadPrincipalName string = positionsRead.name
