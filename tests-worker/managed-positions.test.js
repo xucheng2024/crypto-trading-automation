@@ -8,7 +8,7 @@ test("managed-position summary is a read-only redacted aggregate", async () => {
   const result = await queryManagedPositions({ connectionString: "postgresql://user@host/db", credential: { getToken: async () => ({ token: "token", expiresOnTimestamp: Date.now() + 10_000 }) }, Pool });
   assert.deepEqual(calls.slice(0, 3).map(([sql]) => sql), ["BEGIN READ ONLY", "SET LOCAL statement_timeout = '5000ms'", "SET LOCAL lock_timeout = '1000ms'"]);
   assert.equal(calls[3][0], MANAGED_POSITIONS_SQL); assert.equal(calls.at(-1)[0], "ROLLBACK"); assert.equal(released, 1); assert.equal(ended, 1);
-  assert.deepEqual(result, { summary: { instruments: 1, openFills: 1 }, positions: [{ instrument: "BTC-USDT", remainingSize: "0.01", remainingCostUsd: "1.25", openFills: 1, sellStates: ["WAITING"], nextSellTime: 1, nextForceSellTime: 2, protectedFills: 1, dustPendingFills: 0 }] });
+  assert.deepEqual(result, { summary: { instruments: 1, openFills: 1 }, positions: [{ instrument: "BTC-USDT", remainingCostUsd: "1.25", openFills: 1, sellStates: ["WAITING"], nextSellTime: 1, nextForceSellTime: 2, protectedFills: 1, dustPendingFills: 0 }] });
   assert.match(MANAGED_POSITIONS_SQL, /^\s*(WITH|SELECT)/i); assert.doesNotMatch(MANAGED_POSITIONS_SQL, /\b(INSERT|UPDATE|DELETE|CREATE|ALTER|DROP)\b/i);
   assert.match(MANAGED_POSITIONS_SQL, /fill_price/);
   assert.throws(() => redactManagedPositions([{ account_count: 2 }]), /ambiguous across accounts/);

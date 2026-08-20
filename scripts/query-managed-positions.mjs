@@ -34,7 +34,6 @@ export function redactManagedPositions(rows) {
   if (rows.some((row) => Number(row.account_count) > 1)) throw new Error("Managed position scope is ambiguous across accounts");
   const positions = rows.map((row) => ({
     instrument: row.inst_id,
-    remainingSize: row.remaining_size,
     remainingCostUsd: row.remaining_cost_usd,
     openFills: Number(row.open_fills),
     sellStates: row.sell_states ?? [],

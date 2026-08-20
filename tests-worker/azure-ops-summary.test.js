@@ -34,7 +34,7 @@ test("positions CLI dispatches only on explicit request and reads a matching red
     command: () => "owner/repo", json: () => ({ path: ".github/workflows/production-positions-read.yml" }),
     fs: { mkdtemp: async () => "/tmp/positions", rm: async () => {}, readFile: async () => JSON.stringify({ summary: { instruments: 1, openFills: 2, forbidden: "no" }, positions: [{ instrument: "BTC-USDT", remainingSize: "1", remainingCostUsd: "100", openFills: 2, sellStates: ["WAITING"], nextSellTime: 1, accountId: "forbidden" }] }) },
   });
-  assert.deepEqual(result, { command: "positions", requested: false, runId: 7, summary: { instruments: 1, openFills: 2 }, positions: [{ instrument: "BTC-USDT", remainingSize: "1", remainingCostUsd: "100", openFills: 2, sellStates: ["WAITING"], nextSellTime: 1 }] });
+  assert.deepEqual(result, { command: "positions", requested: false, runId: 7, summary: { instruments: 1, openFills: 2 }, positions: [{ instrument: "BTC-USDT", remainingCostUsd: "100", openFills: 2, sellStates: ["WAITING"], nextSellTime: 1 }] });
 });
 
 test("Azure ops summary attributes expected OFF transition traces without hiding other revisions", () => {
