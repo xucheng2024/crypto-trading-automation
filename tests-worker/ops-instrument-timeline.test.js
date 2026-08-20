@@ -36,7 +36,12 @@ test("trade CLI starts the VNet timeline job and keeps only the redacted associa
   const payload = { instrument: "BTC-USDT", attemptRefScope: "QUERY_SNAPSHOT", summary: { attemptSnapshots: 1, fills: 1, protectionSnapshots: 0, attemptStates: { SETTLED: 1 }, raw: "forbidden" }, timeline: [{ eventTime: "1", eventType: "FILL", recordKind: "DURABLE_EVENT", stateObservedAt: "1", attemptRef: "A1", tradeId: "forbidden" }] };
   const result = await runTradeCommand(options, {
     command: (bin, args) => { calls.push([bin, ...args]); if (bin === "az" && args.includes("logs")) return `INSTRUMENT_TIMELINE_JSON:${JSON.stringify(payload)}`; throw new Error(`unexpected command ${bin}`); },
-    json: (bin, args) => { calls.push([bin, ...args]); if (args.includes("start")) return { name: "trading-cae-timeline-read-abc" }; return { properties: { status: "Succeeded" } }; },
+    json: (bin, args) => {
+      calls.push([bin, ...args]);
+      if (args.includes("start")) return { name: "trading-cae-timeline-read-abc" };
+      if (args.includes("execution")) return { properties: { status: "Succeeded" } };
+      return { properties: { template: { containers: [{ name: "instrument-timeline-read", image: "img" }] } } };
+    },
     sleep: async () => {},
   });
   assert.equal(result.command, "trade"); assert.equal(result.job, "trading-cae-timeline-read"); assert.equal(result.execution, "trading-cae-timeline-read-abc");

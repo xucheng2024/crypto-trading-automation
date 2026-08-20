@@ -343,23 +343,48 @@ export function redactTimelineArtifact(artifact) {
   };
 }
 
+function jobContainer(job) {
+  const container = job?.properties?.template?.containers?.[0];
+  if (!container?.name || !container?.image) throw new Error("Instrument timeline job is missing a container image");
+  return container;
+}
+
+function jobStartEnvVars(container, instrument) {
+  const vars = new Map();
+  for (const row of container.env ?? []) {
+    if (row?.name && row.value != null) vars.set(row.name, `${row.name}=${row.value}`);
+  }
+  vars.set("INSTRUMENT", `INSTRUMENT=${instrument}`);
+  return [...vars.values()];
+}
+
 export async function runInstrumentTimelineCommand(options, { command = run, json = runJson, sleep = sleepMs, now = Date.now, timeoutMs = 60_000 } = {}) {
   const resourceGroup = options.resourceGroup ?? command("gh", ["variable", "get", "AZURE_RESOURCE_GROUP"]);
   const appName = options.app ?? command("gh", ["variable", "get", "CONTAINER_APP_NAME"]);
   const job = instrumentTimelineReadJobName(appName);
-  const started = json("az", ["containerapp", "job", "start", "--name", job, "--resource-group", resourceGroup, "--env-vars", `INSTRUMENT=${options.instrument}`, "--only-show-errors", "--output", "json"]);
+  const container = jobContainer(json("az", ["containerapp", "job", "show", "--name", job, "--resource-group", resourceGroup, "--only-show-errors", "--output", "json"]));
+  let started;
+  try {
+    started = json("az", ["containerapp", "job", "start", "--name", job, "--resource-group", resourceGroup, "--image", container.image, "--container-name", container.name, "--command", "node", "scripts/query-instrument-timeline.mjs", "--env-vars", ...jobStartEnvVars(container, options.instrument), "--only-show-errors", "--output", "json"]);
+  } catch (error) {
+    throw new Error(`Instrument timeline job start failed job=${job} container=${container.name} instrument=${options.instrument}: ${error.message}`);
+  }
   const execution = jobExecutionName(started); let status = "Running"; const deadline = now() + timeoutMs;
   while (now() < deadline) {
     const row = json("az", ["containerapp", "job", "execution", "show", "--name", job, "--resource-group", resourceGroup, "--job-execution-name", execution, "--only-show-errors", "--output", "json"]);
     status = row?.properties?.status ?? row?.status ?? "Unknown";
     if (status === "Succeeded") break;
-    if (status === "Failed" || status === "Cancelled") throw new Error(`Instrument timeline job ${execution} ${status}`);
+    if (status === "Failed" || status === "Cancelled") {
+      let detail = "";
+      try { detail = command("az", ["containerapp", "job", "logs", "show", "--name", job, "--resource-group", resourceGroup, "--container", container.name, "--execution", execution, "--only-show-errors"]).trim().split(/\r?\n/).slice(-12).join("\n"); } catch {}
+      throw new Error(`Instrument timeline job ${execution} ${status}${detail ? `\n${detail}` : ""}`);
+    }
     await sleep(2000);
   }
   if (status !== "Succeeded") throw new Error(`Instrument timeline job ${execution} timed out`);
   let logs = "";
   while (now() < deadline) {
-    logs = command("az", ["containerapp", "job", "logs", "show", "--name", job, "--resource-group", resourceGroup, "--container", "instrument-timeline-read", "--execution", execution, "--only-show-errors"]);
+    logs = command("az", ["containerapp", "job", "logs", "show", "--name", job, "--resource-group", resourceGroup, "--container", container.name, "--execution", execution, "--only-show-errors"]);
     try {
       const parsed = parseInstrumentTimelineLog(logs);
       if (parsed.instrument !== options.instrument) throw new Error("Instrument timeline result does not match requested instrument");

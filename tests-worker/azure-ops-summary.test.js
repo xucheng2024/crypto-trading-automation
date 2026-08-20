@@ -33,10 +33,16 @@ test("timeline CLI starts the VNet job with a scoped instrument and accepts only
   const calls = [];
   const result = await runInstrumentTimelineCommand(parseArgs(["timeline", "--instrument", "BTC-USDT", "--request", "--resource-group", "rg", "--app", "trading-cae-engine"]), {
     command: (bin, args) => { calls.push([bin, ...args]); if (args.includes("logs")) return 'INSTRUMENT_TIMELINE_JSON:{"instrument":"BTC-USDT","timeline":[],"summary":{"fills":0}}'; throw new Error("unexpected"); },
-    json: (bin, args) => { calls.push([bin, ...args]); return args.includes("start") ? { name: "trading-cae-timeline-read-abc" } : { properties: { status: "Succeeded" } }; }, sleep: async () => {},
+    json: (bin, args) => {
+      calls.push([bin, ...args]);
+      if (args.includes("start")) return { name: "trading-cae-timeline-read-abc" };
+      if (args.includes("execution")) return { properties: { status: "Succeeded" } };
+      return { properties: { template: { containers: [{ name: "instrument-timeline-read", image: "img", env: [{ name: "TRADING_MODE", value: "OFF" }] }] } } };
+    }, sleep: async () => {},
   });
   assert.equal(result.job, "trading-cae-timeline-read"); assert.equal(instrumentTimelineReadJobName("trading-cae-engine"), "trading-cae-timeline-read");
-  assert.ok(calls.some((row) => row.includes("INSTRUMENT=BTC-USDT"))); assert.deepEqual(parseInstrumentTimelineLog('INSTRUMENT_TIMELINE_JSON:{"instrument":"BTC-USDT","timeline":[]}'), { instrument: "BTC-USDT", timeline: [] });
+  assert.ok(calls.some((row) => row.includes("INSTRUMENT=BTC-USDT")));
+  assert.ok(calls.some((row) => row[0] === "az" && row.includes("start") && row.includes("--image") && row.includes("instrument-timeline-read") && row.includes("scripts/query-instrument-timeline.mjs"))); assert.deepEqual(parseInstrumentTimelineLog('INSTRUMENT_TIMELINE_JSON:{"instrument":"BTC-USDT","timeline":[]}'), { instrument: "BTC-USDT", timeline: [] });
   const envelope = JSON.stringify({ TimeStamp: "t", Log: 'F INSTRUMENT_TIMELINE_JSON:{"instrument":"ETH-USDT","timeline":[]}' });
   assert.equal(parseInstrumentTimelineLog(envelope).instrument, "ETH-USDT");
 });
