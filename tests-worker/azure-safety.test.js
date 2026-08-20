@@ -16,27 +16,28 @@ function readyState() {
   return state;
 }
 
-test("Azure runtime defaults to OFF and never calls its mutation handler", async () => {
+test("Azure runtime defaults to OFF, blocks BUY, and permits guarded exits", async () => {
   let calls = 0;
-  const runtime = createAzureRuntime({}, { mutationHandler: async () => { calls += 1; } });
+  const runtime = createAzureRuntime({}, { ownerGuard: new HeldOwnerGuard(), recoveryState: readyState(), dependencies: { account: true }, mutationHandler: async () => { calls += 1; } });
   assert.equal(runtime.config.tradingMode, "OFF");
-  for (const mutation of ["BUY", "SELL", "DELIST"]) {
-    assert.deepEqual(await runtime.mutationPort.submit(mutation, {}), { allowed: false, reason: "MODE_OFF" });
-  }
-  assert.equal(calls, 0);
+  assert.deepEqual(await runtime.mutationPort.submit("BUY", {}), { allowed: false, reason: "MODE_OFF" });
+  assert.equal((await runtime.mutationPort.submit("SELL", {})).allowed, true);
+  assert.equal((await runtime.mutationPort.submit("DELIST", {})).allowed, true);
+  assert.equal(calls, 2);
 });
 
 test("invalid Azure TRADING_MODE fails fast", () => {
   assert.throws(() => loadAzureRuntimeConfig({ TRADING_MODE: "live" }), /Invalid TRADING_MODE/);
+  assert.throws(() => loadAzureRuntimeConfig({ TRADING_MODE: "EXIT_ONLY" }), /Expected OFF or FULL/);
 });
 
-test("EXIT_ONLY permits only guarded SELL and DELIST", async () => {
+test("OFF permits only guarded SELL and DELIST", async () => {
   const calls = [];
-  const runtime = createAzureRuntime({ TRADING_MODE: "EXIT_ONLY" }, {
+  const runtime = createAzureRuntime({ TRADING_MODE: "OFF" }, {
     ownerGuard: new HeldOwnerGuard(), recoveryState: readyState(), dependencies: { account: true },
     mutationHandler: async (command) => { calls.push(command); return "fake"; },
   });
-  assert.deepEqual(await runtime.mutationPort.submit("BUY", {}), { allowed: false, reason: "MODE_EXIT_ONLY" });
+  assert.deepEqual(await runtime.mutationPort.submit("BUY", {}), { allowed: false, reason: "MODE_OFF" });
   assert.equal((await runtime.mutationPort.submit("SELL", {})).allowed, true);
   assert.equal((await runtime.mutationPort.submit("DELIST", {})).allowed, true);
   assert.deepEqual(calls.map(({ mutation }) => mutation), ["SELL", "DELIST"]);

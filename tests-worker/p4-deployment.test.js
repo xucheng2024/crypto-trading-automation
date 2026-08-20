@@ -106,15 +106,6 @@ test("P4 production timeline workflow is read-only, VNet-scoped, and artifact-li
   assert.match(workflow, /query-instrument-timeline\.mjs --instrument "\$INSTRUMENT"/); assert.match(workflow, /INSTRUMENT: \$\{\{ inputs\.instrument \}\}/); assert.match(workflow, /retention-days: 1/); assert.match(workflow, /instrument-timeline\.json/);
 });
 
-test("P4 managed-positions workflow is read-only, VNet-scoped, and artifact-limited", async () => {
-  const workflow = await readFile(".github/workflows/production-positions-read.yml", "utf8");
-  assert.match(workflow, /workflow_dispatch:/); assert.doesNotMatch(workflow, /inputs:/); assert.doesNotMatch(workflow, /npm run migrate:apply|containerapp update|production-promote-full/i);
-  assert.match(workflow, /runs-on: \[self-hosted, linux, x64, crypto-remote-migration\]/); assert.match(workflow, /environment: production-migrate/);
-  assert.match(workflow, /github\.ref == format\('refs\/heads\/\{0\}', github\.event\.repository\.default_branch\)/);
-  assert.match(workflow, /node-version: 22/); assert.match(workflow, /id-token: write/); assert.match(workflow, /contents: read/);
-  assert.match(workflow, /query-managed-positions\.mjs/); assert.match(workflow, /retention-days: 1/); assert.match(workflow, /managed-positions\.json/);
-});
-
 test("P4 positions-read job is manual, image-backed, and SELECT-only", async () => {
   const [apps, main, dockerfile, deploy] = await Promise.all([
     readFile("infrastructure/bicep/modules/apps.bicep", "utf8"),
@@ -140,14 +131,6 @@ test("P4 positions-read job is manual, image-backed, and SELECT-only", async () 
   const sql = await readFile("docs/runbooks/P4_POSTGRES_ENTRA_BOOTSTRAP.sql", "utf8");
   assert.match(sql, /GRANT SELECT ON TABLE filled_orders TO "<POSITIONS_READ_MI_NAME>"/);
   assert.doesNotMatch(sql, /GRANT EXECUTE ON FUNCTION[\s\S]*POSITIONS_READ/);
-});
-
-test("P4 positions-read grant workflow is VNet-scoped and SELECT-only", async () => {
-  const workflow = await readFile(".github/workflows/production-positions-grant.yml", "utf8");
-  assert.match(workflow, /bootstrap-positions-read-role\.mjs/);
-  assert.match(workflow, /runs-on: \[self-hosted, linux, x64, crypto-remote-migration\]/);
-  assert.match(workflow, /environment: production-migrate/);
-  assert.doesNotMatch(workflow, /npm run migrate:apply|containerapp update|production-promote-full/i);
 });
 
 test("P4 self-hosted migration runner is VNet-integrated, ephemeral and secret-scoped", async () => {
@@ -185,14 +168,10 @@ test("P4 production health server is closed by graceful shutdown", async () => {
   await engine.shutdown();
 });
 
-test("P4 OFF remains operational for the explicitly known account-profile prerequisite", async () => {
-  const telemetry = [];
+test("P4 OFF fails closed when the account profile needed for exits is unavailable", async () => {
   const { startTradingEngine } = await import("../src/entrypoints/azure/trading-engine.js");
   const lifecycle = { start: async () => { throw new Error("OKX_BASELINE_ACCOUNT_PROFILE"); } };
-  const engine = await startTradingEngine({ TRADING_MODE: "OFF" }, { lifecycle, telemetry: (event) => telemetry.push(event) });
-  assert.equal(engine.startupDegraded, "OKX_BASELINE_ACCOUNT_PROFILE");
-  assert.equal(engine.liveness(), true); assert.equal(engine.readiness(), true);
-  assert.deepEqual(telemetry, [{ event: "OFF_SAFE_DEGRADED", reason: "OKX_BASELINE_ACCOUNT_PROFILE" }]);
+  await assert.rejects(startTradingEngine({ TRADING_MODE: "OFF" }, { lifecycle }), /OKX_BASELINE_ACCOUNT_PROFILE/);
   await assert.rejects(startTradingEngine({ TRADING_MODE: "FULL" }, { lifecycle }), /OKX_BASELINE_ACCOUNT_PROFILE/);
 });
 
@@ -287,7 +266,7 @@ test("P4 production composition executes migration-owner-recovery order and rele
   const events = [];
   const pool = { query: async () => ({ rows: [{ attempts: 'order_attempts', fills: 'filled_orders', watermarks: 'sync_watermarks' }] }), transaction: async (fn) => fn({ query: async () => ({ rows: [] }) }), end: async () => events.push('pool') };
   const ownerGuard = { isHeld: () => false, onLost: () => () => {}, acquire: async () => { events.push('owner-acquire'); return true; }, release: async () => events.push('owner-release') };
-  const runtime = await composeProductionRuntime({ TRADING_MODE: 'EXIT_ONLY', KEY_VAULT_URI: 'https://vault.example', POSTGRES_URL: 'postgresql://host/db' }, {
+  const runtime = await composeProductionRuntime({ TRADING_MODE: 'OFF', KEY_VAULT_URI: 'https://vault.example', POSTGRES_URL: 'postgresql://host/db' }, {
     keyVault: { readOkxCredentials: async () => ({ apiKey: 'a', secretKey: 'b', passphrase: 'c' }) }, pool, ownerClient: { release: () => events.push('owner-client') }, ownerGuard,
     migrationCheck: async () => events.push('migration'), reconciliation: { recover: async () => events.push('recovery') }, baseline: async () => events.push('baseline'), ws: { public: { connect: () => events.push('ws-public'), stop: () => events.push('ws-stop') } }, engine: { startWatchdog: () => events.push('timers'), stopWatchdog: () => events.push('timers-stop') },
   });
@@ -308,7 +287,7 @@ test("P4 Entra PostgreSQL pool uses official scope, TLS verification and fails r
 
 test("P4 composition fails closed before owner or WS when migration gate fails", async () => {
   const events = []; const readyGate = { ready: false, set: (name, value) => events.push(`${name}:${value}`) };
-  const composed = await composeProductionRuntime({ TRADING_MODE: 'EXIT_ONLY', KEY_VAULT_URI: 'https://vault.example', POSTGRES_URL: 'postgresql://host/db' }, {
+  const composed = await composeProductionRuntime({ TRADING_MODE: 'OFF', KEY_VAULT_URI: 'https://vault.example', POSTGRES_URL: 'postgresql://host/db' }, {
     keyVault: { readOkxCredentials: async () => ({ apiKey: 'a', secretKey: 'b', passphrase: 'c' }) }, readyGate,
     pool: { transaction: async (fn) => fn({}), end: async () => {} }, ownerClient: {}, ownerGuard: { onLost: () => () => {}, acquire: async () => { events.push('owner'); return true; }, isHeld: () => false, release: async () => {} },
     migrationCheck: async () => { throw new Error('POSTGRES_MIGRATIONS_MISSING'); }, reconciliation: { recover: async () => events.push('recovery') }, ws: { public: { connect: () => events.push('ws') } }, engine: { startWatchdog: () => events.push('timer') },
@@ -331,7 +310,7 @@ test("P4 production composition routes fake WS baselines into projections and ke
     sockets.push(socket); return socket;
   };
   const ownerGuard = { held: false, isHeld() { return this.held; }, onLost: () => () => {}, acquire: async () => (ownerGuard.held = true), release: async () => { ownerGuard.held = false; } };
-  const composed = await composeProductionRuntime({ TRADING_MODE: 'EXIT_ONLY', OKX_INSTRUMENTS: 'BTC-USDT', KEY_VAULT_URI: 'https://vault.example', POSTGRES_URL: 'postgresql://host/db' }, {
+  const composed = await composeProductionRuntime({ TRADING_MODE: 'OFF', OKX_INSTRUMENTS: 'BTC-USDT', KEY_VAULT_URI: 'https://vault.example', POSTGRES_URL: 'postgresql://host/db' }, {
     socketFactory, ownerGuard, ownerClient: {}, readyGate, buyPlanner, keyVault: { readOkxCredentials: async () => ({ apiKey: 'a', secretKey: 'b', passphrase: 'c' }) },
     pool: { query: async () => ({ rows: [{ attempts: 'order_attempts', fills: 'filled_orders', watermarks: 'sync_watermarks' }] }), transaction: async (fn) => fn({}), end: async () => {} },
     reconciliation: { recover: async () => ({ ready: false }) }, baseline: async () => readyGate.set('instruments', true), orderConfig: { strategyTag: 'azure', orderVersion: 'v1' },
@@ -363,7 +342,7 @@ test("P4 production composition routes fake WS baselines into projections and ke
 });
 
 test("P4 default WS composition refuses an empty instrument baseline", async () => {
-  await assert.rejects(composeProductionRuntime({ TRADING_MODE: 'EXIT_ONLY', KEY_VAULT_URI: 'https://vault.example', POSTGRES_URL: 'postgresql://host/db' }, {
+  await assert.rejects(composeProductionRuntime({ TRADING_MODE: 'OFF', KEY_VAULT_URI: 'https://vault.example', POSTGRES_URL: 'postgresql://host/db' }, {
     keyVault: { readOkxCredentials: async () => ({ apiKey: 'a', secretKey: 'b', passphrase: 'c' }) }, pool: { transaction: async (fn) => fn({}), end: async () => {} }, ownerClient: {}, ownerGuard: { onLost: () => () => {} },
   }), /OKX_INSTRUMENTS_REQUIRED/);
 });

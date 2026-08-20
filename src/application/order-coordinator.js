@@ -14,8 +14,8 @@ function add(left, right) {
 
 /** The only component allowed to invoke an injected mutation transport. */
 export class OrderCoordinator {
-  constructor({ transaction, orders, state, transport, ownerGuard, readyGate, market, account, mode = () => "OFF", executionRoute = () => "margin", tradeQuoteCurrency = () => null, isBuyAllowed = () => true, clock = { nowMs: () => Date.now() }, config, telemetry = () => {}, onBuySettled = null, onExitSettled = null, onExitDust = null, slo = null }) {
-    Object.assign(this, { transaction, orders, state, transport, ownerGuard, readyGate, market, account, mode, executionRoute, tradeQuoteCurrency, isBuyAllowed, clock, config, telemetry, onBuySettled, onExitSettled, onExitDust, slo });
+  constructor({ transaction, orders, state, transport, ownerGuard, readyGate, market, account, mode = () => "OFF", executionRoute = () => "margin", tradeQuoteCurrency = () => null, isBuyAllowed = () => true, clock = { nowMs: () => Date.now() }, config, telemetry = () => {}, onBuySettled = null, onExitSettled = null, onExitSubmitted = null, onExitDust = null, slo = null }) {
+    Object.assign(this, { transaction, orders, state, transport, ownerGuard, readyGate, market, account, mode, executionRoute, tradeQuoteCurrency, isBuyAllowed, clock, config, telemetry, onBuySettled, onExitSettled, onExitSubmitted, onExitDust, slo });
     this.pending = { BUY: new Map(), SELL: new Map(), DELIST: new Map() }; this.submitting = false; this.accepting = true; this.isolatedBases = new Set(); this.buyBlockStates = new Map();
   }
   enqueue(intent) { if (!this.accepting) return false; const group = this.pending[intent.intent]; if (!group) throw new Error("unknown intent"); const key = intent.intent === "BUY" ? intent.instId : `${intent.baseCcy}:${intent.sourceBuyTradeId}`; group.set(key, intent); return true; }
@@ -362,7 +362,14 @@ export class OrderCoordinator {
     await this.transaction(async (tx) => {
       for (const item of response) await (item.status === "SUBMITTED" ? this.orders.markSubmitted(tx, item.clOrdId, item.ordId) : item.status === "NOT_CREATED" ? this.orders.markNotCreated(tx, item.clOrdId, item.reason) : this.orders.markUnknown(tx, item.clOrdId, item.reason));
     });
-    for (const item of response) this._emit({ type: "order_lifecycle", reason: `${kind}_${item.status}`, intent: kind, clOrdId: item.clOrdId, ordId: item.ordId, exchangeReason: item.reason });
+    const safeByClOrdId = new Map(safe.map((row) => [row.attempt.clOrdId, row]));
+    for (const item of response) {
+      this._emit({ type: "order_lifecycle", reason: `${kind}_${item.status}`, intent: kind, clOrdId: item.clOrdId, ordId: item.ordId, exchangeReason: item.reason });
+      if (item.status === "SUBMITTED" && this.onExitSubmitted) {
+        try { this.onExitSubmitted({ ...safeByClOrdId.get(item.clOrdId).attempt, ordId: item.ordId }); }
+        catch (error) { this._emit({ type: "exit_confirmation", reason: "SCHEDULE_FAILED", clOrdId: item.clOrdId, error: error?.message }); }
+      }
+    }
     for (const item of response) if (item.status !== "SUBMITTED") this._emit({ type: "exit_result", intent: kind, reason: item.status === "UNKNOWN" ? "EXIT_UNKNOWN" : "EXIT_NOT_CREATED", exchangeReason: item.reason, clOrdId: item.clOrdId });
     for (const row of safe) this.pending[kind].delete(`${row.intent.baseCcy}:${row.intent.sourceBuyTradeId}`);
     this._emit({ type: "exit_batch", intent: kind, count: safe.length, reason: "ORDER_SUBMITTED" });
@@ -445,7 +452,6 @@ export class OrderCoordinator {
     return signal.eligible ? { allowed: true, quote, candle, instrument, signal } : { allowed: false, reason: signal.reason, evidence: { last: quote.last, askPx: quote.askPx, dailyLimitPrice: limitPrice, breakoutPrice: signal.breakoutPrice, breakoutGap: subtractDecimal(quote.last, signal.breakoutPrice), priceLimitGap: subtractDecimal(limitPrice, quote.askPx), ...marketEvidence } };
   }
   _exitGuard(intent, kind) {
-    if (this.mode() === "OFF") return { allowed: false, reason: "MODE" };
     if (!this.ownerGuard.isHeld()) return { allowed: false, reason: "OWNER" };
     const exitReady = this.readyGate.exitReady ?? this.readyGate.ready;
     if (!exitReady || !this.account.fresh(this.config.accountFreshMs)) return { allowed: false, reason: "NOT_READY" };

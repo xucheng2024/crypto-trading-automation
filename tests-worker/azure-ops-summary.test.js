@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { assessRuntime, classifyBlock, classifyDecision, classifySevereTraces, parseArgs, parseManagedPositionsLog, positionsReadJobName, queryRows, redactPositionsArtifact, runPositionsCommand, summarizeDecisions, summarizeDeployment, summarizeRunner, summarizeTrading, traceEvents } from "../scripts/azure-ops-summary.mjs";
+import { assessRuntime, classifyBlock, classifyDecision, classifySevereTraces, formatPositionsSummary, parseArgs, parseManagedPositionsLog, positionsReadJobName, queryRows, redactPositionsArtifact, runPositionsCommand, summarizeDecisions, summarizeDeployment, summarizeRunner, summarizeTrading, traceEvents } from "../scripts/azure-ops-summary.mjs";
 
 test("Azure ops summary converts query tables and aggregates decisions", () => {
   assert.deepEqual(queryRows({ tables: [{ columns: [{ name: "reason" }, { name: "decisions" }], rows: [["WAIT", 2]] }] }), [{ reason: "WAIT", decisions: 2 }]);
@@ -20,7 +20,8 @@ test("Azure ops summary accepts trading, deployment, and runner commands", () =>
   assert.deepEqual(parseArgs(["deploy", "--run-id", "123"]).runId, 123);
   assert.deepEqual(parseArgs(["runner", "--json"]).command, "runner");
   assert.deepEqual(parseArgs(["positions", "--request"]).command, "positions");
-  assert.throws(() => parseArgs(["positions"]), /exactly one/);
+  assert.throws(() => parseArgs(["positions"]), /requires --request/);
+  assert.throws(() => parseArgs(["positions", "--run-id", "7"]), /does not accept --run-id/);
   assert.throws(() => parseArgs(["deploy", "--run-id", "0"]), /positive integer/);
 });
 
@@ -41,22 +42,14 @@ test("positions CLI starts the VNet job and redacts log JSON", async () => {
     sleep: async () => {},
   });
   assert.deepEqual(requested, { command: "positions", requested: false, job: "trading-cae-positions-read", execution: "trading-cae-positions-read-abc", summary: { instruments: 1, openFills: 2 }, positions: [{ instrument: "BTC-USDT", remainingCostUsd: "100", openFills: 2, sellStates: ["WAITING"], nextSellTime: 1 }] });
+  assert.match(formatPositionsSummary(requested), /BTC-USDT remaining_usd=100 open_fills=2 sell=WAITING/);
   assert.equal(positionsReadJobName("trading-cae-engine"), "trading-cae-positions-read");
   assert.ok(calls.some((row) => row[0] === "az" && row.includes("start")));
-  assert.ok(!calls.some((row) => row.includes("production-positions-read.yml")));
+  assert.ok(!calls.some((row) => row[0] === "gh"));
   assert.deepEqual(redactPositionsArtifact({ summary: { instruments: 1, openFills: 2, forbidden: "no" }, positions: [{ instrument: "BTC-USDT", remainingCostUsd: "100", openFills: 2, accountId: "forbidden" }] }).positions[0], { instrument: "BTC-USDT", remainingCostUsd: "100", openFills: 2 });
   assert.throws(() => parseManagedPositionsLog("no marker"), /missing the redacted JSON marker/);
   const envelope = JSON.stringify({ TimeStamp: "t", Log: `F MANAGED_POSITIONS_JSON:${JSON.stringify({ summary: { instruments: 1, openFills: 1 }, positions: [{ instrument: "ETH-USDT", remainingCostUsd: "2", openFills: 1 }] })}` });
   assert.deepEqual(parseManagedPositionsLog(envelope).positions[0].instrument, "ETH-USDT");
-});
-
-test("positions CLI still reads a matching redacted GitHub artifact", async () => {
-  await assert.rejects(runPositionsCommand(parseArgs(["positions", "--run-id", "8"]), { command: () => "owner/repo", json: () => ({ path: ".github/workflows/production-deploy.yml" }), fs: {} }), /not a production managed-positions run/);
-  const result = await runPositionsCommand(parseArgs(["positions", "--run-id", "7"]), {
-    command: () => "owner/repo", json: () => ({ path: ".github/workflows/production-positions-read.yml" }),
-    fs: { mkdtemp: async () => "/tmp/positions", rm: async () => {}, readFile: async () => JSON.stringify({ summary: { instruments: 1, openFills: 2, forbidden: "no" }, positions: [{ instrument: "BTC-USDT", remainingSize: "1", remainingCostUsd: "100", openFills: 2, sellStates: ["WAITING"], nextSellTime: 1, accountId: "forbidden" }] }) },
-  });
-  assert.deepEqual(result, { command: "positions", requested: false, runId: 7, summary: { instruments: 1, openFills: 2 }, positions: [{ instrument: "BTC-USDT", remainingCostUsd: "100", openFills: 2, sellStates: ["WAITING"], nextSellTime: 1 }] });
 });
 
 test("Azure ops summary attributes expected OFF transition traces without hiding other revisions", () => {

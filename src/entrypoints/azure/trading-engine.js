@@ -59,22 +59,13 @@ export async function startTradingEngine(env = process.env, dependencies = {}) {
     void shutdown("OWNER_SESSION_LOST").then(() => exitProcess(1), () => exitProcess(1));
   }) ?? null;
   await lifecycle.acquireOwnerAndRecover?.(); // legacy injected test seam
-  let offSafeDegraded = null;
   try { await lifecycle.start?.(runtime); }
-  catch (error) {
-    // An OFF deployment may remain operational when the account has not yet
-    // been switched to the profile required for future trading.  The
-    // production lifecycle has already released ownership before this error,
-    // and OFF still prevents every mutation path.
-    if (runtime.config.tradingMode !== "OFF" || error?.message !== "OKX_BASELINE_ACCOUNT_PROFILE") { if (healthServer) await new Promise((resolve) => healthServer.close(resolve)); throw error; }
-    offSafeDegraded = error.message;
-    telemetry({ event: "OFF_SAFE_DEGRADED", reason: offSafeDegraded });
-  }
+  catch (error) { if (healthServer) await new Promise((resolve) => healthServer.close(resolve)); throw error; }
   const engine = {
-    runtime, composed, shutdown, startupDegraded: offSafeDegraded,
+    runtime, composed, shutdown, startupDegraded: null,
     liveness: () => true,
-    readiness: () => Boolean(offSafeDegraded) || (composed.readyGate?.ready ?? runtime.recoveryState.isReady()),
-    readinessDetails: () => offSafeDegraded ? { ready: true, degraded: offSafeDegraded } : (composed.readyGate?.snapshot?.() ?? { ready: runtime.recoveryState.isReady() }),
+    readiness: () => composed.readyGate?.ready ?? runtime.recoveryState.isReady(),
+    readinessDetails: () => composed.readyGate?.snapshot?.() ?? { ready: runtime.recoveryState.isReady() },
   };
   healthDelegate = engine;
   return Object.freeze(engine);

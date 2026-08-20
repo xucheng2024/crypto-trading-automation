@@ -5,6 +5,7 @@ import { OrderCoordinator } from "../src/application/order-coordinator.js";
 import { SellService } from "../src/application/sell-service.js";
 import { InstrumentProtectionService } from "../src/application/instrument-protection-service.js";
 import { ReconciliationService } from "../src/application/reconciliation-service.js";
+import { ExitSubmissionReconciler } from "../src/application/exit-submission-reconciler.js";
 import { expectedClosedCandleTs } from "../src/domain/rules.js";
 
 const config = { accountId: "p3", strategyTag: "P3", orderVersion: "v1", orderExpiryMs: 1_000, accountFreshMs: 10_000, quoteFreshMs: 10_000 };
@@ -13,7 +14,7 @@ function gate() { const value = new ReadyGate(); for (const key of value.require
 
 test("P3 exits submit immediate five-base batches with DELIST priority and no shared-account excess", async () => {
   const now = clock(); const market = new MarketProjection({ clock: now }); const account = new AccountCapitalSnapshot({ clock: now }); account.update({ ts: 1, totalEq: "100", adjEq: "100" });
-  const attempts = new Map(); const payloads = []; let mode = "EXIT_ONLY";
+  const attempts = new Map(); const payloads = []; let mode = "OFF";
   const coordinator = new OrderCoordinator({ transaction: async (fn) => fn({}), state: { markDust: async () => ({ rowCount: 1 }) }, market, account, readyGate: gate(), ownerGuard: { isHeld: () => true }, mode: () => mode, clock: now, config,
     orders: {
       reserveExit: async (_tx, row) => { attempts.set(row.clOrdId, { ...row, state: "PREPARED" }); return { authorized: true }; },
@@ -40,14 +41,42 @@ test("P3 exits submit immediate five-base batches with DELIST priority and no sh
   }
   assert.equal([...attempts.values()].filter((row) => row.state === "UNKNOWN").length, 5, "UNKNOWN keeps its own reservation and no replacement is enqueued");
   mode = "OFF"; coordinator.enqueue({ intent: "SELL", instId: "C00-USDT", baseCcy: "C00", sourceBuyTradeId: "off", remainingSize: "1", availableBase: "1", bidPx: "10", sellTime: 1 });
-  assert.equal((await coordinator.drainOnce()).reason, "NO_ELIGIBLE");
+  assert.equal((await coordinator.drainOnce()).submitted, true);
+});
+
+test("P3 submitted exits receive a bounded read-only confirmation before the periodic recovery pass", async () => {
+  const timers = { handles: [], setTimeout(fn, delay) { const handle = { fn, delay, cleared: false }; this.handles.push(handle); return handle; }, clearTimeout(handle) { handle.cleared = true; } };
+  let attempt = { cl_ord_id: "sell-fast", intent: "SELL", state: "SUBMITTED" }; const observed = [];
+  const confirmation = new ExitSubmissionReconciler({
+    timers, delaysMs: [250, 500], transaction: async (fn) => fn({}),
+    orders: { findByClOrdId: async (_tx, id) => id === "sell-fast" ? attempt : null, listNonTerminal: async () => [attempt] },
+    reconciliation: { reconcileAttempt: async (row) => { observed.push(row.cl_ord_id); return { outcome: "TERMINAL_SETTLED" }; } },
+  });
+  assert.equal(confirmation.schedule(attempt), true); assert.equal(timers.handles[0].delay, 250);
+  await confirmation._confirm(confirmation.pending.get("sell-fast"));
+  assert.deepEqual(observed, ["sell-fast"]); assert.equal(confirmation.pending.size, 0, "settlement stops the short confirmation loop");
+  attempt = { cl_ord_id: "sell-restart", intent: "SELL", state: "SUBMITTED" };
+  assert.equal(await confirmation.schedulePending("p3"), 1, "startup resumes the same read-only safety net for durable exits");
+  confirmation.stop(); assert.equal(confirmation.pending.size, 0);
+});
+
+test("P3 shutdown drains an in-flight exit confirmation before releasing its timer state", async () => {
+  const timers = { handles: [], setTimeout(fn) { const handle = { fn, cleared: false }; this.handles.push(handle); return handle; }, clearTimeout(handle) { handle.cleared = true; } };
+  let release; const settled = new Promise((resolve) => { release = resolve; }); let completed = false;
+  const confirmation = new ExitSubmissionReconciler({
+    timers, delaysMs: [1], transaction: async (fn) => fn({}), orders: { findByClOrdId: async () => ({ cl_ord_id: "sell-drain", intent: "SELL", state: "SUBMITTED" }) },
+    reconciliation: { reconcileAttempt: async () => { await settled; completed = true; return { outcome: "FOUND" }; } },
+  });
+  confirmation.schedule({ cl_ord_id: "sell-drain", intent: "SELL" }); timers.handles[0].fn(); await Promise.resolve();
+  let stopped = false; const stopping = confirmation.stop().then(() => { stopped = true; }); await Promise.resolve();
+  assert.equal(stopped, false); release(); await stopping; assert.equal(completed, true); assert.equal(confirmation.pending.size, 0);
 });
 
 test("P3 final exit guard bumps generation instead of permanently colliding with NOT_CREATED", async () => {
   const now = clock(); const market = new MarketProjection({ clock: now }); const account = new AccountCapitalSnapshot({ clock: now }); account.update({ ts: 1, totalEq: "100", adjEq: "100" });
   market.updateInstrument({ instId: "BTC-USDT", ts: 1, state: "live", tickSz: "0.1", lotSz: "0.1", minSz: "0.1", base: "BTC" }); market.updateTicker({ instId: "BTC-USDT", ts: 1, last: "10", bidPx: "10" });
   const ready = gate(); const attempts = []; let first = true;
-  const coordinator = new OrderCoordinator({ transaction: async (fn) => fn({}), market, account, readyGate: ready, ownerGuard: { isHeld: () => true }, mode: () => "EXIT_ONLY", clock: now, config,
+  const coordinator = new OrderCoordinator({ transaction: async (fn) => fn({}), market, account, readyGate: ready, ownerGuard: { isHeld: () => true }, mode: () => "OFF", clock: now, config,
     orders: { reserveExit: async (_tx, row) => { attempts.push(row); if (first) { first = false; ready.set("database", false); } return { authorized: true }; }, markNotCreated: async () => {}, markSubmitted: async () => {}, markUnknown: async () => {} },
     transport: { maxAvailSize: async () => [{ instId: "BTC-USDT", availSell: "1" }], submitBatchOrders: async (rows) => rows.map((row) => ({ clOrdId: row.clOrdId, status: "SUBMITTED" })) },
   });
@@ -69,7 +98,7 @@ test("P3 dust transition drops the hot pending intent and synchronizes the watch
   const now = clock(); const market = new MarketProjection({ clock: now }); const account = new AccountCapitalSnapshot({ clock: now }); account.update({ ts: 1, totalEq: "100", adjEq: "100" });
   market.updateInstrument({ instId: "BTC-USDT", ts: 1, state: "live", tickSz: "0.1", lotSz: "0.1", minSz: "0.1", base: "BTC" }); market.updateTicker({ instId: "BTC-USDT", ts: 1, last: "1", bidPx: "1" });
   const row = { account_id: "p3", inst_id: "BTC-USDT", base_ccy: "BTC", trade_id: "dust-sync", side: "BUY", fill_size: "0.05", disposed_size: "0", sell_time: 1, sell_state: "DUST_PENDING", version: 2 }; let availCalls = 0; let applied;
-  const coordinator = new OrderCoordinator({ transaction: async (fn) => fn({}), market, account, readyGate: gate(), ownerGuard: { isHeld: () => true }, mode: () => "EXIT_ONLY", clock: now, config, onExitDust: ({ row: value }) => { applied = value; },
+  const coordinator = new OrderCoordinator({ transaction: async (fn) => fn({}), market, account, readyGate: gate(), ownerGuard: { isHeld: () => true }, mode: () => "OFF", clock: now, config, onExitDust: ({ row: value }) => { applied = value; },
     state: { markDust: async (_tx, args) => { assert.equal(args.tradeId, "dust-sync"); return { rowCount: 1, rows: [row] }; } }, orders: {}, transport: { maxAvailSize: async () => { availCalls += 1; return [{ instId: "BTC-USDT", availSell: "0.05" }]; } },
   });
   coordinator.enqueue({ intent: "SELL", instId: "BTC-USDT", baseCcy: "BTC", sourceBuyTradeId: "dust-sync", remainingSize: "0.05", fillVersion: 1, sellTime: 1, bidPx: "1" });
@@ -270,7 +299,7 @@ test("P3 slow or rejected telemetry cannot delay Coordinator persistence or reco
   market.updateInstrument({ instId: "SLOW-USDT", ts: 1, state: "live", tickSz: "0.1", lotSz: "0.1", minSz: "0.1", base: "SLOW" });
   const attempts = new Map(); const events = []; let telemetryCalls = 0;
   const telemetry = (event) => { events.push(event); telemetryCalls += 1; return telemetryCalls % 2 ? new Promise(() => {}) : Promise.reject(new Error("telemetry rejected")); };
-  const coordinator = new OrderCoordinator({ transaction: async (fn) => fn({}), state: { markDust: async () => ({ rowCount: 1 }) }, market, account, readyGate: gate(), ownerGuard: { isHeld: () => true }, mode: () => "EXIT_ONLY", clock: now, config, telemetry,
+  const coordinator = new OrderCoordinator({ transaction: async (fn) => fn({}), state: { markDust: async () => ({ rowCount: 1 }) }, market, account, readyGate: gate(), ownerGuard: { isHeld: () => true }, mode: () => "OFF", clock: now, config, telemetry,
     orders: { reserveExit: async (_tx, row) => { attempts.set(row.clOrdId, { state: "PREPARED" }); return { authorized: true }; }, markSubmitted: async () => {}, markNotCreated: async () => {}, markUnknown: async (_tx, id) => { attempts.get(id).state = "UNKNOWN"; } },
     transport: { maxAvailSize: async () => [{ instId: "SLOW-USDT", availSell: "1" }], submitBatchOrders: async (rows) => rows.map((row) => ({ clOrdId: row.clOrdId, status: "UNKNOWN", reason: "timeout" })) },
   });

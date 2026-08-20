@@ -14,6 +14,7 @@ import { OkxPublicWsClient, OkxPrivateWsClient, OkxBusinessWsClient, OkxWsReconn
 import { VirtualSloMetrics } from "./slo-metrics.js";
 import { EngineRecurringWork } from "./engine-recurring-work.js";
 import { EngineWorkLoop } from "./engine-work-loop.js";
+import { ExitSubmissionReconciler } from "./exit-submission-reconciler.js";
 import { BuySignalPlanner, normalizeConfirmed3mCandle } from "./buy-signal-planner.js";
 import { evaluateWatchdog } from "./operations-watchdog.js";
 import { ManagedIdentityCredential } from "@azure/identity";
@@ -118,6 +119,8 @@ export async function composeProductionRuntime(env, injected = {}) {
       return result;
     },
   });
+  const exitConfirmation = injected.exitConfirmation ?? new ExitSubmissionReconciler({ orders, reconciliation, transaction, timers: injected.timers ?? globalThis, telemetry });
+  coordinator.onExitSubmitted = (attempt) => exitConfirmation.schedule(attempt);
   engine = injected.engine ?? new TradingEngine({ projection: market, account, readyGate, clock: runtime.clock, coordinator, sellService, onMarketEvent: (event) => buyPlanner.observe?.(event), onOrderEvent: (order) => reconciliation.observeOrder?.(order), onWatchdog: injected.onWatchdog ?? telemetry, slo });
   const workLoop = injected.workLoop ?? new EngineWorkLoop({ engine, coordinator, timers: injected.timers ?? globalThis, telemetry });
   const socketFactory = injected.socketFactory ?? ((url) => { if (typeof WebSocket !== "function") throw new Error("WEBSOCKET_FACTORY_UNAVAILABLE"); return new WebSocket(url); });
@@ -197,19 +200,19 @@ export async function composeProductionRuntime(env, injected = {}) {
       telemetry({ type: "metric_snapshot", reason: "RUNTIME_METRICS", ...slo.snapshot({ reset: true }), ready: snapshot.ready.ready ? 1 : 0, queue_depth_current: snapshot.queue, pending_buy_current: coordinator.pending?.BUY?.size ?? 0, exit_backlog_current: exitBacklog });
     },
   });
-  return { runtime, keyVault, credentials, pool, ownerClient, ownerGuard, orders, state, transaction, market, account, readyGate, coordinator, reconciliation, buyPlanner, sellService, protection, delist, rest, ws, engine, workLoop, slo, recurring, executionRoutes, quoteCurrencies, offline: false,
+  return { runtime, keyVault, credentials, pool, ownerClient, ownerGuard, orders, state, transaction, market, account, readyGate, coordinator, reconciliation, exitConfirmation, buyPlanner, sellService, protection, delist, rest, ws, engine, workLoop, slo, recurring, executionRoutes, quoteCurrencies, offline: false,
     onOwnerLost(listener) { return ownerGuard.onLost(listener); },
     async start() { // fixed startup order: config -> secrets -> DB -> migration -> owner -> recovery -> REST baseline -> WS -> timers
       readyGate.set("database", false); await migrationCheck(); readyGate.set("database", true); if (!await ownerGuard.acquire()) throw new Error("OWNER_UNAVAILABLE");
       try {
-        await reconciliation.recover({ accountId: config.accountId }); await baseline();
+        const recovered = await reconciliation.recover({ accountId: config.accountId }); exitConfirmation.scheduleAttempts(recovered?.attempts ?? []); await baseline();
         for (const instId of instIds) maybeConfirmExpTime(instId, market.instrument(instId)?.expTime);
         if (injected.baseline && !injected.buyPlanner) readyGate.set("strategy", true); else await buyPlanner.prime();
         for (const instId of instIds) for (const event of sellService.observeCandle?.(instId) ?? []) engine.queue.enqueue({ ...event, enqueuedAt: runtime.clock.nowMs() });
         for (const client of Object.values(ws)) client.connect?.(); engine.startWatchdog(); workLoop.start?.(); recurring.start?.();
       }
-      catch (error) { readyGate.set("owner", false); for (const client of Object.values(ws)) client.stop?.(); recurring.stop?.(); workLoop.stop?.(); engine.stopWatchdog?.(); await ownerGuard.release(); throw error; }
+      catch (error) { readyGate.set("owner", false); for (const client of Object.values(ws)) client.stop?.(); await exitConfirmation.stop?.(); recurring.stop?.(); workLoop.stop?.(); engine.stopWatchdog?.(); await ownerGuard.release(); throw error; }
     },
-    async stopIntake() { coordinator.stopNewMutations(); }, async stopTimers() { recurring.stop?.(); workLoop.stop?.(); engine.stopWatchdog(); }, async stopNewMutations() { coordinator.stopNewMutations(); }, async closeWebSockets() { for (const client of Object.values(ws)) client.stop?.(); }, async finishInFlight() { await coordinator.finishInFlight(); }, async releaseOwner() { await ownerGuard.release(); }, async closeDatabase() { ownerClient.release?.(); ownerClient.end?.(); await pool.end?.(); },
+    async stopIntake() { coordinator.stopNewMutations(); }, async stopTimers() { await exitConfirmation.stop?.(); recurring.stop?.(); workLoop.stop?.(); engine.stopWatchdog(); }, async stopNewMutations() { coordinator.stopNewMutations(); }, async closeWebSockets() { for (const client of Object.values(ws)) client.stop?.(); }, async finishInFlight() { await coordinator.finishInFlight(); }, async releaseOwner() { await ownerGuard.release(); }, async closeDatabase() { ownerClient.release?.(); ownerClient.end?.(); await pool.end?.(); },
   };
 }

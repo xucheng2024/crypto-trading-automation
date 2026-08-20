@@ -238,7 +238,8 @@ export function parseArgs(argv) {
   if (["trade", "positions"].includes(options.command)) {
     if (options.command === "positions") {
       if (options.instrument) throw new Error("--instrument is only valid with trade");
-      if (options.request === Boolean(options.runId)) throw new Error("positions requires exactly one of --request or --run-id");
+      if (options.runId) throw new Error("positions does not accept --run-id");
+      if (!options.request) throw new Error("positions requires --request");
       return options;
     }
     if (!options.instrument || !/^[A-Z0-9]+-[A-Z0-9]+(?:-[A-Z0-9]+)?$/.test(options.instrument)) throw new Error("trade requires --instrument with an exact uppercase OKX instrument");
@@ -315,6 +316,15 @@ export function redactPositionsArtifact(artifact) {
   return { summary, positions };
 }
 
+export function formatPositionsSummary(result) {
+  const lines = [`Managed positions: instruments=${result.summary.instruments} open_fills=${result.summary.openFills} | job=${result.job} execution=${result.execution}`];
+  for (const row of result.positions ?? []) {
+    const sell = Array.isArray(row.sellStates) && row.sellStates.length ? row.sellStates.join(",") : "-";
+    lines.push(`${row.instrument} remaining_usd=${row.remainingCostUsd ?? "-"} open_fills=${row.openFills} sell=${sell} next_sell=${row.nextSellTime ?? "-"} protected=${row.protectedFills ?? 0}`);
+  }
+  return lines.join("\n");
+}
+
 export function positionsReadJobName(appName) {
   return appName.endsWith("-engine") ? `${appName.slice(0, -"-engine".length)}-positions-read` : `${appName}-positions-read`;
 }
@@ -333,46 +343,34 @@ function sleepMs(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-export async function runPositionsCommand(options, { command = run, json = runJson, fs = { mkdtemp, readFile, rm }, tempDir = tmpdir(), sleep = sleepMs, now = Date.now, timeoutMs = 60_000 } = {}) {
-  if (options.request) {
-    const resourceGroup = options.resourceGroup ?? command("gh", ["variable", "get", "AZURE_RESOURCE_GROUP"]);
-    const appName = options.app ?? command("gh", ["variable", "get", "CONTAINER_APP_NAME"]);
-    const jobName = positionsReadJobName(appName);
-    const started = json("az", ["containerapp", "job", "start", "--name", jobName, "--resource-group", resourceGroup, "--only-show-errors", "--output", "json"]);
-    const executionName = jobExecutionName(started);
-    let status = "Running";
-    const deadline = now() + timeoutMs;
-    while (now() < deadline) {
-      const execution = json("az", ["containerapp", "job", "execution", "show", "--name", jobName, "--resource-group", resourceGroup, "--job-execution-name", executionName, "--only-show-errors", "--output", "json"]);
-      status = execution?.properties?.status ?? execution?.status ?? "Unknown";
-      if (status === "Succeeded") break;
-      if (status === "Failed" || status === "Cancelled") throw new Error(`Managed-positions job ${executionName} ${status}`);
+export async function runPositionsCommand(options, { command = run, json = runJson, sleep = sleepMs, now = Date.now, timeoutMs = 60_000 } = {}) {
+  const resourceGroup = options.resourceGroup ?? command("gh", ["variable", "get", "AZURE_RESOURCE_GROUP"]);
+  const appName = options.app ?? command("gh", ["variable", "get", "CONTAINER_APP_NAME"]);
+  const jobName = positionsReadJobName(appName);
+  const started = json("az", ["containerapp", "job", "start", "--name", jobName, "--resource-group", resourceGroup, "--only-show-errors", "--output", "json"]);
+  const executionName = jobExecutionName(started);
+  let status = "Running";
+  const deadline = now() + timeoutMs;
+  while (now() < deadline) {
+    const execution = json("az", ["containerapp", "job", "execution", "show", "--name", jobName, "--resource-group", resourceGroup, "--job-execution-name", executionName, "--only-show-errors", "--output", "json"]);
+    status = execution?.properties?.status ?? execution?.status ?? "Unknown";
+    if (status === "Succeeded") break;
+    if (status === "Failed" || status === "Cancelled") throw new Error(`Managed-positions job ${executionName} ${status}`);
+    await sleep(2000);
+  }
+  if (status !== "Succeeded") throw new Error(`Managed-positions job ${executionName} timed out`);
+  let logs = "";
+  while (now() < deadline) {
+    logs = command("az", ["containerapp", "job", "logs", "show", "--name", jobName, "--resource-group", resourceGroup, "--container", "positions-read", "--execution", executionName, "--only-show-errors"]);
+    try {
+      const { summary, positions } = redactPositionsArtifact(parseManagedPositionsLog(logs));
+      return { command: "positions", requested: false, job: jobName, execution: executionName, summary, positions };
+    } catch (error) {
+      if (!/missing the redacted JSON marker/.test(error.message)) throw error;
       await sleep(2000);
     }
-    if (status !== "Succeeded") throw new Error(`Managed-positions job ${executionName} timed out`);
-    let logs = "";
-    while (now() < deadline) {
-      logs = command("az", ["containerapp", "job", "logs", "show", "--name", jobName, "--resource-group", resourceGroup, "--container", "positions-read", "--execution", executionName, "--only-show-errors"]);
-      try {
-        const { summary, positions } = redactPositionsArtifact(parseManagedPositionsLog(logs));
-        return { command: "positions", requested: false, job: jobName, execution: executionName, summary, positions };
-      } catch (error) {
-        if (!/missing the redacted JSON marker/.test(error.message)) throw error;
-        await sleep(2000);
-      }
-    }
-    throw new Error(`Managed-positions job ${executionName} log is missing the redacted JSON marker`);
   }
-  const repository = command("gh", ["repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"]);
-  const runInfo = json("gh", ["api", `repos/${repository}/actions/runs/${options.runId}`]);
-  if (!runInfo || !String(runInfo.path ?? "").endsWith("/production-positions-read.yml")) throw new Error(`Run ${options.runId} is not a production managed-positions run`);
-  const directory = await fs.mkdtemp(join(tempDir, "crypto-remote-positions-"));
-  try {
-    command("gh", ["run", "download", String(options.runId), "--repo", repository, "--name", "managed-positions", "--dir", directory]);
-    const artifact = JSON.parse(await fs.readFile(join(directory, "managed-positions.json"), "utf8"));
-    const { summary, positions } = redactPositionsArtifact(artifact);
-    return { command: "positions", requested: false, runId: options.runId, summary, positions };
-  } finally { await fs.rm(directory, { recursive: true, force: true }); }
+  throw new Error(`Managed-positions job ${executionName} log is missing the redacted JSON marker`);
 }
 
 function azJson(args) { return runJson("az", [...args, "--only-show-errors", "--output", "json"]); }
@@ -481,12 +479,7 @@ export async function main(argv = process.argv.slice(2)) {
   }
   if (options.command === "positions") {
     const summary = await runPositionsCommand(options);
-    if (options.json) console.log(JSON.stringify(summary));
-    else if (summary.requested) console.log(`Requested redacted managed-position summary on ${summary.branch}`);
-    else {
-      const source = summary.execution ? `job=${summary.job} execution=${summary.execution}` : `run=${summary.runId}`;
-      console.log(`Managed positions: instruments=${summary.summary.instruments} open_fills=${summary.summary.openFills} | ${source}`);
-    }
+    console.log(options.json ? JSON.stringify(summary) : formatPositionsSummary(summary));
     return summary;
   }
   const queryStartedAt = new Date().toISOString();

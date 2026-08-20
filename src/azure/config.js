@@ -1,4 +1,4 @@
-export const TRADING_MODES = Object.freeze(["OFF", "EXIT_ONLY", "FULL"]);
+export const TRADING_MODES = Object.freeze(["OFF", "FULL"]);
 
 const DEFAULTS = Object.freeze({
   QUOTE_MAX_AGE_MS: 1500,
@@ -33,7 +33,7 @@ function strategyConfig(raw) {
 export function loadAzureRuntimeConfig(env = {}) {
   const tradingMode = String(env.TRADING_MODE ?? "OFF").toUpperCase();
   if (!TRADING_MODES.includes(tradingMode)) {
-    throw new Error(`Invalid TRADING_MODE: ${tradingMode}. Expected OFF, EXIT_ONLY, or FULL`);
+    throw new Error(`Invalid TRADING_MODE: ${tradingMode}. Expected OFF or FULL`);
   }
   const values = Object.fromEntries(Object.keys(DEFAULTS).map((key) => [key.toLowerCase(), positiveInteger(env, key)]));
   if (values.owner_safety_wait_ms < values.order_expiry_ms + values.http_timeout_ms + values.clock_skew_allowance_ms) {

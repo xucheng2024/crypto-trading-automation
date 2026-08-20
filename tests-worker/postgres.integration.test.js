@@ -472,7 +472,7 @@ test("temporary PostgreSQL enforces P1-B invariants", { timeout: 60_000 }, async
       await state.insertFill(db.admin, { accountId, instId, baseCcy, tradeId: "dust-real", billId: "1", source: "SYSTEM", side: "BUY", fillSize: "0.05", fillTime: 1, holdHours: "24", strategyConfigHash: "cfg", sellTime: 0, sellState: "WAITING" });
       const seeded = (await db.admin.query("SELECT version FROM filled_orders WHERE trade_id='dust-real'")).rows[0];
       const telemetry = []; let availCalls = 0;
-      const coordinator = new OrderCoordinator({ transaction: (fn) => tx(db.admin, fn), orders, state, market, account, readyGate: ready, ownerGuard: { isHeld: () => true }, mode: () => "EXIT_ONLY", clock: now,
+      const coordinator = new OrderCoordinator({ transaction: (fn) => tx(db.admin, fn), orders, state, market, account, readyGate: ready, ownerGuard: { isHeld: () => true }, mode: () => "OFF", clock: now,
         config: { accountId, orderVersion: "p3", strategyTag: "P3", orderExpiryMs: 1_000, accountFreshMs: 10_000, quoteFreshMs: 10_000 },
         transport: { maxAvailSize: async () => { availCalls += 1; return [{ instId, availSell: "0.05" }]; } }, telemetry: (event) => telemetry.push(event) });
       coordinator.enqueue({ intent: "SELL", accountId, instId, baseCcy, sourceBuyTradeId: "dust-real", remainingSize: "0.05", fillVersion: seeded.version, sellTime: 0, availableBase: "0.05", bidPx: "1" });
@@ -532,7 +532,7 @@ test("temporary PostgreSQL enforces P1-B invariants", { timeout: 60_000 }, async
         await state.upsertProtection(client, { instId: "BTC-USDT", baseCcy: "BTC", state: "EXITING", reason: "test" });
         for (const [tradeId, fillTime] of [["orch-first", 1], ["orch-second", 2]]) await state.insertFill(client, { accountId, instId: "BTC-USDT", baseCcy: "BTC", tradeId, billId: String(fillTime), source: "SYSTEM", side: "BUY", fillSize: "1", fillTime, holdHours: "24", strategyConfigHash: "cfg", sellTime: 0, sellState: "WAITING" });
       });
-      const coordinator = new OrderCoordinator({ transaction: (fn) => tx(db.admin, fn), orders, state, market, account, readyGate: ready, ownerGuard: { isHeld: () => true }, mode: () => "EXIT_ONLY", config: { accountId, orderVersion: "p3", strategyTag: "P3", orderExpiryMs: 1000, accountFreshMs: 1000, quoteFreshMs: 1000 }, clock: now, transport: { maxAvailSize: async () => [{ instId: "BTC-USDT", availSell: "1" }], submitBatchOrders: async (rows) => rows.map((row) => ({ clOrdId: row.clOrdId, status: "SUBMITTED", ordId: "o" })) } });
+      const coordinator = new OrderCoordinator({ transaction: (fn) => tx(db.admin, fn), orders, state, market, account, readyGate: ready, ownerGuard: { isHeld: () => true }, mode: () => "OFF", config: { accountId, orderVersion: "p3", strategyTag: "P3", orderExpiryMs: 1000, accountFreshMs: 1000, quoteFreshMs: 1000 }, clock: now, transport: { maxAvailSize: async () => [{ instId: "BTC-USDT", availSell: "1" }], submitBatchOrders: async (rows) => rows.map((row) => ({ clOrdId: row.clOrdId, status: "SUBMITTED", ordId: "o" })) } });
       const orchestrator = new DelistOrchestrator({ transaction: (fn) => tx(db.admin, fn), state, orders, coordinator, accountId, market, availableBase: (row) => row.remaining_size });
       assert.equal(await orchestrator.drive("BTC-USDT"), "EXITING"); assert.equal((await coordinator.drainOnce()).count, 1);
       const attempts = (await db.admin.query("SELECT source_buy_trade_id,intent,state,reserved_base_size FROM order_attempts WHERE account_id=$1", [accountId])).rows;
@@ -559,7 +559,7 @@ test("temporary PostgreSQL enforces P1-B invariants", { timeout: 60_000 }, async
       const makeRuntime = () => {
         const ready = new ReadyGate(); for (const key of ready.required) ready.set(key, true);
         const telemetry = [];
-        const coordinator = new OrderCoordinator({ transaction: (fn) => tx(db.admin, fn), orders, state, market, account, readyGate: ready, ownerGuard: { isHeld: () => true }, mode: () => "EXIT_ONLY", clock: now,
+        const coordinator = new OrderCoordinator({ transaction: (fn) => tx(db.admin, fn), orders, state, market, account, readyGate: ready, ownerGuard: { isHeld: () => true }, mode: () => "OFF", clock: now,
           config: { accountId, orderVersion: "p3", strategyTag: "P3", orderExpiryMs: 1_000, accountFreshMs: 10_000, quoteFreshMs: 10_000 }, transport: fakeOkx, telemetry: (event) => telemetry.push(event) });
         const orchestrator = new DelistOrchestrator({ transaction: (fn) => tx(db.admin, fn), state, orders, coordinator, accountId, market, availableBase: (row) => row.remaining_size, telemetry: (event) => telemetry.push(event) }).bind();
         return { ready, telemetry, coordinator, orchestrator };

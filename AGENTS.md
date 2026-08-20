@@ -36,6 +36,7 @@ Choose checks based on the changed paths:
 
 - For user questions such as “最近系统正常么 / 有交易机会么 / 有被阻止么”, run `npm run ops:status -- report --since-last --details --expect-mode FULL` first; a missing local cursor automatically uses the latest 60 minutes.
 - Use `snapshot` for runtime/version/restarts/errors/market lag/risk signals, `activity` for compact candidate-to-fill progression (`--details` for per-attempt timelines), and `blocks` for reason aggregation and per-instrument evidence.
+- Use `positions --request` for the current redacted managed-position aggregate via the VNet `positions-read` job; do not query Postgres from the laptop.
 - Use `deploy` for the latest or `--run-id` production workflow, jobs, pending approvals, active revision and migration Runner; use `runner` for the VNet Runner's Azure/GitHub readiness, restarts and credential-presence check. Add `--details` only after `deploy` reports a failure.
 - Treat `PRICE_OUTSIDE`, `BREAKOUT_NOT_CONFIRMED`, `CANDLE_PENDING`, and `ASK_ABOVE_LIMIT` as normal market waiting; distinguish policy skips, safety/data blockers, opportunities, and execution events.
 - Report the analyzed time range, health, configured/current-state coverage, opportunities, prepared/submitted/settled orders, and every reported blocker with time, instrument, route, and evidence; expand only reported anomalies.
