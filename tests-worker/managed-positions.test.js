@@ -12,7 +12,7 @@ test("managed-position summary is a read-only redacted aggregate", async () => {
   assert.match(MANAGED_POSITIONS_SQL, /^\s*(WITH|SELECT)/i); assert.doesNotMatch(MANAGED_POSITIONS_SQL, /\b(INSERT|UPDATE|DELETE|CREATE|ALTER|DROP)\b/i);
   assert.match(MANAGED_POSITIONS_SQL, /fill_price/);
   assert.throws(() => redactManagedPositions([{ account_count: 2 }]), /ambiguous across accounts/);
-  assert.deepEqual(parseArgs([]), {}); assert.throws(() => parseArgs(["--bad"]), /does not accept/);
+  assert.deepEqual(parseArgs([]), {}); assert.deepEqual(parseArgs([""]), {}); assert.throws(() => parseArgs(["--bad"]), /does not accept/);
   assert.deepEqual(extractManagedPositionsJson(`noise\n${MANAGED_POSITIONS_JSON_PREFIX}${JSON.stringify(result)}\n`), result);
   assert.throws(() => extractManagedPositionsJson("no marker"), /missing the redacted JSON marker/);
 });

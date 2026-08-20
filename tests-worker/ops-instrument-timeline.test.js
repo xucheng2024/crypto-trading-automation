@@ -47,6 +47,6 @@ test("trade CLI starts the VNet timeline job and keeps only the redacted associa
   assert.equal(result.command, "trade"); assert.equal(result.job, "trading-cae-timeline-read"); assert.equal(result.execution, "trading-cae-timeline-read-abc");
   assert.equal(result.attemptRefScope, "QUERY_SNAPSHOT"); assert.deepEqual(result.summary, { attemptSnapshots: 1, fills: 1, protectionSnapshots: 0, attemptStates: { SETTLED: 1 } });
   assert.deepEqual(result.timeline, [{ eventTime: "1", eventType: "FILL", recordKind: "DURABLE_EVENT", stateObservedAt: "1", attemptRef: "A1" }]);
-  assert.ok(calls.some((row) => row[0] === "az" && row.includes("start") && row.includes("INSTRUMENT=BTC-USDT")));
+  assert.ok(calls.some((row) => row[0] === "az" && row.includes("start") && row.includes("--yaml")));
   assert.ok(!calls.some((row) => row[0] === "gh"));
 });

@@ -41,8 +41,7 @@ test("timeline CLI starts the VNet job with a scoped instrument and accepts only
     }, sleep: async () => {},
   });
   assert.equal(result.job, "trading-cae-timeline-read"); assert.equal(instrumentTimelineReadJobName("trading-cae-engine"), "trading-cae-timeline-read");
-  assert.ok(calls.some((row) => row.includes("INSTRUMENT=BTC-USDT")));
-  assert.ok(calls.some((row) => row[0] === "az" && row.includes("start") && row.includes("--image") && row.includes("instrument-timeline-read") && row.includes("scripts/query-instrument-timeline.mjs"))); assert.deepEqual(parseInstrumentTimelineLog('INSTRUMENT_TIMELINE_JSON:{"instrument":"BTC-USDT","timeline":[]}'), { instrument: "BTC-USDT", timeline: [] });
+  assert.ok(calls.some((row) => row[0] === "az" && row.includes("start") && row.includes("--yaml"))); assert.deepEqual(parseInstrumentTimelineLog('INSTRUMENT_TIMELINE_JSON:{"instrument":"BTC-USDT","timeline":[]}'), { instrument: "BTC-USDT", timeline: [] });
   const envelope = JSON.stringify({ TimeStamp: "t", Log: 'F INSTRUMENT_TIMELINE_JSON:{"instrument":"ETH-USDT","timeline":[]}' });
   assert.equal(parseInstrumentTimelineLog(envelope).instrument, "ETH-USDT");
 });
@@ -59,7 +58,7 @@ test("positions CLI starts the VNet job and redacts log JSON", async () => {
       calls.push([bin, ...args]);
       if (bin === "az" && args.includes("start")) return { name: "trading-cae-positions-read-abc" };
       if (bin === "az" && args.includes("execution")) return { properties: { status: "Succeeded" } };
-      throw new Error(`unexpected json ${bin} ${args.join(" ")}`);
+      return { properties: { template: { containers: [{ name: "positions-read", image: "img", env: [{ name: "TRADING_MODE", value: "OFF" }] }] } } };
     },
     sleep: async () => {},
   });

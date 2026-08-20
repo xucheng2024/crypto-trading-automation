@@ -64,7 +64,8 @@ export async function queryManagedPositions({ connectionString = process.env.POS
 }
 
 export function parseArgs(argv) {
-  if (argv.length) throw new Error("managed positions does not accept arguments");
+  const leftover = argv.filter((row) => row && row !== "scripts/query-managed-positions.mjs");
+  if (leftover.length) throw new Error("managed positions does not accept arguments");
   return {};
 }
 
