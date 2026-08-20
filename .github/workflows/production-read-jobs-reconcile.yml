@@ -1,0 +1,54 @@
+name: Production read jobs reconcile
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: production-read-jobs-reconcile
+  cancel-in-progress: false
+
+env:
+  RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP }}
+  ACR_NAME: ${{ vars.ACR_NAME }}
+  ACR_LOGIN_SERVER: ${{ vars.ACR_LOGIN_SERVER }}
+  CONTAINER_APP_NAME: ${{ vars.CONTAINER_APP_NAME }}
+  POSTGRES_MIGRATION_URL: ${{ vars.POSTGRES_MIGRATION_URL }}
+
+jobs:
+  reconcile:
+    runs-on: ubuntu-latest
+    environment: production-off
+    steps:
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_DEPLOY_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      - name: Create or update the VNet read-only jobs
+        shell: bash
+        run: |
+          set -euo pipefail
+          environment_id="$(az containerapp show --resource-group "$RESOURCE_GROUP" --name "$CONTAINER_APP_NAME" --query properties.managedEnvironmentId --output tsv)"
+          image="$(az containerapp show --resource-group "$RESOURCE_GROUP" --name "$CONTAINER_APP_NAME" --query 'properties.template.containers[0].image' --output tsv)"
+          acr_id="$(az acr show --name "$ACR_NAME" --query id --output tsv)"
+          host="$(node -p 'new URL(process.env.POSTGRES_MIGRATION_URL).hostname')"
+          database="$(node -p 'new URL(process.env.POSTGRES_MIGRATION_URL).pathname.slice(1)')"
+          prefix="${CONTAINER_APP_NAME%-engine}"
+          reconcile() {
+            local name="$1" command="$2" principal="$3"
+            local url="postgresql://${principal}@${host}:5432/${database}"
+            if az containerapp job show --name "$name" --resource-group "$RESOURCE_GROUP" --output none 2>/dev/null; then
+              az containerapp job update --name "$name" --resource-group "$RESOURCE_GROUP" --image "$image" --command node "$command" --env-vars "TRADING_MODE=OFF" "POSTGRES_URL=$url" --output none
+            else
+              az containerapp job create --name "$name" --resource-group "$RESOURCE_GROUP" --environment "$environment_id" --trigger-type Manual --replica-timeout 60 --replica-retry-limit 0 --replica-completion-count 1 --parallelism 1 --image "$image" --cpu 0.25 --memory 0.5Gi --command node "$command" --env-vars "TRADING_MODE=OFF" "POSTGRES_URL=$url" --mi-system-assigned --registry-server "$ACR_LOGIN_SERVER" --registry-identity system --output none
+            fi
+            principal_id="$(az containerapp job show --name "$name" --resource-group "$RESOURCE_GROUP" --query identity.principalId --output tsv)"
+            assignment="$(az role assignment list --assignee-object-id "$principal_id" --role AcrPull --scope "$acr_id" --query 'length(@)' --output tsv)"
+            [ "$assignment" -gt 0 ] || az role assignment create --assignee-object-id "$principal_id" --assignee-principal-type ServicePrincipal --role AcrPull --scope "$acr_id" --output none
+          }
+          reconcile "${prefix}-positions-read" scripts/query-managed-positions.mjs "${prefix}-positions-read"
+          reconcile "${prefix}-instrument-timeline-read" scripts/query-instrument-timeline.mjs "${prefix}-instrument-timeline-read"
