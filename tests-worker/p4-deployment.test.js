@@ -142,6 +142,14 @@ test("P4 positions-read job is manual, image-backed, and SELECT-only", async () 
   assert.doesNotMatch(sql, /GRANT EXECUTE ON FUNCTION[\s\S]*POSITIONS_READ/);
 });
 
+test("P4 positions-read grant workflow is VNet-scoped and SELECT-only", async () => {
+  const workflow = await readFile(".github/workflows/production-positions-grant.yml", "utf8");
+  assert.match(workflow, /bootstrap-positions-read-role\.mjs/);
+  assert.match(workflow, /runs-on: \[self-hosted, linux, x64, crypto-remote-migration\]/);
+  assert.match(workflow, /environment: production-migrate/);
+  assert.doesNotMatch(workflow, /npm run migrate:apply|containerapp update|production-promote-full/i);
+});
+
 test("P4 self-hosted migration runner is VNet-integrated, ephemeral and secret-scoped", async () => {
   const [workflow, bicep, entrypoint, dockerfile] = await Promise.all([
     readFile(".github/workflows/production-runner-bootstrap.yml", "utf8"),

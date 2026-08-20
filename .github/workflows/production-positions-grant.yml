@@ -1,0 +1,46 @@
+name: Production positions-read role grant
+
+on:
+  workflow_dispatch:
+    inputs:
+      principal_name:
+        description: Positions-read managed identity name
+        required: true
+        type: string
+      principal_oid:
+        description: Positions-read managed identity object ID
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: production-positions-grant
+  cancel-in-progress: false
+
+jobs:
+  grant:
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: [self-hosted, linux, x64, crypto-remote-migration]
+    environment: production-migrate
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --omit=dev
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_MIGRATION_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      - name: Grant SELECT-only filled_orders to the positions-read identity
+        env:
+          POSTGRES_URL: ${{ vars.POSTGRES_MIGRATION_URL }}
+          POSITIONS_READ_MI_NAME: ${{ inputs.principal_name }}
+          POSITIONS_READ_MI_OBJECT_ID: ${{ inputs.principal_oid }}
+        run: node scripts/bootstrap-positions-read-role.mjs
