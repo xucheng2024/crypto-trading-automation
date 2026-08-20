@@ -6,7 +6,7 @@ import { EntraPostgresPool } from "../src/infrastructure/postgres/entra-pool.js"
 // Do not add account, trade, order, decision, fee, configuration, or error fields.
 export const MANAGED_POSITIONS_SQL = `
   WITH open_buys AS (
-    SELECT account_id,inst_id,fill_size,disposed_size,sell_time,force_sell_time,
+    SELECT account_id,inst_id,fill_size,disposed_size,fill_price,sell_time,force_sell_time,
       protection_price,sell_state
     FROM filled_orders
     WHERE side='BUY' AND disposed_size < fill_size
@@ -15,6 +15,8 @@ export const MANAGED_POSITIONS_SQL = `
   ), positions AS (
     SELECT inst_id,
       sum(fill_size-disposed_size)::text AS remaining_size,
+      CASE WHEN count(*) FILTER (WHERE fill_price IS NULL) > 0 THEN NULL
+        ELSE sum((fill_size-disposed_size)*fill_price)::text END AS remaining_cost_usd,
       count(*)::int AS open_fills,
       array_agg(DISTINCT sell_state ORDER BY sell_state) FILTER (WHERE sell_state IS NOT NULL) AS sell_states,
       min(sell_time) AS next_sell_time,
@@ -33,6 +35,7 @@ export function redactManagedPositions(rows) {
   const positions = rows.map((row) => ({
     instrument: row.inst_id,
     remainingSize: row.remaining_size,
+    remainingCostUsd: row.remaining_cost_usd,
     openFills: Number(row.open_fills),
     sellStates: row.sell_states ?? [],
     nextSellTime: row.next_sell_time,

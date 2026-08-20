@@ -285,7 +285,7 @@ export async function runPositionsCommand(options, { command = run, json = runJs
     command("gh", ["run", "download", String(options.runId), "--repo", repository, "--name", "managed-positions", "--dir", directory]);
     const artifact = JSON.parse(await fs.readFile(join(directory, "managed-positions.json"), "utf8"));
     if (!artifact?.summary || !Array.isArray(artifact?.positions)) throw new Error("Managed-positions artifact is invalid");
-    const allowed = ["instrument", "remainingSize", "openFills", "sellStates", "nextSellTime", "nextForceSellTime", "protectedFills", "dustPendingFills"];
+    const allowed = ["instrument", "remainingSize", "remainingCostUsd", "openFills", "sellStates", "nextSellTime", "nextForceSellTime", "protectedFills", "dustPendingFills"];
     const positions = artifact.positions.map((row) => Object.fromEntries(allowed.filter((key) => Object.hasOwn(row, key)).map((key) => [key, row[key]])));
     const summary = { instruments: Number(artifact.summary.instruments), openFills: Number(artifact.summary.openFills) };
     if (!Number.isSafeInteger(summary.instruments) || summary.instruments < 0 || !Number.isSafeInteger(summary.openFills) || summary.openFills < 0 || summary.instruments !== positions.length) throw new Error("Managed-positions artifact summary is invalid");
