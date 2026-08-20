@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { assessRuntime, classifyBlock, classifyDecision, classifySevereTraces, formatPositionsSummary, instrumentTimelineReadJobName, parseArgs, parseInstrumentTimelineLog, parseManagedPositionsLog, positionsReadJobName, queryRows, redactPositionsArtifact, runInstrumentTimelineCommand, runPositionsCommand, summarizeDecisions, summarizeDeployment, summarizeRunner, summarizeTrading, traceEvents } from "../scripts/azure-ops-summary.mjs";
+import { assessRuntime, classifyBlock, classifyDecision, classifySevereTraces, formatInstrumentTimelineSummary, formatPositionsSummary, instrumentTimelineReadJobName, parseArgs, parseInstrumentTimelineLog, parseManagedPositionsLog, positionsReadJobName, queryRows, redactPositionsArtifact, runInstrumentTimelineCommand, runPositionsCommand, summarizeDecisions, summarizeDeployment, summarizeRunner, summarizeTrading, traceEvents } from "../scripts/azure-ops-summary.mjs";
 
 test("Azure ops summary converts query tables and aggregates decisions", () => {
   assert.deepEqual(queryRows({ tables: [{ columns: [{ name: "reason" }, { name: "decisions" }], rows: [["WAIT", 2]] }] }), [{ reason: "WAIT", decisions: 2 }]);
@@ -64,6 +64,15 @@ test("positions CLI starts the VNet job and redacts log JSON", async () => {
   });
   assert.deepEqual(requested, { command: "positions", requested: false, job: "trading-cae-positions-read", execution: "trading-cae-positions-read-abc", summary: { instruments: 1, openFills: 2 }, positions: [{ instrument: "BTC-USDT", remainingCostUsd: "100", openFills: 2, sellStates: ["WAITING"], nextSellTime: 1 }] });
   assert.match(formatPositionsSummary(requested), /BTC-USDT remaining_usd=100 open_fills=2 sell=WAITING/);
+  assert.equal(formatInstrumentTimelineSummary({
+    instrument: "CFG-USDT", job: "timeline-read",
+    timeline: [
+      { eventTime: "2026-08-19T11:25:07.558Z", eventType: "FILL", recordKind: "DURABLE_EVENT", intent: "BUY", fillSize: "10", disposedSize: "10", sellTime: "1787225107558", sellState: "SOLD" },
+      { eventTime: "2026-08-19T11:25:07.558Z", eventType: "FILL", recordKind: "DURABLE_EVENT", intent: "BUY", fillSize: "653.431713", disposedSize: "652.200582", sellTime: "1787225107558", sellState: "DUST_PENDING" },
+      { eventTime: "2026-08-20T11:55:17.864Z", eventType: "FILL", recordKind: "DURABLE_EVENT", intent: "SELL", fillSize: "75" },
+    ],
+  }), "Instrument timeline: CFG-USDT | buy=2026-08-19T11:25:07.558Z | sellTime=2026-08-20T11:25:07.558Z | first_sell=2026-08-20T11:55:17.864Z | leftover=1.231131 DUST_PENDING | events=3 | job=timeline-read");
+  assert.equal(formatInstrumentTimelineSummary({ instrument: "BTC-USDT", job: "timeline-read", timeline: [] }), "Instrument timeline: BTC-USDT | buy=- | sellTime=- | first_sell=- | leftover=0 | events=0 | job=timeline-read");
   assert.equal(positionsReadJobName("trading-cae-engine"), "trading-cae-positions-read");
   assert.ok(calls.some((row) => row[0] === "az" && row.includes("start")));
   assert.ok(!calls.some((row) => row[0] === "gh"));

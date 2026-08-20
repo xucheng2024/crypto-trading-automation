@@ -4,7 +4,7 @@ import { readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { compareDecimal, subtractDecimal } from "../src/decimal.js";
+import { addDecimal, compareDecimal, subtractDecimal } from "../src/decimal.js";
 
 function run(command, args) {
   const result = spawnSync(command, args, { encoding: "utf8", maxBuffer: 4 * 1024 * 1024 });
@@ -307,6 +307,38 @@ export function formatPositionsSummary(result) {
   return lines.join("\n");
 }
 
+function formatTimelineInstant(value) {
+  if (value == null || value === "") return "-";
+  const text = String(value);
+  if (/^\d+$/.test(text)) {
+    const ms = Number(text);
+    if (Number.isFinite(ms)) return new Date(ms).toISOString();
+  }
+  return text;
+}
+
+function earliestTimelineInstant(values) {
+  const instants = values.map(formatTimelineInstant).filter((value) => value !== "-");
+  if (!instants.length) return "-";
+  return instants.reduce((earliest, value) => value < earliest ? value : earliest);
+}
+
+export function formatInstrumentTimelineSummary(result) {
+  const timeline = result.timeline ?? [];
+  const buyFills = timeline.filter((row) => row.eventType === "FILL" && row.intent === "BUY" && row.recordKind === "DURABLE_EVENT");
+  const sellFills = timeline.filter((row) => row.eventType === "FILL" && row.intent === "SELL" && row.recordKind === "DURABLE_EVENT");
+  let leftover = "0";
+  const leftoverStates = [];
+  for (const row of buyFills) {
+    const remaining = subtractDecimal(row.fillSize ?? "0", row.disposedSize ?? "0");
+    if (compareDecimal(remaining, "0") <= 0) continue;
+    leftover = addDecimal(leftover, remaining);
+    if (row.sellState && !leftoverStates.includes(row.sellState)) leftoverStates.push(row.sellState);
+  }
+  const leftoverText = compareDecimal(leftover, "0") <= 0 ? "0" : leftoverStates.length ? `${leftover} ${leftoverStates.join(",")}` : leftover;
+  return `Instrument timeline: ${result.instrument} | buy=${earliestTimelineInstant(buyFills.map((row) => row.eventTime))} | sellTime=${earliestTimelineInstant(buyFills.map((row) => row.sellTime))} | first_sell=${earliestTimelineInstant(sellFills.map((row) => row.eventTime))} | leftover=${leftoverText} | events=${timeline.length} | job=${result.job}`;
+}
+
 export function positionsReadJobName(appName) {
   return appName.endsWith("-engine") ? `${appName.slice(0, -"-engine".length)}-positions-read` : `${appName}-positions-read`;
 }
@@ -552,7 +584,7 @@ export async function main(argv = process.argv.slice(2)) {
   const options = parseArgs(argv);
   if (options.command === "trade" || options.command === "timeline") {
     const summary = options.command === "trade" ? await runTradeCommand(options) : await runInstrumentTimelineCommand(options);
-    console.log(options.json ? JSON.stringify(summary) : `Instrument timeline: ${summary.instrument} | events=${summary.timeline.length} | job=${summary.job}`);
+    console.log(options.json ? JSON.stringify(summary) : formatInstrumentTimelineSummary(summary));
     return summary;
   }
   if (options.command === "positions") {
