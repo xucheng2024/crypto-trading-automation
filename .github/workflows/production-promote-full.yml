@@ -18,7 +18,7 @@ env:
 jobs:
   promote_full:
     runs-on: ubuntu-latest
-    environment: production-full
+    environment: production
     steps:
       - uses: azure/login@v2
         with:

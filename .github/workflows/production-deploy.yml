@@ -96,7 +96,7 @@ jobs:
   migrate:
     needs: validate
     runs-on: [self-hosted, linux, x64, crypto-remote-migration]
-    environment: production-migrate
+    environment: production
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -155,7 +155,7 @@ jobs:
   deploy_off:
     needs: [build, migrate]
     runs-on: ubuntu-latest
-    environment: production-off
+    environment: production
     outputs:
       revision: ${{ steps.deploy.outputs.revision }}
     steps:
@@ -194,7 +194,7 @@ jobs:
     if: ${{ inputs.promote_full }}
     needs: [build, deploy_off]
     runs-on: ubuntu-latest
-    environment: production-full
+    environment: production
     steps:
       - uses: azure/login@v2
         with:

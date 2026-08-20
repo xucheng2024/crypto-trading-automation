@@ -1,7 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { readFile, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { compareDecimal, subtractDecimal } from "../src/decimal.js";
 
@@ -237,40 +235,20 @@ export function parseArgs(argv) {
   if (options.since && options.sinceLast) throw new Error("Use only one of --since or --since-last");
   if (["trade", "positions", "timeline"].includes(options.command)) {
     if (options.command === "positions") {
-      if (options.instrument) throw new Error("--instrument is only valid with trade");
+      if (options.instrument) throw new Error("--instrument is only valid with trade or timeline");
       if (options.runId) throw new Error("positions does not accept --run-id");
       if (!options.request) throw new Error("positions requires --request");
       return options;
     }
     if (!options.instrument || !/^[A-Z0-9]+-[A-Z0-9]+(?:-[A-Z0-9]+)?$/.test(options.instrument)) throw new Error(`${options.command} requires --instrument with an exact uppercase OKX instrument`);
-    if (options.command === "trade" && options.request === Boolean(options.runId)) throw new Error("trade requires exactly one of --request or --run-id");
-    if (options.command === "timeline" && (!options.request || options.runId)) throw new Error("timeline requires --request and does not accept --run-id");
-  } else if (options.instrument || options.request) throw new Error("--instrument and --request are only valid with trade");
+    if (options.runId) throw new Error(`${options.command} does not accept --run-id`);
+    if (!options.request) throw new Error(`${options.command} requires --request`);
+  } else if (options.instrument || options.request) throw new Error("--instrument and --request are only valid with trade or timeline");
   return options;
 }
 
-export async function runTradeCommand(options, { command = run, json = runJson, fs = { mkdtemp, readFile, rm }, tempDir = tmpdir() } = {}) {
-  const repository = command("gh", ["repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"]);
-  if (options.request) {
-    const branch = command("gh", ["api", `repos/${repository}`, "--jq", ".default_branch"]);
-    command("gh", ["workflow", "run", "production-ops-read.yml", "--repo", repository, "--ref", branch, "-f", `instrument=${options.instrument}`]);
-    return { command: "trade", requested: true, instrument: options.instrument, repository, branch };
-  }
-  const runInfo = json("gh", ["api", `repos/${repository}/actions/runs/${options.runId}`]);
-  if (!runInfo || !String(runInfo.path ?? "").endsWith("/production-ops-read.yml")) throw new Error(`Run ${options.runId} is not a production instrument timeline run`);
-  const directory = await fs.mkdtemp(join(tempDir, "crypto-remote-timeline-"));
-  try {
-    command("gh", ["run", "download", String(options.runId), "--repo", repository, "--name", "instrument-timeline", "--dir", directory]);
-    const artifact = JSON.parse(await fs.readFile(join(directory, "instrument-timeline.json"), "utf8"));
-    if (artifact?.instrument !== options.instrument || !Array.isArray(artifact?.timeline)) throw new Error("Timeline artifact does not match the requested instrument");
-    const allowed = ["eventTime", "eventType", "recordKind", "stateObservedAt", "attemptRef", "intent", "state", "reservationState", "executionMode", "executionRoute", "plannedSize", "reservedExposureUsd", "reservedBaseSize", "executionLimitPrice", "fillSize", "disposedSize", "fillPrice", "sellTime", "forceSellTime", "protectionPrice", "sellState", "sellTriggerReason", "allocationState"];
-    const timeline = artifact.timeline.map((row) => Object.fromEntries(allowed.filter((key) => Object.hasOwn(row, key)).map((key) => [key, row[key]])));
-    const summary = artifact?.summary && typeof artifact.summary === "object" ? {
-      attemptSnapshots: artifact.summary.attemptSnapshots, fills: artifact.summary.fills,
-      protectionSnapshots: artifact.summary.protectionSnapshots, attemptStates: artifact.summary.attemptStates,
-    } : undefined;
-    return { command: "trade", requested: false, runId: options.runId, instrument: artifact.instrument, attemptRefScope: artifact.attemptRefScope === "QUERY_SNAPSHOT" ? artifact.attemptRefScope : undefined, summary, timeline };
-  } finally { await fs.rm(directory, { recursive: true, force: true }); }
+export async function runTradeCommand(options, deps) {
+  return runInstrumentTimelineCommand({ ...options, command: "trade" }, deps);
 }
 
 function extractJsonObject(text) {
@@ -290,7 +268,7 @@ function extractJsonObject(text) {
       if (depth === 0) return text.slice(0, i + 1);
     }
   }
-  throw new Error("Managed-positions job log JSON is truncated");
+  throw new Error("Job log JSON is truncated");
 }
 
 export function parseManagedPositionsLog(text) {
@@ -338,8 +316,31 @@ export function parseInstrumentTimelineLog(text) {
   const line = String(text).split(/\r?\n/).map((row) => row.trim()).find((row) => row.includes(prefix));
   if (!line) throw new Error("Instrument timeline job log is missing the redacted JSON marker");
   let source = line;
-  try { const envelope = JSON.parse(line); if (typeof envelope?.Log === "string") source = envelope.Log; } catch {}
-  return JSON.parse(source.slice(source.indexOf(prefix) + prefix.length));
+  try {
+    const envelope = JSON.parse(line);
+    if (typeof envelope?.Log === "string") source = envelope.Log;
+  } catch {}
+  const payload = source.slice(source.indexOf(prefix) + prefix.length);
+  const start = payload.indexOf("{");
+  if (start < 0) throw new Error("Instrument timeline job log is missing the redacted JSON marker");
+  return JSON.parse(extractJsonObject(payload.slice(start)));
+}
+
+const TIMELINE_ROW_KEYS = ["eventTime", "eventType", "recordKind", "stateObservedAt", "attemptRef", "intent", "state", "reservationState", "executionMode", "executionRoute", "plannedSize", "reservedExposureUsd", "reservedBaseSize", "executionLimitPrice", "fillSize", "disposedSize", "fillPrice", "sellTime", "forceSellTime", "protectionPrice", "sellState", "sellTriggerReason", "allocationState"];
+
+export function redactTimelineArtifact(artifact) {
+  if (!artifact?.instrument || !Array.isArray(artifact?.timeline)) throw new Error("Instrument timeline artifact is invalid");
+  const timeline = artifact.timeline.map((row) => Object.fromEntries(TIMELINE_ROW_KEYS.filter((key) => Object.hasOwn(row, key)).map((key) => [key, row[key]])));
+  const summary = artifact?.summary && typeof artifact.summary === "object" ? {
+    attemptSnapshots: artifact.summary.attemptSnapshots, fills: artifact.summary.fills,
+    protectionSnapshots: artifact.summary.protectionSnapshots, attemptStates: artifact.summary.attemptStates,
+  } : undefined;
+  return {
+    instrument: artifact.instrument,
+    attemptRefScope: artifact.attemptRefScope === "QUERY_SNAPSHOT" ? artifact.attemptRefScope : undefined,
+    summary,
+    timeline,
+  };
 }
 
 export async function runInstrumentTimelineCommand(options, { command = run, json = runJson, sleep = sleepMs, now = Date.now, timeoutMs = 60_000 } = {}) {
@@ -359,7 +360,11 @@ export async function runInstrumentTimelineCommand(options, { command = run, jso
   let logs = "";
   while (now() < deadline) {
     logs = command("az", ["containerapp", "job", "logs", "show", "--name", job, "--resource-group", resourceGroup, "--container", "instrument-timeline-read", "--execution", execution, "--only-show-errors"]);
-    try { const timeline = parseInstrumentTimelineLog(logs); if (timeline.instrument !== options.instrument) throw new Error("Instrument timeline result does not match requested instrument"); return { command: "timeline", job, execution, ...timeline }; }
+    try {
+      const parsed = parseInstrumentTimelineLog(logs);
+      if (parsed.instrument !== options.instrument) throw new Error("Instrument timeline result does not match requested instrument");
+      return { command: options.command === "trade" ? "trade" : "timeline", job, execution, ...redactTimelineArtifact(parsed) };
+    }
     catch (error) { if (!/missing the redacted JSON marker/.test(error.message)) throw error; await sleep(2000); }
   }
   throw new Error(`Instrument timeline job ${execution} log is missing the redacted JSON marker`);
@@ -506,15 +511,8 @@ async function runInfrastructureCommand(options, resourceGroup, appName) {
 
 export async function main(argv = process.argv.slice(2)) {
   const options = parseArgs(argv);
-  if (options.command === "trade") {
-    const summary = await runTradeCommand(options);
-    if (options.json) console.log(JSON.stringify(summary));
-    else if (summary.requested) console.log(`Requested redacted instrument timeline for ${summary.instrument} on ${summary.branch}`);
-    else console.log(`Instrument timeline: ${summary.instrument} | events=${summary.timeline.length} | run=${summary.runId}`);
-    return summary;
-  }
-  if (options.command === "timeline") {
-    const summary = await runInstrumentTimelineCommand(options);
+  if (options.command === "trade" || options.command === "timeline") {
+    const summary = options.command === "trade" ? await runTradeCommand(options) : await runInstrumentTimelineCommand(options);
     console.log(options.json ? JSON.stringify(summary) : `Instrument timeline: ${summary.instrument} | events=${summary.timeline.length} | job=${summary.job}`);
     return summary;
   }

@@ -21,8 +21,8 @@ jobs:
   deploy_runner:
     runs-on: ubuntu-latest
     # This job creates deployment resources and therefore uses the deployment
-    # identity's existing production-off OIDC subject, not the SQL identity.
-    environment: production-off
+    # identity, not the SQL identity.
+    environment: production
     steps:
       - uses: actions/checkout@v4
       - name: Require the dedicated runner registration credential

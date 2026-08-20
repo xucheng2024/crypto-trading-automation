@@ -2,7 +2,7 @@
 
 The workflows in `.github/workflows/` implement the production release path:
 
-`validate → immutable linux/amd64 image → migration → one OFF revision → protected FULL approval → one FULL revision`.
+`validate → immutable linux/amd64 image → migration → one OFF revision → explicit FULL promote → one FULL revision`.
 
 The engine uses a PostgreSQL advisory owner lock. It is intentionally a
 singleton, so this is not a blue/green traffic deployment: a second revision
@@ -13,7 +13,8 @@ one to become healthy.
 ## One-time GitHub configuration
 
 Create two Azure application registrations with GitHub OIDC federated
-credentials restricted to this repository and the listed environments:
+credentials restricted to this repository and the `production` environment
+(plus the deployment identity's default-branch subject if already present):
 
 - deployment identity: ACR push; resource-group-scoped `Container Apps
   Contributor` and `Azure Deployment Stack Contributor`; and `Managed Identity
@@ -23,6 +24,7 @@ credentials restricted to this repository and the listed environments:
 - migration identity: PostgreSQL migration DDL role. It does not require
   Flexible Server firewall-rule permission because migrations run from the
   VNet-integrated self-hosted runner through the existing NAT allowlist.
+  Keep this identity separate from the deployment identity.
 
 Create GitHub repository secrets:
 
@@ -44,10 +46,11 @@ Create GitHub repository variables (none contains a password):
 - `POSTGRES_MIGRATION_URL` — Entra-only PostgreSQL URL for the dedicated
   migration principal; a URL password is rejected by the runner.
 
-Create protected environments `production-migrate`, `production-off`, and
-`production-full`. Require an operator approval for `production-full`; require
-approval for the other two if the organization requires change-control before
-migrations or an OFF rollout.
+Create one protected GitHub environment named `production` with a protected-branch
+policy. Do not attach required reviewers unless you want every migrate, OFF
+deploy, and FULL promote to wait for the same approval. Promote FULL only after
+explicit operator authorization; the workflow itself does not add a second
+environment gate.
 
 The migration identity must be created as a PostgreSQL principal with the
 minimum schema DDL rights. Do not reuse the engine or maintenance identity.
@@ -56,7 +59,7 @@ Before the first production deployment, run **Production runner bootstrap**
 from a GitHub-hosted runner. It builds a SHA-256-verified GitHub Actions runner
 image, pushes it to ACR by immutable digest, and deploys a no-ingress,
 single-replica Container App in the existing Container Apps Environment. The
-bootstrap uses the deployment identity through the `production-off`
+bootstrap uses the deployment identity through the `production`
 environment; it never grants resource deployment rights to the migration
 identity. It reuses the production app's existing least-privilege ACR pull
 identity rather than creating another role assignment. The
@@ -68,14 +71,14 @@ by Container Apps. Rotate `GH_RUNNER_PAT` by rerunning the bootstrap workflow.
 ## Use
 
 Run **Production deploy** manually. With `promote_full=false`, it stops at the
-verified OFF revision. With `promote_full=true`, the workflow pauses at the
-protected `production-full` environment before it can change the mode. The
-workflow has a repository-wide `production-deploy` concurrency group, so two
-deployments cannot modify revisions concurrently.
+verified OFF revision. With `promote_full=true`, the same `production`
+environment is used for the mode change; authorize that input explicitly
+before running it. The workflow has a repository-wide `production-deploy`
+concurrency group, so two deployments cannot modify revisions concurrently.
 
 After an OFF deployment has already been verified, use **Production promote
 FULL** for the separately authorized transition. It promotes the exact healthy
-OFF digest after the `production-full` approval without rebuilding, rerunning
+OFF digest without rebuilding, rerunning
 tests, reopening the database firewall, or reapplying migrations.
 
 Production deploy requires a successful `CI` run for the exact commit instead

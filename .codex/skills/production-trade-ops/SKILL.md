@@ -29,19 +29,13 @@ Use the existing operations entry points; do not construct ad-hoc Azure, Postgre
 
    This is SELECT-only on unclosed BUY fills. Remaining USD is durable fill cost, not mark-to-market. Expect tens of seconds. Do not open Postgres from the laptop or invent GRANT SQL while diagnosing. Report instrument, remaining USD, open fills, sell states, and next sell time from the helper output only.
 
-4. For one instrument's durable timeline, require an exact uppercase symbol and use the read-only GitHub workflow:
+4. For one instrument's durable timeline, require an exact uppercase symbol and start the VNet `timeline-read` job:
 
    ```sh
    npm run ops:status -- trade --instrument BTC-USDT --request
    ```
 
-   After the workflow completes, read only its matching artifact:
-
-   ```sh
-   npm run ops:status -- trade --instrument BTC-USDT --run-id <run-id> --json
-   ```
-
-   Interpret `DURABLE_EVENT` fills as ledger facts. Treat `CURRENT_STATE_SNAPSHOT` order/protection rows as current state, not historical transitions. `attemptRef` is an anonymous query-local link only.
+   This is SELECT-only on `order_attempts`, `filled_orders`, and `instrument_protection`. Expect tens of seconds. Do not open Postgres from the laptop, dispatch GitHub `production-ops-read`, or invent GRANT SQL while diagnosing. Interpret `DURABLE_EVENT` fills as ledger facts. Treat `CURRENT_STATE_SNAPSHOT` order/protection rows as current state, not historical transitions. `attemptRef` is an anonymous query-local link only.
 
 5. Distinguish evidence explicitly:
 

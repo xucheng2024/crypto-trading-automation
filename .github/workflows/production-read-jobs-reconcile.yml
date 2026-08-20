@@ -21,7 +21,7 @@ env:
 jobs:
   reconcile:
     runs-on: ubuntu-latest
-    environment: production-off
+    environment: production
     steps:
       - uses: azure/login@v2
         with:

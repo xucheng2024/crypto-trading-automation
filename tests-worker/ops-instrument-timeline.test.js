@@ -7,8 +7,9 @@ test("instrument timeline rejects injection and ambiguous instruments", () => {
   for (const value of ["BTC-USDT; DELETE FROM filled_orders", "btc-usdt", "BTC USDT", "BTC-USDT' OR '1'='1", undefined]) assert.throws(() => validateInstrument(value), /exact uppercase OKX instrument/);
   assert.deepEqual(parseTimelineArgs(["--instrument", "BTC-USDT"]), { instrument: "BTC-USDT" });
   assert.throws(() => parseTimelineArgs(["--instrument", "BTC-USDT", "--instrument", "ETH-USDT"]), /only once/);
-  assert.throws(() => parseArgs(["trade", "--instrument", "BTC-USDT"]), /exactly one/);
-  assert.throws(() => parseArgs(["trade", "--instrument", "BTC-USDT", "--request", "--run-id", "7"]), /exactly one/);
+  assert.throws(() => parseArgs(["trade", "--instrument", "BTC-USDT"]), /requires --request/);
+  assert.throws(() => parseArgs(["trade", "--instrument", "BTC-USDT", "--run-id", "7"]), /does not accept --run-id/);
+  assert.throws(() => parseArgs(["trade", "--instrument", "BTC-USDT", "--request", "--run-id", "7"]), /does not accept --run-id/);
 });
 
 test("instrument timeline uses a parameterized constant SELECT inside a read-only transaction", async () => {
@@ -29,21 +30,18 @@ test("instrument timeline output retains decimal and state fields while excludin
   for (const forbidden of ["account_id", "trade_id", "cl_ord_id", "decision_id", "payload_hash", "fee", "strategy_config_hash", "error_message", "forbidden"]) assert.doesNotMatch(encoded, new RegExp(forbidden));
 });
 
-test("trade CLI dispatches only on explicit request and reads only a matching workflow artifact", async () => {
-  const options = parseArgs(["trade", "--instrument", "BTC-USDT", "--request"]); const commands = [];
-  const requested = await runTradeCommand(options, { command: (...args) => { commands.push(args); return args[0] === "gh" && args[1].includes(".default_branch") ? "main" : "owner/repo"; }, json: () => ({}) });
-  assert.deepEqual(requested, { command: "trade", requested: true, instrument: "BTC-USDT", repository: "owner/repo", branch: "main" });
-  assert.deepEqual(commands.at(-1), ["gh", ["workflow", "run", "production-ops-read.yml", "--repo", "owner/repo", "--ref", "main", "-f", "instrument=BTC-USDT"]]);
-  await assert.rejects(runTradeCommand(parseArgs(["trade", "--instrument", "BTC-USDT", "--run-id", "8"]), { command: () => "owner/repo", json: () => ({ path: ".github/workflows/production-deploy.yml" }), fs: {} }), /not a production instrument timeline run/);
-});
-
-test("trade CLI preserves only the redacted timeline association and snapshot fields", async () => {
-  const options = parseArgs(["trade", "--instrument", "BTC-USDT", "--run-id", "7"]);
+test("trade CLI starts the VNet timeline job and keeps only the redacted association fields", async () => {
+  const options = parseArgs(["trade", "--instrument", "BTC-USDT", "--request", "--resource-group", "rg", "--app", "trading-cae-engine"]);
+  const calls = [];
+  const payload = { instrument: "BTC-USDT", attemptRefScope: "QUERY_SNAPSHOT", summary: { attemptSnapshots: 1, fills: 1, protectionSnapshots: 0, attemptStates: { SETTLED: 1 }, raw: "forbidden" }, timeline: [{ eventTime: "1", eventType: "FILL", recordKind: "DURABLE_EVENT", stateObservedAt: "1", attemptRef: "A1", tradeId: "forbidden" }] };
   const result = await runTradeCommand(options, {
-    command: () => "owner/repo",
-    json: () => ({ path: ".github/workflows/production-ops-read.yml" }),
-    fs: { mkdtemp: async () => "/tmp/timeline", rm: async () => {}, readFile: async () => JSON.stringify({ instrument: "BTC-USDT", attemptRefScope: "QUERY_SNAPSHOT", summary: { attemptSnapshots: 1, fills: 1, protectionSnapshots: 0, attemptStates: { SETTLED: 1 }, raw: "forbidden" }, timeline: [{ eventTime: "1", eventType: "FILL", recordKind: "DURABLE_EVENT", stateObservedAt: "1", attemptRef: "A1", tradeId: "forbidden" }] }) },
+    command: (bin, args) => { calls.push([bin, ...args]); if (bin === "az" && args.includes("logs")) return `INSTRUMENT_TIMELINE_JSON:${JSON.stringify(payload)}`; throw new Error(`unexpected command ${bin}`); },
+    json: (bin, args) => { calls.push([bin, ...args]); if (args.includes("start")) return { name: "trading-cae-timeline-read-abc" }; return { properties: { status: "Succeeded" } }; },
+    sleep: async () => {},
   });
+  assert.equal(result.command, "trade"); assert.equal(result.job, "trading-cae-timeline-read"); assert.equal(result.execution, "trading-cae-timeline-read-abc");
   assert.equal(result.attemptRefScope, "QUERY_SNAPSHOT"); assert.deepEqual(result.summary, { attemptSnapshots: 1, fills: 1, protectionSnapshots: 0, attemptStates: { SETTLED: 1 } });
   assert.deepEqual(result.timeline, [{ eventTime: "1", eventType: "FILL", recordKind: "DURABLE_EVENT", stateObservedAt: "1", attemptRef: "A1" }]);
+  assert.ok(calls.some((row) => row[0] === "az" && row.includes("start") && row.includes("INSTRUMENT=BTC-USDT")));
+  assert.ok(!calls.some((row) => row[0] === "gh"));
 });

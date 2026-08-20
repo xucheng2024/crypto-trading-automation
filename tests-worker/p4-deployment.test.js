@@ -93,17 +93,32 @@ test("P4 production deployment overlaps independent work without weakening safet
   assert.match(workflow, /Require this run's image build before applying SQL/);
   assert.match(workflow, /select\(\.name == "build"\) \| \.conclusion/);
   assert.doesNotMatch(workflow, /api\.ipify|firewall-rule (create|delete)|github-migration-/);
-  assert.match(workflow, /  promote_full:[\s\S]+environment: production-full/);
+  assert.match(workflow, /  promote_full:[\s\S]+environment: production\n/);
   assert.match(workflow, /\[ "\$state" = "RunningAtMaxScale Healthy" \]/);
 });
 
-test("P4 production timeline workflow is read-only, VNet-scoped, and artifact-limited", async () => {
-  const workflow = await readFile(".github/workflows/production-ops-read.yml", "utf8");
-  assert.match(workflow, /workflow_dispatch:[\s\S]+instrument:/); assert.doesNotMatch(workflow, /inputs:[\s\S]+\b(sql|migration|deploy|promote_full):/i); assert.doesNotMatch(workflow, /npm run migrate:apply|containerapp update|production-promote-full/i);
-  assert.match(workflow, /runs-on: \[self-hosted, linux, x64, crypto-remote-migration\]/); assert.match(workflow, /environment: production-migrate/);
-  assert.match(workflow, /github\.ref == format\('refs\/heads\/\{0\}', github\.event\.repository\.default_branch\)/);
-  assert.match(workflow, /node-version: 22/); assert.match(workflow, /id-token: write/); assert.match(workflow, /contents: read/);
-  assert.match(workflow, /query-instrument-timeline\.mjs --instrument "\$INSTRUMENT"/); assert.match(workflow, /INSTRUMENT: \$\{\{ inputs\.instrument \}\}/); assert.match(workflow, /retention-days: 1/); assert.match(workflow, /instrument-timeline\.json/);
+test("P4 timeline-read job is manual, image-backed, and SELECT-only", async () => {
+  const [apps, main, dockerfile, deploy] = await Promise.all([
+    readFile("infrastructure/bicep/modules/apps.bicep", "utf8"),
+    readFile("infrastructure/bicep/main.bicep", "utf8"),
+    readFile("Dockerfile", "utf8"),
+    readFile(".github/workflows/production-deploy.yml", "utf8"),
+  ]);
+  const job = apps.slice(apps.indexOf("resource instrumentTimelineRead 'Microsoft.App/jobs"), apps.indexOf("\n// AcrPull, maintenance"));
+  assert.match(job, /name: '\$\{environmentName\}-timeline-read'/);
+  assert.match(job, /triggerType: 'Manual'/);
+  assert.match(job, /replicaTimeout: 60/);
+  assert.match(job, /command: \['node', 'scripts\/query-instrument-timeline\.mjs'\]/);
+  assert.match(job, /POSTGRES_URL', value: instrumentTimelineReadPostgresUrl/);
+  assert.doesNotMatch(job, /KEY_VAULT|APPLICATIONINSIGHTS|MAINTENANCE_ADAPTER_MODULE/);
+  assert.match(apps, /guid\(acrId, instrumentTimelineRead\.id/);
+  assert.doesNotMatch(apps, /guid\(keyVaultId, instrumentTimelineRead\.id/);
+  assert.match(main, /instrumentTimelineReadPostgresUrl/);
+  assert.match(dockerfile, /scripts\/query-instrument-timeline\.mjs/);
+  assert.match(deploy, /timeline-read/);
+  const sql = await readFile("docs/runbooks/P4_POSTGRES_ENTRA_BOOTSTRAP.sql", "utf8");
+  assert.match(sql, /GRANT SELECT ON TABLE order_attempts, filled_orders, instrument_protection TO "<INSTRUMENT_TIMELINE_READ_MI_NAME>"/);
+  assert.doesNotMatch(sql, /GRANT EXECUTE ON FUNCTION[\s\S]*INSTRUMENT_TIMELINE_READ/);
 });
 
 test("P4 positions-read job is manual, image-backed, and SELECT-only", async () => {
@@ -135,7 +150,7 @@ test("P4 positions-read job is manual, image-backed, and SELECT-only", async () 
 
 test("P4 read-job reconcile is manual, OFF-only, and grants only image pull", async () => {
   const workflow = await readFile(".github/workflows/production-read-jobs-reconcile.yml", "utf8");
-  assert.match(workflow, /workflow_dispatch:/); assert.match(workflow, /environment: production-off/);
+  assert.match(workflow, /workflow_dispatch:/); assert.match(workflow, /environment: production\n/);
   assert.match(workflow, /query-managed-positions\.mjs/); assert.match(workflow, /query-instrument-timeline\.mjs/);
   assert.match(workflow, /TRADING_MODE=OFF/); assert.match(workflow, /registry_identity/);
   assert.match(workflow, /--mi-user-assigned/);
@@ -151,7 +166,7 @@ test("P4 self-hosted migration runner is VNet-integrated, ephemeral and secret-s
     readFile("infrastructure/runner/entrypoint.sh", "utf8"),
     readFile("infrastructure/runner/Dockerfile", "utf8"),
   ]);
-  assert.match(workflow, /environment: production-off/); assert.doesNotMatch(workflow, /environment: production-migrate/);
+  assert.match(workflow, /environment: production\n/); assert.doesNotMatch(workflow, /environment: production-migrate/);
   assert.match(workflow, /environmentId="\$environment_id"/); assert.match(workflow, /secrets\.GH_RUNNER_PAT/);
   assert.match(workflow, /registryIdentityId="\$registry_identity"/); assert.doesNotMatch(workflow, /az (acr|group) show/);
   assert.match(workflow, /\$\{registry_identity,,\}/);

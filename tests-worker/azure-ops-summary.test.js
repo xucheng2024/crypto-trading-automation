@@ -21,8 +21,11 @@ test("Azure ops summary accepts trading, deployment, and runner commands", () =>
   assert.deepEqual(parseArgs(["runner", "--json"]).command, "runner");
   assert.deepEqual(parseArgs(["positions", "--request"]).command, "positions");
   assert.deepEqual(parseArgs(["timeline", "--instrument", "BTC-USDT", "--request"]).command, "timeline");
+  assert.deepEqual(parseArgs(["trade", "--instrument", "BTC-USDT", "--request"]).command, "trade");
   assert.throws(() => parseArgs(["positions"]), /requires --request/);
   assert.throws(() => parseArgs(["positions", "--run-id", "7"]), /does not accept --run-id/);
+  assert.throws(() => parseArgs(["trade", "--instrument", "BTC-USDT"]), /requires --request/);
+  assert.throws(() => parseArgs(["trade", "--instrument", "BTC-USDT", "--run-id", "8"]), /does not accept --run-id/);
   assert.throws(() => parseArgs(["deploy", "--run-id", "0"]), /positive integer/);
 });
 
@@ -33,7 +36,9 @@ test("timeline CLI starts the VNet job with a scoped instrument and accepts only
     json: (bin, args) => { calls.push([bin, ...args]); return args.includes("start") ? { name: "trading-cae-timeline-read-abc" } : { properties: { status: "Succeeded" } }; }, sleep: async () => {},
   });
   assert.equal(result.job, "trading-cae-timeline-read"); assert.equal(instrumentTimelineReadJobName("trading-cae-engine"), "trading-cae-timeline-read");
-  assert.ok(calls.some((row) => row.includes("INSTRUMENT=BTC-USDT"))); assert.deepEqual(parseInstrumentTimelineLog('INSTRUMENT_TIMELINE_JSON:{"instrument":"BTC-USDT"}'), { instrument: "BTC-USDT" });
+  assert.ok(calls.some((row) => row.includes("INSTRUMENT=BTC-USDT"))); assert.deepEqual(parseInstrumentTimelineLog('INSTRUMENT_TIMELINE_JSON:{"instrument":"BTC-USDT","timeline":[]}'), { instrument: "BTC-USDT", timeline: [] });
+  const envelope = JSON.stringify({ TimeStamp: "t", Log: 'F INSTRUMENT_TIMELINE_JSON:{"instrument":"ETH-USDT","timeline":[]}' });
+  assert.equal(parseInstrumentTimelineLog(envelope).instrument, "ETH-USDT");
 });
 
 test("positions CLI starts the VNet job and redacts log JSON", async () => {
