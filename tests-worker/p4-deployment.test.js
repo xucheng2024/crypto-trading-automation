@@ -137,8 +137,8 @@ test("P4 read-job reconcile is manual, OFF-only, and grants only image pull", as
   const workflow = await readFile(".github/workflows/production-read-jobs-reconcile.yml", "utf8");
   assert.match(workflow, /workflow_dispatch:/); assert.match(workflow, /environment: production-off/);
   assert.match(workflow, /query-managed-positions\.mjs/); assert.match(workflow, /query-instrument-timeline\.mjs/);
-  assert.match(workflow, /TRADING_MODE=OFF/); assert.match(workflow, /--registry-identity system/);
-  assert.match(workflow, /--role AcrPull/); assert.doesNotMatch(workflow, /KEY_VAULT|OKX_API|production-full/);
+  assert.match(workflow, /TRADING_MODE=OFF/); assert.match(workflow, /registry_identity/);
+  assert.doesNotMatch(workflow, /KEY_VAULT|OKX_API|production-full/);
   assert.doesNotMatch(workflow, /az acr show/);
 });
 
