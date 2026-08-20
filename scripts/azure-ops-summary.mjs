@@ -214,7 +214,7 @@ export function summarizeRunner(app, replicas = [], githubRunners = [], secretNa
 export function parseArgs(argv) {
   const args = [...argv];
   const options = { command: "report", minutes: 15, json: false, details: false, expectedMode: null, since: null, sinceLast: false, runId: null, instrument: null, request: false };
-  if (["report", "snapshot", "activity", "blocks", "deploy", "runner", "trade"].includes(args[0])) options.command = args.shift();
+  if (["report", "snapshot", "activity", "blocks", "deploy", "runner", "trade", "positions"].includes(args[0])) options.command = args.shift();
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index];
     if (arg === "--json") options.json = true;
@@ -235,7 +235,12 @@ export function parseArgs(argv) {
   if (options.expectedMode && !["OFF", "FULL", "EXIT_ONLY"].includes(options.expectedMode)) throw new Error("--expect-mode must be OFF, FULL, or EXIT_ONLY");
   if (options.runId !== null && (!Number.isSafeInteger(options.runId) || options.runId < 1)) throw new Error("--run-id must be a positive integer");
   if (options.since && options.sinceLast) throw new Error("Use only one of --since or --since-last");
-  if (options.command === "trade") {
+  if (["trade", "positions"].includes(options.command)) {
+    if (options.command === "positions") {
+      if (options.instrument) throw new Error("--instrument is only valid with trade");
+      if (options.request === Boolean(options.runId)) throw new Error("positions requires exactly one of --request or --run-id");
+      return options;
+    }
     if (!options.instrument || !/^[A-Z0-9]+-[A-Z0-9]+(?:-[A-Z0-9]+)?$/.test(options.instrument)) throw new Error("trade requires --instrument with an exact uppercase OKX instrument");
     if (options.request === Boolean(options.runId)) throw new Error("trade requires exactly one of --request or --run-id");
   } else if (options.instrument || options.request) throw new Error("--instrument and --request are only valid with trade");
@@ -263,6 +268,28 @@ export async function runTradeCommand(options, { command = run, json = runJson, 
       protectionSnapshots: artifact.summary.protectionSnapshots, attemptStates: artifact.summary.attemptStates,
     } : undefined;
     return { command: "trade", requested: false, runId: options.runId, instrument: artifact.instrument, attemptRefScope: artifact.attemptRefScope === "QUERY_SNAPSHOT" ? artifact.attemptRefScope : undefined, summary, timeline };
+  } finally { await fs.rm(directory, { recursive: true, force: true }); }
+}
+
+export async function runPositionsCommand(options, { command = run, json = runJson, fs = { mkdtemp, readFile, rm }, tempDir = tmpdir() } = {}) {
+  const repository = command("gh", ["repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"]);
+  if (options.request) {
+    const branch = command("gh", ["api", `repos/${repository}`, "--jq", ".default_branch"]);
+    command("gh", ["workflow", "run", "production-positions-read.yml", "--repo", repository, "--ref", branch]);
+    return { command: "positions", requested: true, repository, branch };
+  }
+  const runInfo = json("gh", ["api", `repos/${repository}/actions/runs/${options.runId}`]);
+  if (!runInfo || !String(runInfo.path ?? "").endsWith("/production-positions-read.yml")) throw new Error(`Run ${options.runId} is not a production managed-positions run`);
+  const directory = await fs.mkdtemp(join(tempDir, "crypto-remote-positions-"));
+  try {
+    command("gh", ["run", "download", String(options.runId), "--repo", repository, "--name", "managed-positions", "--dir", directory]);
+    const artifact = JSON.parse(await fs.readFile(join(directory, "managed-positions.json"), "utf8"));
+    if (!artifact?.summary || !Array.isArray(artifact?.positions)) throw new Error("Managed-positions artifact is invalid");
+    const allowed = ["instrument", "remainingSize", "openFills", "sellStates", "nextSellTime", "nextForceSellTime", "protectedFills", "dustPendingFills"];
+    const positions = artifact.positions.map((row) => Object.fromEntries(allowed.filter((key) => Object.hasOwn(row, key)).map((key) => [key, row[key]])));
+    const summary = { instruments: Number(artifact.summary.instruments), openFills: Number(artifact.summary.openFills) };
+    if (!Number.isSafeInteger(summary.instruments) || summary.instruments < 0 || !Number.isSafeInteger(summary.openFills) || summary.openFills < 0 || summary.instruments !== positions.length) throw new Error("Managed-positions artifact summary is invalid");
+    return { command: "positions", requested: false, runId: options.runId, summary, positions };
   } finally { await fs.rm(directory, { recursive: true, force: true }); }
 }
 
@@ -368,6 +395,13 @@ export async function main(argv = process.argv.slice(2)) {
     if (options.json) console.log(JSON.stringify(summary));
     else if (summary.requested) console.log(`Requested redacted instrument timeline for ${summary.instrument} on ${summary.branch}`);
     else console.log(`Instrument timeline: ${summary.instrument} | events=${summary.timeline.length} | run=${summary.runId}`);
+    return summary;
+  }
+  if (options.command === "positions") {
+    const summary = await runPositionsCommand(options);
+    if (options.json) console.log(JSON.stringify(summary));
+    else if (summary.requested) console.log(`Requested redacted managed-position summary on ${summary.branch}`);
+    else console.log(`Managed positions: instruments=${summary.summary.instruments} open_fills=${summary.summary.openFills} | run=${summary.runId}`);
     return summary;
   }
   const queryStartedAt = new Date().toISOString();

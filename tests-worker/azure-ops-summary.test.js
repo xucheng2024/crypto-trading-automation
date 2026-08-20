@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { assessRuntime, classifyBlock, classifyDecision, classifySevereTraces, parseArgs, queryRows, summarizeDecisions, summarizeDeployment, summarizeRunner, summarizeTrading, traceEvents } from "../scripts/azure-ops-summary.mjs";
+import { assessRuntime, classifyBlock, classifyDecision, classifySevereTraces, parseArgs, queryRows, runPositionsCommand, summarizeDecisions, summarizeDeployment, summarizeRunner, summarizeTrading, traceEvents } from "../scripts/azure-ops-summary.mjs";
 
 test("Azure ops summary converts query tables and aggregates decisions", () => {
   assert.deepEqual(queryRows({ tables: [{ columns: [{ name: "reason" }, { name: "decisions" }], rows: [["WAIT", 2]] }] }), [{ reason: "WAIT", decisions: 2 }]);
@@ -19,7 +19,22 @@ test("Azure ops summary accepts trading, deployment, and runner commands", () =>
   assert.deepEqual(parseArgs(["blocks", "--details"]).command, "blocks");
   assert.deepEqual(parseArgs(["deploy", "--run-id", "123"]).runId, 123);
   assert.deepEqual(parseArgs(["runner", "--json"]).command, "runner");
+  assert.deepEqual(parseArgs(["positions", "--request"]).command, "positions");
+  assert.throws(() => parseArgs(["positions"]), /exactly one/);
   assert.throws(() => parseArgs(["deploy", "--run-id", "0"]), /positive integer/);
+});
+
+test("positions CLI dispatches only on explicit request and reads a matching redacted artifact", async () => {
+  const commands = [];
+  const requested = await runPositionsCommand(parseArgs(["positions", "--request"]), { command: (...args) => { commands.push(args); return args[0] === "gh" && args[1].includes(".default_branch") ? "main" : "owner/repo"; }, json: () => ({}) });
+  assert.deepEqual(requested, { command: "positions", requested: true, repository: "owner/repo", branch: "main" });
+  assert.deepEqual(commands.at(-1), ["gh", ["workflow", "run", "production-positions-read.yml", "--repo", "owner/repo", "--ref", "main"]]);
+  await assert.rejects(runPositionsCommand(parseArgs(["positions", "--run-id", "8"]), { command: () => "owner/repo", json: () => ({ path: ".github/workflows/production-deploy.yml" }), fs: {} }), /not a production managed-positions run/);
+  const result = await runPositionsCommand(parseArgs(["positions", "--run-id", "7"]), {
+    command: () => "owner/repo", json: () => ({ path: ".github/workflows/production-positions-read.yml" }),
+    fs: { mkdtemp: async () => "/tmp/positions", rm: async () => {}, readFile: async () => JSON.stringify({ summary: { instruments: 1, openFills: 2, forbidden: "no" }, positions: [{ instrument: "BTC-USDT", remainingSize: "1", openFills: 2, sellStates: ["WAITING"], nextSellTime: 1, accountId: "forbidden" }] }) },
+  });
+  assert.deepEqual(result, { command: "positions", requested: false, runId: 7, summary: { instruments: 1, openFills: 2 }, positions: [{ instrument: "BTC-USDT", remainingSize: "1", openFills: 2, sellStates: ["WAITING"], nextSellTime: 1 }] });
 });
 
 test("Azure ops summary attributes expected OFF transition traces without hiding other revisions", () => {
