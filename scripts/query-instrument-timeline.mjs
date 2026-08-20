@@ -3,6 +3,7 @@ import { fileURLToPath } from "node:url";
 import { EntraPostgresPool } from "../src/infrastructure/postgres/entra-pool.js";
 
 export const INSTRUMENT_PATTERN = /^[A-Z0-9]+-[A-Z0-9]+(?:-[A-Z0-9]+)?$/;
+export const INSTRUMENT_TIMELINE_JSON_PREFIX = "INSTRUMENT_TIMELINE_JSON:";
 
 // This statement deliberately selects only the redacted operational timeline.
 // Do not add account, trade, order, decision, hash, fee, configuration, or
@@ -112,8 +113,8 @@ export async function queryInstrumentTimeline({ instrument, connectionString = p
   }
 }
 
-export function parseArgs(argv) {
-  const args = [...argv]; let instrument;
+export function parseArgs(argv, { instrument: defaultInstrument = process.env.INSTRUMENT } = {}) {
+  const args = [...argv]; let instrument = defaultInstrument;
   while (args.length) {
     const arg = args.shift();
     if (arg !== "--instrument") throw new Error(`Unknown argument: ${arg}`);
@@ -125,7 +126,7 @@ export function parseArgs(argv) {
 
 export async function main(argv = process.argv.slice(2)) {
   const result = await queryInstrumentTimeline(parseArgs(argv));
-  console.log(JSON.stringify(result));
+  console.log(`${INSTRUMENT_TIMELINE_JSON_PREFIX}${JSON.stringify(result)}`);
   return result;
 }
 

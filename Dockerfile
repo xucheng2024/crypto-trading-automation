@@ -18,7 +18,7 @@ COPY src/infrastructure/azure ./src/infrastructure/azure
 COPY src/infrastructure/okx ./src/infrastructure/okx
 COPY src/infrastructure/postgres ./src/infrastructure/postgres
 COPY src/entrypoints/azure ./src/entrypoints/azure
-COPY scripts/run-maintenance.mjs scripts/read-only-preflight.mjs scripts/query-managed-positions.mjs ./scripts/
+COPY scripts/run-maintenance.mjs scripts/read-only-preflight.mjs scripts/query-managed-positions.mjs scripts/query-instrument-timeline.mjs ./scripts/
 COPY fixtures/p4 ./fixtures/p4
 USER trading
 HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 CMD node -e "process.exit(process.env.TRADING_MODE === 'OFF' ? 0 : 0)"

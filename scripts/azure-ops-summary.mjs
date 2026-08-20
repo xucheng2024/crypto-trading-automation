@@ -214,7 +214,7 @@ export function summarizeRunner(app, replicas = [], githubRunners = [], secretNa
 export function parseArgs(argv) {
   const args = [...argv];
   const options = { command: "report", minutes: 15, json: false, details: false, expectedMode: null, since: null, sinceLast: false, runId: null, instrument: null, request: false };
-  if (["report", "snapshot", "activity", "blocks", "deploy", "runner", "trade", "positions"].includes(args[0])) options.command = args.shift();
+  if (["report", "snapshot", "activity", "blocks", "deploy", "runner", "trade", "positions", "timeline"].includes(args[0])) options.command = args.shift();
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index];
     if (arg === "--json") options.json = true;
@@ -235,15 +235,16 @@ export function parseArgs(argv) {
   if (options.expectedMode && !["OFF", "FULL", "EXIT_ONLY"].includes(options.expectedMode)) throw new Error("--expect-mode must be OFF, FULL, or EXIT_ONLY");
   if (options.runId !== null && (!Number.isSafeInteger(options.runId) || options.runId < 1)) throw new Error("--run-id must be a positive integer");
   if (options.since && options.sinceLast) throw new Error("Use only one of --since or --since-last");
-  if (["trade", "positions"].includes(options.command)) {
+  if (["trade", "positions", "timeline"].includes(options.command)) {
     if (options.command === "positions") {
       if (options.instrument) throw new Error("--instrument is only valid with trade");
       if (options.runId) throw new Error("positions does not accept --run-id");
       if (!options.request) throw new Error("positions requires --request");
       return options;
     }
-    if (!options.instrument || !/^[A-Z0-9]+-[A-Z0-9]+(?:-[A-Z0-9]+)?$/.test(options.instrument)) throw new Error("trade requires --instrument with an exact uppercase OKX instrument");
-    if (options.request === Boolean(options.runId)) throw new Error("trade requires exactly one of --request or --run-id");
+    if (!options.instrument || !/^[A-Z0-9]+-[A-Z0-9]+(?:-[A-Z0-9]+)?$/.test(options.instrument)) throw new Error(`${options.command} requires --instrument with an exact uppercase OKX instrument`);
+    if (options.command === "trade" && options.request === Boolean(options.runId)) throw new Error("trade requires exactly one of --request or --run-id");
+    if (options.command === "timeline" && (!options.request || options.runId)) throw new Error("timeline requires --request and does not accept --run-id");
   } else if (options.instrument || options.request) throw new Error("--instrument and --request are only valid with trade");
   return options;
 }
@@ -327,6 +328,41 @@ export function formatPositionsSummary(result) {
 
 export function positionsReadJobName(appName) {
   return appName.endsWith("-engine") ? `${appName.slice(0, -"-engine".length)}-positions-read` : `${appName}-positions-read`;
+}
+export function instrumentTimelineReadJobName(appName) {
+  return appName.endsWith("-engine") ? `${appName.slice(0, -"-engine".length)}-instrument-timeline-read` : `${appName}-instrument-timeline-read`;
+}
+
+export function parseInstrumentTimelineLog(text) {
+  const prefix = "INSTRUMENT_TIMELINE_JSON:";
+  const line = String(text).split(/\r?\n/).map((row) => row.trim()).find((row) => row.includes(prefix));
+  if (!line) throw new Error("Instrument timeline job log is missing the redacted JSON marker");
+  let source = line;
+  try { const envelope = JSON.parse(line); if (typeof envelope?.Log === "string") source = envelope.Log; } catch {}
+  return JSON.parse(source.slice(source.indexOf(prefix) + prefix.length));
+}
+
+export async function runInstrumentTimelineCommand(options, { command = run, json = runJson, sleep = sleepMs, now = Date.now, timeoutMs = 60_000 } = {}) {
+  const resourceGroup = options.resourceGroup ?? command("gh", ["variable", "get", "AZURE_RESOURCE_GROUP"]);
+  const appName = options.app ?? command("gh", ["variable", "get", "CONTAINER_APP_NAME"]);
+  const job = instrumentTimelineReadJobName(appName);
+  const started = json("az", ["containerapp", "job", "start", "--name", job, "--resource-group", resourceGroup, "--env-vars", `INSTRUMENT=${options.instrument}`, "--only-show-errors", "--output", "json"]);
+  const execution = jobExecutionName(started); let status = "Running"; const deadline = now() + timeoutMs;
+  while (now() < deadline) {
+    const row = json("az", ["containerapp", "job", "execution", "show", "--name", job, "--resource-group", resourceGroup, "--job-execution-name", execution, "--only-show-errors", "--output", "json"]);
+    status = row?.properties?.status ?? row?.status ?? "Unknown";
+    if (status === "Succeeded") break;
+    if (status === "Failed" || status === "Cancelled") throw new Error(`Instrument timeline job ${execution} ${status}`);
+    await sleep(2000);
+  }
+  if (status !== "Succeeded") throw new Error(`Instrument timeline job ${execution} timed out`);
+  let logs = "";
+  while (now() < deadline) {
+    logs = command("az", ["containerapp", "job", "logs", "show", "--name", job, "--resource-group", resourceGroup, "--container", "instrument-timeline-read", "--execution", execution, "--only-show-errors"]);
+    try { const timeline = parseInstrumentTimelineLog(logs); if (timeline.instrument !== options.instrument) throw new Error("Instrument timeline result does not match requested instrument"); return { command: "timeline", job, execution, ...timeline }; }
+    catch (error) { if (!/missing the redacted JSON marker/.test(error.message)) throw error; await sleep(2000); }
+  }
+  throw new Error(`Instrument timeline job ${execution} log is missing the redacted JSON marker`);
 }
 
 function jobExecutionName(started) {
@@ -475,6 +511,11 @@ export async function main(argv = process.argv.slice(2)) {
     if (options.json) console.log(JSON.stringify(summary));
     else if (summary.requested) console.log(`Requested redacted instrument timeline for ${summary.instrument} on ${summary.branch}`);
     else console.log(`Instrument timeline: ${summary.instrument} | events=${summary.timeline.length} | run=${summary.runId}`);
+    return summary;
+  }
+  if (options.command === "timeline") {
+    const summary = await runInstrumentTimelineCommand(options);
+    console.log(options.json ? JSON.stringify(summary) : `Instrument timeline: ${summary.instrument} | events=${summary.timeline.length} | job=${summary.job}`);
     return summary;
   }
   if (options.command === "positions") {

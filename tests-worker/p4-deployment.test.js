@@ -127,7 +127,7 @@ test("P4 positions-read job is manual, image-backed, and SELECT-only", async () 
   assert.match(deploy, /containerapp job update/);
   assert.match(deploy, /positions-read/);
   assert.match(deploy, /  deploy_off:[\s\S]*az containerapp job update[\s\S]*promote_full:/);
-  assert.equal([...deploy.matchAll(/containerapp job update/g)].length, 1);
+  assert.equal([...deploy.matchAll(/containerapp job update/g)].length, 2);
   const sql = await readFile("docs/runbooks/P4_POSTGRES_ENTRA_BOOTSTRAP.sql", "utf8");
   assert.match(sql, /GRANT SELECT ON TABLE filled_orders TO "<POSITIONS_READ_MI_NAME>"/);
   assert.doesNotMatch(sql, /GRANT EXECUTE ON FUNCTION[\s\S]*POSITIONS_READ/);

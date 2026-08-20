@@ -15,6 +15,7 @@ param keyVaultUri string
 param enginePostgresUrl string
 param maintenancePostgresUrl string
 param positionsReadPostgresUrl string
+param instrumentTimelineReadPostgresUrl string
 param okxAccountId string
 param okxInstruments string
 param managedFillStartMs string
@@ -138,6 +139,33 @@ resource positionsRead 'Microsoft.App/jobs@2024-03-01' = {
   }
   tags: tags
 }
+resource instrumentTimelineRead 'Microsoft.App/jobs@2024-03-01' = {
+  name: '${environmentName}-instrument-timeline-read'
+  location: location
+  identity: { type: 'SystemAssigned' }
+  properties: {
+    environmentId: env.id
+    configuration: {
+      triggerType: 'Manual'
+      replicaTimeout: 60
+      manualTriggerConfig: { parallelism: 1, replicaCompletionCount: 1 }
+      registries: [{ server: registryServer, identity: 'system' }]
+    }
+    template: {
+      containers: [{
+        name: 'instrument-timeline-read'
+        image: image
+        resources: { cpu: json('0.25'), memory: '0.5Gi' }
+        command: ['node', 'scripts/query-instrument-timeline.mjs']
+        env: [
+          { name: 'TRADING_MODE', value: 'OFF' }
+          { name: 'POSTGRES_URL', value: instrumentTimelineReadPostgresUrl }
+        ]
+      }]
+    }
+  }
+  tags: tags
+}
 
 // AcrPull, maintenance deliberately receives no Key Vault role.
 var acrPullRole = subscriptionResourceId(
@@ -185,6 +213,11 @@ resource positionsReadAcrPull 'Microsoft.Authorization/roleAssignments@2022-04-0
     principalType: 'ServicePrincipal'
   }
 }
+resource instrumentTimelineReadAcrPull 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(acrId, instrumentTimelineRead.id, acrPullRole)
+  scope: acr
+  properties: { principalId: instrumentTimelineRead.identity.principalId, roleDefinitionId: acrPullRole, principalType: 'ServicePrincipal' }
+}
 resource engineVaultRead 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
   name: guid(keyVaultId, engine.id, keyVaultSecretsUserRole)
   scope: vault
@@ -206,9 +239,12 @@ resource maintenanceMonitoringReader 'Microsoft.Authorization/roleAssignments@20
 output engineId string = engine.id
 output jobId string = maintenance.id
 output positionsReadJobId string = positionsRead.id
+output instrumentTimelineReadJobId string = instrumentTimelineRead.id
 output enginePrincipalId string = engine.identity.principalId
 output maintenancePrincipalId string = maintenance.identity.principalId
 output positionsReadPrincipalId string = positionsRead.identity.principalId
+output instrumentTimelineReadPrincipalId string = instrumentTimelineRead.identity.principalId
 output enginePrincipalName string = engine.name
 output maintenancePrincipalName string = maintenance.name
 output positionsReadPrincipalName string = positionsRead.name
+output instrumentTimelineReadPrincipalName string = instrumentTimelineRead.name

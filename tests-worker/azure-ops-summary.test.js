@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { assessRuntime, classifyBlock, classifyDecision, classifySevereTraces, formatPositionsSummary, parseArgs, parseManagedPositionsLog, positionsReadJobName, queryRows, redactPositionsArtifact, runPositionsCommand, summarizeDecisions, summarizeDeployment, summarizeRunner, summarizeTrading, traceEvents } from "../scripts/azure-ops-summary.mjs";
+import { assessRuntime, classifyBlock, classifyDecision, classifySevereTraces, formatPositionsSummary, instrumentTimelineReadJobName, parseArgs, parseInstrumentTimelineLog, parseManagedPositionsLog, positionsReadJobName, queryRows, redactPositionsArtifact, runInstrumentTimelineCommand, runPositionsCommand, summarizeDecisions, summarizeDeployment, summarizeRunner, summarizeTrading, traceEvents } from "../scripts/azure-ops-summary.mjs";
 
 test("Azure ops summary converts query tables and aggregates decisions", () => {
   assert.deepEqual(queryRows({ tables: [{ columns: [{ name: "reason" }, { name: "decisions" }], rows: [["WAIT", 2]] }] }), [{ reason: "WAIT", decisions: 2 }]);
@@ -20,9 +20,20 @@ test("Azure ops summary accepts trading, deployment, and runner commands", () =>
   assert.deepEqual(parseArgs(["deploy", "--run-id", "123"]).runId, 123);
   assert.deepEqual(parseArgs(["runner", "--json"]).command, "runner");
   assert.deepEqual(parseArgs(["positions", "--request"]).command, "positions");
+  assert.deepEqual(parseArgs(["timeline", "--instrument", "BTC-USDT", "--request"]).command, "timeline");
   assert.throws(() => parseArgs(["positions"]), /requires --request/);
   assert.throws(() => parseArgs(["positions", "--run-id", "7"]), /does not accept --run-id/);
   assert.throws(() => parseArgs(["deploy", "--run-id", "0"]), /positive integer/);
+});
+
+test("timeline CLI starts the VNet job with a scoped instrument and accepts only its redacted result", async () => {
+  const calls = [];
+  const result = await runInstrumentTimelineCommand(parseArgs(["timeline", "--instrument", "BTC-USDT", "--request", "--resource-group", "rg", "--app", "trading-cae-engine"]), {
+    command: (bin, args) => { calls.push([bin, ...args]); if (args.includes("logs")) return 'INSTRUMENT_TIMELINE_JSON:{"instrument":"BTC-USDT","timeline":[],"summary":{"fills":0}}'; throw new Error("unexpected"); },
+    json: (bin, args) => { calls.push([bin, ...args]); return args.includes("start") ? { name: "trading-cae-instrument-timeline-read-abc" } : { properties: { status: "Succeeded" } }; }, sleep: async () => {},
+  });
+  assert.equal(result.job, "trading-cae-instrument-timeline-read"); assert.equal(instrumentTimelineReadJobName("trading-cae-engine"), "trading-cae-instrument-timeline-read");
+  assert.ok(calls.some((row) => row.includes("INSTRUMENT=BTC-USDT"))); assert.deepEqual(parseInstrumentTimelineLog('INSTRUMENT_TIMELINE_JSON:{"instrument":"BTC-USDT"}'), { instrument: "BTC-USDT" });
 });
 
 test("positions CLI starts the VNet job and redacts log JSON", async () => {

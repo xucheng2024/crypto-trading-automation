@@ -88,9 +88,11 @@ module postgres 'modules/postgres.bicep' = {
 var enginePrincipalName = '${names.env}-engine'
 var maintenancePrincipalName = '${names.env}-maintenance'
 var positionsReadPrincipalName = '${names.env}-positions-read'
+var instrumentTimelineReadPrincipalName = '${names.env}-instrument-timeline-read'
 var enginePostgresUrl = 'postgresql://${uriComponent(enginePrincipalName)}@${postgres.outputs.fqdn}:5432/${postgresDatabase}'
 var maintenancePostgresUrl = 'postgresql://${uriComponent(maintenancePrincipalName)}@${postgres.outputs.fqdn}:5432/${postgresDatabase}'
 var positionsReadPostgresUrl = 'postgresql://${uriComponent(positionsReadPrincipalName)}@${postgres.outputs.fqdn}:5432/${postgresDatabase}'
+var instrumentTimelineReadPostgresUrl = 'postgresql://${uriComponent(instrumentTimelineReadPrincipalName)}@${postgres.outputs.fqdn}:5432/${postgresDatabase}'
 module apps 'modules/apps.bicep' = {
   name: 'apps'
   params: {
@@ -109,6 +111,7 @@ module apps 'modules/apps.bicep' = {
     enginePostgresUrl: enginePostgresUrl
     maintenancePostgresUrl: maintenancePostgresUrl
     positionsReadPostgresUrl: positionsReadPostgresUrl
+    instrumentTimelineReadPostgresUrl: instrumentTimelineReadPostgresUrl
     okxAccountId: okxAccountId
     okxInstruments: okxInstruments
     managedFillStartMs: managedFillStartMs
