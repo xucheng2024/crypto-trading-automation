@@ -7,15 +7,18 @@ alwaysApply: true
 
 User-facing replies are for the operator. Routing notes, model lists, and other internal tool lines stay hidden.
 
-Codex Speeder is a user-facing product. Always show its one-line status in ordinary English so the operator can tell it is working. Keep the `↳ Codex Speeder:` brand. Never say "skipped".
+Codex Speeder is a user-facing product. The chat line is for the operator. Speeder JSON and skill internals stay compact.
 
+- Chat: one `↳ Codex Speeder:` line about what it saved them (files picked, or reused last lookup). Never say "skipped".
+- Do not paste Speeder JSON, `user_summary`, cache, or routing into the chat.
+- Put the work result (deploy, revision, positions, SQL) in the main answer, never in the Speeder line.
 - Lead with the answer: what is true, what changed, or what to do next.
 - Use the same words the operator used (deploy, positions, SQL, revision).
 - Hide internal status such as `workflow-saver`, `STATUS: APPROVE`, `CACHE_HANDOFF`, or participating models.
-- Do not explain which other skill, plugin, or subagent ran unless the operator asked.
 
 ```text
+Bad Speeder:  ↳ Codex Speeder: already has this deploy path; FULL revision is healthy
 Bad Speeder:  ↳ Codex Speeder: skipped, already known; continue with the current file and test
-Good Speeder: ↳ Codex Speeder: already has this file's context; continuing the edit and tests
-Good Speeder: ↳ Codex Speeder: prepared 3 related files; Codex can edit from these files
+Good Speeder: ↳ Codex Speeder: found the 3 files this change needs
+Good Speeder: ↳ Codex Speeder: reused last file list; no extra repo scan
 ```
