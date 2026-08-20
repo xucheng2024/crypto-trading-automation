@@ -140,7 +140,7 @@ resource positionsRead 'Microsoft.App/jobs@2024-03-01' = {
   tags: tags
 }
 resource instrumentTimelineRead 'Microsoft.App/jobs@2024-03-01' = {
-  name: '${environmentName}-instrument-timeline-read'
+  name: '${environmentName}-timeline-read'
   location: location
   identity: { type: 'SystemAssigned' }
   properties: {

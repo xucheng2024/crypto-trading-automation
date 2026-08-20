@@ -330,7 +330,7 @@ export function positionsReadJobName(appName) {
   return appName.endsWith("-engine") ? `${appName.slice(0, -"-engine".length)}-positions-read` : `${appName}-positions-read`;
 }
 export function instrumentTimelineReadJobName(appName) {
-  return appName.endsWith("-engine") ? `${appName.slice(0, -"-engine".length)}-instrument-timeline-read` : `${appName}-instrument-timeline-read`;
+  return appName.endsWith("-engine") ? `${appName.slice(0, -"-engine".length)}-timeline-read` : `${appName}-timeline-read`;
 }
 
 export function parseInstrumentTimelineLog(text) {

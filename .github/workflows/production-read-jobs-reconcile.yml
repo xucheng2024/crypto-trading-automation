@@ -52,4 +52,4 @@ jobs:
             [ "$assignment" -gt 0 ] || az role assignment create --assignee-object-id "$principal_id" --assignee-principal-type ServicePrincipal --role AcrPull --scope "$acr_id" --output none
           }
           reconcile "${prefix}-positions-read" scripts/query-managed-positions.mjs "${prefix}-positions-read"
-          reconcile "${prefix}-instrument-timeline-read" scripts/query-instrument-timeline.mjs "${prefix}-instrument-timeline-read"
+          reconcile "${prefix}-timeline-read" scripts/query-instrument-timeline.mjs "${prefix}-timeline-read"

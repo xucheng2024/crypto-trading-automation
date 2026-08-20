@@ -186,7 +186,7 @@ jobs:
           [ "$(az containerapp revision list --name "$CONTAINER_APP_NAME" --resource-group "$RESOURCE_GROUP" --query "[?properties.active].name | length(@)" --output tsv)" = "1" ]
           positions_job="${CONTAINER_APP_NAME%-engine}-positions-read"
           az containerapp job update --name "$positions_job" --resource-group "$RESOURCE_GROUP" --image "$IMAGE" --output none
-          timeline_job="${CONTAINER_APP_NAME%-engine}-instrument-timeline-read"
+          timeline_job="${CONTAINER_APP_NAME%-engine}-timeline-read"
           az containerapp job update --name "$timeline_job" --resource-group "$RESOURCE_GROUP" --image "$IMAGE" --output none
           echo "revision=$revision" >> "$GITHUB_OUTPUT"
 
