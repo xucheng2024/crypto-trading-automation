@@ -41,11 +41,13 @@ export function countCsvInstruments(value) {
   return new Set(String(value ?? "").split(",").map((item) => item.trim()).filter(Boolean)).size;
 }
 
-export function formatDecisionTelemetryLine({ windowInstruments, currentStateCoverage, runtimeInstruments, repoEnabled, strategyReadyInstruments }) {
+export function formatDecisionTelemetryLine({ windowInstruments, currentStateCoverage, currentStates, runtimeInstruments, repoEnabled, strategyReadyInstruments }) {
   const runtime = Number.isInteger(runtimeInstruments) ? runtimeInstruments : "missing";
   const ready = Number.isInteger(strategyReadyInstruments) ? strategyReadyInstruments : "unavailable";
-  const current = currentStateCoverage == null ? "" : `; current-state=${currentStateCoverage}`;
-  return `Decision telemetry: ${windowInstruments} instruments with decision telemetry / ${runtime} runtime / ${repoEnabled} repo-enabled${current}; strategy_ready=${ready}`;
+  const stateCount = currentStateCoverage ?? (currentStates ? currentStates.waiting + currentStates.policy + currentStates.blocked + currentStates.opportunity : null);
+  const current = stateCount == null ? "" : `; current-state=${stateCount}`;
+  const split = currentStates ? ` waiting=${currentStates.waiting} policy=${currentStates.policy} blocked=${currentStates.blocked}` : "";
+  return `Decision telemetry: ${windowInstruments} instruments with decision telemetry / ${runtime} runtime / ${repoEnabled} repo-enabled${current}${split}; strategy_ready=${ready}`;
 }
 
 function optionalInt(value) {
@@ -717,7 +719,7 @@ export async function main(argv = process.argv.slice(2)) {
       console.log(`Revision: ${summary.runtime.revision} | ${summary.runtime.mode} | ${summary.runtime.runningState}/${summary.runtime.healthState}`);
       console.log(`Runtime: traffic=${summary.runtime.trafficWeight}% replicas=${summary.runtime.replicas} ready=${summary.runtime.readyContainers} restarts=${summary.runtime.restarts} image=${summary.runtime.image}`);
       console.log(`Latest metrics: ready=${metric?.ready ?? "missing"} events=${metric?.eventCount ?? 0} decisions=${metric?.decisionCount ?? decisions.decisions}`);
-      console.log(formatDecisionTelemetryLine({ windowInstruments: decisions.instruments, currentStateCoverage: trading.currentStateCoverage, runtimeInstruments, repoEnabled: artifact.enabled_count, strategyReadyInstruments }));
+      console.log(formatDecisionTelemetryLine({ windowInstruments: decisions.instruments, currentStateCoverage: trading.currentStateCoverage, currentStates: trading.currentStates, runtimeInstruments, repoEnabled: artifact.enabled_count, strategyReadyInstruments }));
       console.log(formatPipelineCoverageLine(pipelineCoverage));
       console.log(`Latency: enqueue_p99=${metric?.eventP99 ?? "?"}ms decision_p99=${metric?.decisionP99 ?? "?"}ms source_lag_p99=${metric?.sourceLagP99 ?? "?"}ms`);
       console.log(`Queues: current=${metric?.queueDepth ?? "?"} pending_buy=${metric?.pendingBuy ?? "?"} exit_backlog=${metric?.exitBacklog ?? "?"}`);

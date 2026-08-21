@@ -185,8 +185,8 @@ test("Azure ops summary labels decision telemetry against runtime and repo-enabl
   assert.equal(countCsvInstruments("BTC-USDT, ETH-USDT,BTC-USDT"), 2);
   assert.equal(countCsvInstruments(""), 0);
   assert.equal(formatDecisionTelemetryLine({
-    windowInstruments: 94, currentStateCoverage: 94, runtimeInstruments: 146, repoEnabled: 146, strategyReadyInstruments: null,
-  }), "Decision telemetry: 94 instruments with decision telemetry / 146 runtime / 146 repo-enabled; current-state=94; strategy_ready=unavailable");
+    windowInstruments: 146, currentStateCoverage: 146, currentStates: { waiting: 94, policy: 52, blocked: 0, opportunity: 0 }, runtimeInstruments: 146, repoEnabled: 146, strategyReadyInstruments: 146,
+  }), "Decision telemetry: 146 instruments with decision telemetry / 146 runtime / 146 repo-enabled; current-state=146 waiting=94 policy=52 blocked=0; strategy_ready=146");
   assert.equal(formatDecisionTelemetryLine({
     windowInstruments: 94, runtimeInstruments: null, repoEnabled: 146, strategyReadyInstruments: 146,
   }), "Decision telemetry: 94 instruments with decision telemetry / missing runtime / 146 repo-enabled; strategy_ready=146");
