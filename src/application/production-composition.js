@@ -198,6 +198,7 @@ export async function composeProductionRuntime(env, injected = {}) {
       const verdict = evaluateWatchdog({ ready: snapshot.ready.ready, ws: { public: ws.public, private: ws.private, business: ws.business }, owner: ws.owner, exitBacklog });
       if (!verdict.healthy) telemetry({ type: "watchdog", reason: "WATCHDOG_UNHEALTHY", reasons: verdict.reasons, exitBacklog });
       telemetry({ type: "metric_snapshot", reason: "RUNTIME_METRICS", ...slo.snapshot({ reset: true }), ready: snapshot.ready.ready ? 1 : 0, queue_depth_current: snapshot.queue, pending_buy_current: coordinator.pending?.BUY?.size ?? 0, exit_backlog_current: exitBacklog });
+      try { telemetry(buyPlanner.pipelineCoverage()); } catch { /* pipeline coverage is diagnostic only */ }
     },
   });
   return { runtime, keyVault, credentials, pool, ownerClient, ownerGuard, orders, state, transaction, market, account, readyGate, coordinator, reconciliation, exitConfirmation, buyPlanner, sellService, protection, delist, rest, ws, engine, workLoop, slo, recurring, executionRoutes, quoteCurrencies, offline: false,

@@ -25,6 +25,36 @@ export function selectDailyCandles(rows, currentDay) {
   return { todayCandleTs: today.ts, todayOpen: value(today, 1), yesterdayCandleTs: yesterday.ts, yesterdayOpen: value(yesterday, 1), yesterdayClose: value(yesterday, 4) };
 }
 
+export function summarizeInstrumentPipelineCoverage({ instIds = [], market, strategyConfig, daily, currentDay, evaluatorSeen, decisions }) {
+  const drops = { no_market_data: 0, candle_not_initialized: 0, no_strategy_row: 0, strategy_state_never_created: 0, filtered_before_evaluator: 0, unknown: 0 };
+  let quoteReady = 0, candleReady = 0, strategyRow = 0, dailyState = 0, evaluator = 0, emitted = 0;
+  for (const instId of instIds) {
+    const hasQuote = Boolean(market?.ticker?.(instId));
+    const hasCandle = Boolean(market?.candle?.(instId));
+    const hasStrategy = Boolean(strategyConfig?.rows?.[instId]?.bestLimit);
+    const hasDaily = Boolean(currentDay && daily?.get(`${instId}:${currentDay}`));
+    const seen = Boolean(evaluatorSeen?.has(instId));
+    const emittedDecision = Boolean(decisions?.has(instId));
+    if (hasQuote) quoteReady += 1;
+    if (hasCandle) candleReady += 1;
+    if (hasStrategy) strategyRow += 1;
+    if (hasDaily) dailyState += 1;
+    if (seen) evaluator += 1;
+    if (emittedDecision) emitted += 1;
+    else if (!hasQuote) drops.no_market_data += 1;
+    else if (!hasCandle) drops.candle_not_initialized += 1;
+    else if (!hasStrategy) drops.no_strategy_row += 1;
+    else if (!hasDaily) drops.strategy_state_never_created += 1;
+    else if (!seen) drops.filtered_before_evaluator += 1;
+    else drops.unknown += 1;
+  }
+  return {
+    type: "instrument_pipeline_coverage", reason: "PIPELINE_COVERAGE", runtime: instIds.length,
+    quote_ready: quoteReady, candle_ready: candleReady, strategy_row: strategyRow, daily_state: dailyState,
+    evaluator_seen: evaluator, decision_emit: emitted, ...drops,
+  };
+}
+
 export function normalizeConfirmed3mCandle(instId, rows) {
   const row = (rows ?? []).filter((value) => String(value?.[8]) === "1").sort((a, b) => Number(b[0]) - Number(a[0]))[0];
   if (!row) return null;
@@ -37,7 +67,7 @@ export function normalizeConfirmed3mCandle(instId, rows) {
 export class BuySignalPlanner {
   constructor({ accountId, instIds, strategyConfig, market, account, coordinator, state, orders, transaction, rest, readyGate, clock, quoteFreshMs = 1_500, telemetry = () => {}, slo = null }) {
     Object.assign(this, { accountId, instIds, strategyConfig, market, account, coordinator, state, orders, transaction, rest, readyGate, clock, quoteFreshMs, telemetry, slo });
-    this.daily = new Map(); this.protected = new Set(); this.ledger = []; this.decisions = new Map(); this.currentDay = null; this.primePromise = null;
+    this.daily = new Map(); this.protected = new Set(); this.ledger = []; this.decisions = new Map(); this.evaluatorSeen = new Set(); this.currentDay = null; this.primePromise = null;
   }
   exchangeNowMs() { return this.clock.nowMs() + Number(this.rest.clockSkewMs ?? 0); }
   _emit(event) { try { Promise.resolve(this.telemetry(event)).catch(() => {}); } catch { /* observability only */ } }
@@ -100,6 +130,7 @@ export class BuySignalPlanner {
   }
   async _observe(event) {
     const instId = event?.instId; if (!instId || !this.instIds.includes(instId)) return { queued: false, reason: "IGNORED" };
+    this.evaluatorSeen.add(instId);
     const exchangeNowMs = this.exchangeNowMs(); const day = strategyDay(exchangeNowMs);
     if (this.currentDay !== day) { this.readyGate.set("strategy", false); void this.prime().catch(() => {}); return { queued: false, reason: "STRATEGY_DAY_REFRESH" }; }
     if (event.type === "market-recheck" && this.hasOpenManagedBuy(instId)) {
@@ -136,5 +167,11 @@ export class BuySignalPlanner {
     const queued = this.coordinator.enqueue(intent);
     this.emitDecision(instId, { ...base, reason: queued ? "BUY_QUEUED" : "BUY_QUEUE_REJECTED", decisionId, breakoutPrice: signal.breakoutPrice, breakoutGap: subtractDecimal(quote.last, signal.breakoutPrice), priceLimitGap: subtractDecimal(daily.dailyLimitPrice, quote.askPx), generation: intent.generation }, true);
     return { queued, reason: queued ? "BUY_QUEUED" : "BUY_QUEUE_REJECTED" };
+  }
+  pipelineCoverage() {
+    return summarizeInstrumentPipelineCoverage({
+      instIds: this.instIds, market: this.market, strategyConfig: this.strategyConfig, daily: this.daily,
+      currentDay: this.currentDay, evaluatorSeen: this.evaluatorSeen, decisions: this.decisions,
+    });
   }
 }

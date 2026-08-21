@@ -37,6 +37,41 @@ export function summarizeDecisions(rows) {
   return { decisions, instruments: instruments.size, latest, reasons: Object.fromEntries([...reasons].sort((a, b) => b[1] - a[1])) };
 }
 
+export function countCsvInstruments(value) {
+  return new Set(String(value ?? "").split(",").map((item) => item.trim()).filter(Boolean)).size;
+}
+
+export function formatDecisionTelemetryLine({ windowInstruments, currentStateCoverage, runtimeInstruments, repoEnabled, strategyReadyInstruments }) {
+  const runtime = Number.isInteger(runtimeInstruments) ? runtimeInstruments : "missing";
+  const ready = Number.isInteger(strategyReadyInstruments) ? strategyReadyInstruments : "unavailable";
+  const current = currentStateCoverage == null ? "" : `; current-state=${currentStateCoverage}`;
+  return `Decision telemetry: ${windowInstruments} instruments with decision telemetry / ${runtime} runtime / ${repoEnabled} repo-enabled${current}; strategy_ready=${ready}`;
+}
+
+function optionalInt(value) {
+  return value == null || value === "" || !Number.isFinite(Number(value)) ? null : Number(value);
+}
+
+export function formatPipelineCoverageLine(row) {
+  if (!row || optionalInt(row.runtime) == null) return "Pipeline coverage: unavailable";
+  return `Pipeline coverage: runtime=${row.runtime} quote_ready=${row.quote_ready} candle_ready=${row.candle_ready} strategy_row=${row.strategy_row} daily_state=${row.daily_state} evaluator_seen=${row.evaluator_seen} decision_emit=${row.decision_emit} | drop no_market_data=${row.no_market_data} candle_not_initialized=${row.candle_not_initialized} no_strategy_row=${row.no_strategy_row} strategy_state_never_created=${row.strategy_state_never_created} filtered_before_evaluator=${row.filtered_before_evaluator} unknown=${row.unknown}`;
+}
+
+export function parsePipelineCoverageRow(row) {
+  if (!row) return null;
+  const runtime = optionalInt(row.runtime);
+  if (runtime == null) return null;
+  return {
+    runtime,
+    quote_ready: optionalInt(row.quote_ready), candle_ready: optionalInt(row.candle_ready),
+    strategy_row: optionalInt(row.strategy_row), daily_state: optionalInt(row.daily_state),
+    evaluator_seen: optionalInt(row.evaluator_seen), decision_emit: optionalInt(row.decision_emit),
+    no_market_data: optionalInt(row.no_market_data), candle_not_initialized: optionalInt(row.candle_not_initialized),
+    no_strategy_row: optionalInt(row.no_strategy_row), strategy_state_never_created: optionalInt(row.strategy_state_never_created),
+    filtered_before_evaluator: optionalInt(row.filtered_before_evaluator), unknown: optionalInt(row.unknown),
+  };
+}
+
 const WAITING_REASONS = new Set(["PRICE_OUTSIDE", "BREAKOUT_NOT_CONFIRMED", "CANDLE_PENDING", "ASK_ABOVE_LIMIT"]);
 const POLICY_REASONS = new Set(["SKIPPED_YESTERDAY_GAIN", "STRATEGY_POSITION_EXISTS", "ACTIVE_BUY_ATTEMPT", "TARGET_FILLED"]);
 const OPPORTUNITY_REASONS = new Set(["BUY_QUEUED"]);
@@ -621,6 +656,8 @@ export async function main(argv = process.argv.slice(2)) {
   const observabilityQuery = `traces | where ${timeFilter} | where message startswith 'fill_reconciliation FILL_BATCH_COMMITTED' or message startswith 'sell_watch_loaded SELL_WATCH_SNAPSHOT' | project timestamp, message, customDimensions | order by timestamp desc | take 1000`;
   const blockQuery = `traces | where ${timeFilter} | where message startswith 'block_evidence ' | project timestamp, message, customDimensions | order by timestamp desc | take 5000`;
   const errorQuery = `traces | where ${timeFilter} | where severityLevel >= 3 | project timestamp, message, cloudRoleInstance=cloud_RoleInstance, tradingMode=tostring(customDimensions.tradingMode) | order by timestamp desc | take 10`;
+  const baselineQuery = "traces | where timestamp > ago(7d) | where message startswith 'strategy_baseline STRATEGY_READY' | top 1 by timestamp desc | project timestamp, instruments=toint(customDimensions.instruments)";
+  const pipelineQuery = "traces | where timestamp > ago(24h) | where message startswith 'instrument_pipeline_coverage ' | top 1 by timestamp desc | project timestamp, runtime=toint(customDimensions.runtime), quote_ready=toint(customDimensions.quote_ready), candle_ready=toint(customDimensions.candle_ready), strategy_row=toint(customDimensions.strategy_row), daily_state=toint(customDimensions.daily_state), evaluator_seen=toint(customDimensions.evaluator_seen), decision_emit=toint(customDimensions.decision_emit), no_market_data=toint(customDimensions.no_market_data), candle_not_initialized=toint(customDimensions.candle_not_initialized), no_strategy_row=toint(customDimensions.no_strategy_row), strategy_state_never_created=toint(customDimensions.strategy_state_never_created), filtered_before_evaluator=toint(customDimensions.filtered_before_evaluator), unknown=toint(customDimensions.unknown)";
   const metric = appInsightsQuery(resourceGroup, appInsights, metricQuery)[0] ?? null;
   const needDecisions = options.command !== "snapshot";
   const needCurrentDecisions = options.command === "report" || options.command === "blocks";
@@ -638,11 +675,17 @@ export async function main(argv = process.argv.slice(2)) {
   }
   const decisions = summarizeDecisions([...groupedDecisions.values()]);
   const errors = needErrors ? appInsightsQuery(resourceGroup, appInsights, errorQuery) : [];
+  const baseline = needDecisions ? appInsightsQuery(resourceGroup, appInsights, baselineQuery)[0] ?? null : null;
+  const pipelineCoverage = needDecisions ? parsePipelineCoverageRow(appInsightsQuery(resourceGroup, appInsights, pipelineQuery)[0] ?? null) : null;
   const artifact = JSON.parse(await readFile(new URL("../infrastructure/config/p5-enabled-instruments.json", import.meta.url), "utf8"));
   const routeByInst = new Map([...(artifact.routes?.margin ?? []).map((instId) => [instId, "margin"]), ...(artifact.routes?.spot ?? []).map((instId) => [instId, "spot"])]);
   const trading = summarizeTrading(decisionEvents, lifecycleEvents, routeByInst, currentDecisionEvents, blockEvents, observabilityEvents);
   const assessment = assessRuntime({ app, active, replicas, traffic, metric, expectedMode: options.expectedMode });
   const revision = active[0]; const container = revision?.properties?.template?.containers?.[0];
+  const okxInstruments = container?.env?.find((row) => row.name === "OKX_INSTRUMENTS")?.value;
+  const runtimeInstruments = okxInstruments ? countCsvInstruments(okxInstruments) : null;
+  const strategyReadyRaw = baseline?.instruments;
+  const strategyReadyInstruments = strategyReadyRaw == null || strategyReadyRaw === "" || !Number.isFinite(Number(strategyReadyRaw)) ? null : Number(strategyReadyRaw);
   const severe = classifySevereTraces(errors, revision?.name);
   const replicaContainers = replicas.flatMap((replica) => replica.properties?.containers ?? []);
   const summary = {
@@ -657,7 +700,7 @@ export async function main(argv = process.argv.slice(2)) {
       replicas: replicas.length, readyContainers: replicaContainers.filter((row) => row.ready).length,
       restarts: replicaContainers.reduce((sum, row) => sum + Number(row.restartCount ?? 0), 0),
     },
-    telemetry: { ...metric, configuredInstruments: artifact.enabled_count, observedInstruments: decisions.instruments, decisions: decisions.decisions, reasons: decisions.reasons },
+    telemetry: { ...metric, configuredInstruments: artifact.enabled_count, repoEnabledInstruments: artifact.enabled_count, runtimeInstruments, strategyReadyInstruments, observedInstruments: decisions.instruments, decisions: decisions.decisions, reasons: decisions.reasons, pipelineCoverage },
     trading,
     severeTraces: severe.traces, currentSevereTraces: severe.current, inactiveSevereTraces: severe.inactive, transitionTraces: severe.transitions,
     riskSignals: [...severe.current, ...severe.inactive].filter((row) => /HALT|READY_FALSE|WATCHDOG|UNKNOWN|OWNER_LOST|STALE/i.test(row.message ?? "")),
@@ -674,7 +717,8 @@ export async function main(argv = process.argv.slice(2)) {
       console.log(`Revision: ${summary.runtime.revision} | ${summary.runtime.mode} | ${summary.runtime.runningState}/${summary.runtime.healthState}`);
       console.log(`Runtime: traffic=${summary.runtime.trafficWeight}% replicas=${summary.runtime.replicas} ready=${summary.runtime.readyContainers} restarts=${summary.runtime.restarts} image=${summary.runtime.image}`);
       console.log(`Latest metrics: ready=${metric?.ready ?? "missing"} events=${metric?.eventCount ?? 0} decisions=${metric?.decisionCount ?? decisions.decisions}`);
-      console.log(`Decision activity: instruments=${decisions.instruments}/${artifact.enabled_count}; current-state coverage=${trading.currentStateCoverage}/${artifact.enabled_count}`);
+      console.log(formatDecisionTelemetryLine({ windowInstruments: decisions.instruments, currentStateCoverage: trading.currentStateCoverage, runtimeInstruments, repoEnabled: artifact.enabled_count, strategyReadyInstruments }));
+      console.log(formatPipelineCoverageLine(pipelineCoverage));
       console.log(`Latency: enqueue_p99=${metric?.eventP99 ?? "?"}ms decision_p99=${metric?.decisionP99 ?? "?"}ms source_lag_p99=${metric?.sourceLagP99 ?? "?"}ms`);
       console.log(`Queues: current=${metric?.queueDepth ?? "?"} pending_buy=${metric?.pendingBuy ?? "?"} exit_backlog=${metric?.exitBacklog ?? "?"}`);
       console.log(`Decisions: ${topReasons}`);
@@ -690,7 +734,7 @@ export async function main(argv = process.argv.slice(2)) {
     } else if (options.command === "activity") {
       console.log(`Activity telemetry: opportunities=${trading.events.queued} prepared=${trading.events.prepared} submitted=${trading.events.submitted} settled=${trading.events.settled} ledger_confirmed=${trading.events.ledgerConfirmed} unknown=${trading.events.unknown} not_created=${trading.events.notCreated}`);
       console.log(`Durable recovery confirmation: coverage=${trading.observability.reconciliationCoverage} inserted=${trading.observability.recoveredInserted} linked=${trading.observability.recoveredLinked}`);
-      console.log(`Decision activity: instruments=${decisions.instruments}/${artifact.enabled_count} | ${topReasons}`);
+      console.log(`${formatDecisionTelemetryLine({ windowInstruments: decisions.instruments, runtimeInstruments, repoEnabled: artifact.enabled_count, strategyReadyInstruments })} | ${topReasons}`);
     } else {
       const blockReasons = Object.entries(trading.blockedReasons).map(([reason, count]) => `${reason}=${count}`).join(", ") || "none";
       console.log(`Blocks: safety_events=${trading.blocked.length} current_safety=${trading.currentStates.blocked} current_policy=${trading.currentStates.policy}`);

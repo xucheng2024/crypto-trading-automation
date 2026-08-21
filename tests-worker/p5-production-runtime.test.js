@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { BuySignalPlanner, selectDailyCandles } from "../src/application/buy-signal-planner.js";
+import { BuySignalPlanner, selectDailyCandles, summarizeInstrumentPipelineCoverage } from "../src/application/buy-signal-planner.js";
 import { ReconciliationService } from "../src/application/reconciliation-service.js";
 import { AccountCapitalSnapshot, MarketProjection, ReadyGate } from "../src/application/trading-engine.js";
 
@@ -94,4 +94,33 @@ test("P5 planner blocks pending/stale candles and stale exchange clock, then sel
   assert.equal((await planner.observe({ type: "market-recheck", instId: "BTC-USDT" })).reason, "CLOCK_SYNC_STALE");
   clockIsFresh = true;
   assert.equal((await planner.observe({ type: "market-recheck", instId: "BTC-USDT" })).reason, "BUY_QUEUED"); assert.equal(intents.length, 1);
+});
+
+test("P5 planner pipeline coverage counts the earliest drop without listing names", async () => {
+  const clock = { nowMs: () => current }; const market = new MarketProjection({ clock });
+  const instIds = ["AAA-USDT", "BBB-USDT", "CCC-USDT"];
+  market.updateInstrument({ instId: "AAA-USDT", ts: 1, state: "live", tickSz: "0.1", lotSz: "0.001", minSz: "0.001", base: "AAA", version: "1" });
+  market.updateTicker({ instId: "AAA-USDT", ts: current, last: "95", askPx: "95", bidPx: "94.9" });
+  market.updateCandle({ instId: "AAA-USDT", ts: current - 180_000, high: "94", low: "90", confirm: true });
+  market.updateTicker({ instId: "BBB-USDT", ts: current, last: "1", askPx: "1", bidPx: "1" });
+  market.updateCandle({ instId: "BBB-USDT", ts: current - 180_000, high: "1", low: "1", confirm: true });
+  const rows = { "AAA-USDT": { bestLimit: "100", holdHours: "24" }, "BBB-USDT": { bestLimit: "100", holdHours: "24" }, "CCC-USDT": { bestLimit: "100", holdHours: "24" } };
+  const planner = new BuySignalPlanner({
+    accountId: "a", instIds, strategyConfig: { contentHash: "e".repeat(64), rows }, market,
+    account: new AccountCapitalSnapshot({ clock }), coordinator: { enqueue: () => false }, state: {},
+    orders: { listBuyCycle: async () => ({ attempts: [], consumedUsd: "0" }) }, transaction: async (fn) => fn({}),
+    rest: { clockSkewMs: 0, clockFresh: () => true }, readyGate: new ReadyGate(), clock,
+  });
+  planner.currentDay = "2026-08-14";
+  planner.daily.set("AAA-USDT:2026-08-14", { status: "READY", dailyLimitPrice: "100" });
+  planner.daily.set("BBB-USDT:2026-08-14", { status: "READY", dailyLimitPrice: "100" });
+  await planner.observe({ type: "ticker", instId: "AAA-USDT" });
+  const coverage = planner.pipelineCoverage();
+  assert.deepEqual(coverage, {
+    type: "instrument_pipeline_coverage", reason: "PIPELINE_COVERAGE", runtime: 3,
+    quote_ready: 2, candle_ready: 2, strategy_row: 3, daily_state: 2, evaluator_seen: 1, decision_emit: 1,
+    no_market_data: 1, candle_not_initialized: 0, no_strategy_row: 0, strategy_state_never_created: 0, filtered_before_evaluator: 1, unknown: 0,
+  });
+  assert.equal(JSON.stringify(coverage).includes("AAA"), false);
+  assert.deepEqual(summarizeInstrumentPipelineCoverage({ instIds: [], market, strategyConfig: { rows }, daily: new Map(), currentDay: "2026-08-14", evaluatorSeen: new Set(), decisions: new Map() }).runtime, 0);
 });

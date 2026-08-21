@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { assessRuntime, classifyBlock, classifyDecision, classifySevereTraces, formatInstrumentTimelineSummary, formatPositionsSummary, instrumentTimelineReadJobName, parseArgs, parseInstrumentTimelineLog, parseManagedPositionsLog, positionsReadJobName, queryRows, redactPositionsArtifact, runInstrumentTimelineCommand, runPositionsCommand, summarizeDecisions, summarizeDeployment, summarizeRunner, summarizeTrading, traceEvents } from "../scripts/azure-ops-summary.mjs";
+import { assessRuntime, classifyBlock, classifyDecision, classifySevereTraces, countCsvInstruments, formatDecisionTelemetryLine, formatInstrumentTimelineSummary, formatPipelineCoverageLine, formatPositionsSummary, instrumentTimelineReadJobName, parseArgs, parseInstrumentTimelineLog, parseManagedPositionsLog, parsePipelineCoverageRow, positionsReadJobName, queryRows, redactPositionsArtifact, runInstrumentTimelineCommand, runPositionsCommand, summarizeDecisions, summarizeDeployment, summarizeRunner, summarizeTrading, traceEvents } from "../scripts/azure-ops-summary.mjs";
 
 test("Azure ops summary converts query tables and aggregates decisions", () => {
   assert.deepEqual(queryRows({ tables: [{ columns: [{ name: "reason" }, { name: "decisions" }], rows: [["WAIT", 2]] }] }), [{ reason: "WAIT", decisions: 2 }]);
@@ -168,6 +168,28 @@ test("Azure ops summary exposes a post-commit recovery fill as durable ledger co
   assert.equal(trading.events.settled, 0); assert.equal(trading.events.ledgerConfirmed, 1);
   assert.equal(trading.executions[1].apiBoundary, "DURABLE_LEDGER_CONFIRMED");
   assert.deepEqual(trading.attemptTimelines[0].timeline.map((event) => event.stage), ["CANDIDATE", "PERSISTED", "LEDGER_CONFIRMED"]);
+});
+
+test("Azure ops summary prints pipeline coverage counts without instrument names", () => {
+  assert.equal(formatPipelineCoverageLine(null), "Pipeline coverage: unavailable");
+  const row = parsePipelineCoverageRow({
+    runtime: "3", quote_ready: "2", candle_ready: "2", strategy_row: "3", daily_state: "2",
+    evaluator_seen: "1", decision_emit: "1", no_market_data: "1", candle_not_initialized: "0",
+    no_strategy_row: "0", strategy_state_never_created: "0", filtered_before_evaluator: "1", unknown: "0",
+  });
+  assert.equal(formatPipelineCoverageLine(row), "Pipeline coverage: runtime=3 quote_ready=2 candle_ready=2 strategy_row=3 daily_state=2 evaluator_seen=1 decision_emit=1 | drop no_market_data=1 candle_not_initialized=0 no_strategy_row=0 strategy_state_never_created=0 filtered_before_evaluator=1 unknown=0");
+  assert.equal(formatPipelineCoverageLine(row).includes("BTC"), false);
+});
+
+test("Azure ops summary labels decision telemetry against runtime and repo-enabled counts", () => {
+  assert.equal(countCsvInstruments("BTC-USDT, ETH-USDT,BTC-USDT"), 2);
+  assert.equal(countCsvInstruments(""), 0);
+  assert.equal(formatDecisionTelemetryLine({
+    windowInstruments: 94, currentStateCoverage: 94, runtimeInstruments: 146, repoEnabled: 146, strategyReadyInstruments: null,
+  }), "Decision telemetry: 94 instruments with decision telemetry / 146 runtime / 146 repo-enabled; current-state=94; strategy_ready=unavailable");
+  assert.equal(formatDecisionTelemetryLine({
+    windowInstruments: 94, runtimeInstruments: null, repoEnabled: 146, strategyReadyInstruments: 146,
+  }), "Decision telemetry: 94 instruments with decision telemetry / missing runtime / 146 repo-enabled; strategy_ready=146");
 });
 
 test("Azure ops summary fails closed on unsafe runtime state", () => {
