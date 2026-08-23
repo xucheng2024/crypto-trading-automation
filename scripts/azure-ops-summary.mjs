@@ -352,7 +352,7 @@ export function parseManagedPositionsLog(text) {
 
 export function redactPositionsArtifact(artifact) {
   if (!artifact?.summary || !Array.isArray(artifact?.positions)) throw new Error("Managed-positions artifact is invalid");
-  const allowed = ["instrument", "remainingCostUsd", "openFills", "sellStates", "nextSellTime", "nextForceSellTime", "protectedFills", "dustPendingFills"];
+  const allowed = ["instrument", "remainingCostUsd", "openFills", "sellStates", "nextSellTime", "nextForceSellTime", "protectedFills", "unprotectedWaitingFills", "nextProtectionAnchorTime", "anchorDueUnprotectedFills", "dustPendingFills"];
   const positions = artifact.positions.map((row) => Object.fromEntries(allowed.filter((key) => Object.hasOwn(row, key)).map((key) => [key, row[key]])));
   const summary = { instruments: Number(artifact.summary.instruments), openFills: Number(artifact.summary.openFills) };
   if (!Number.isSafeInteger(summary.instruments) || summary.instruments < 0 || !Number.isSafeInteger(summary.openFills) || summary.openFills < 0 || summary.instruments !== positions.length) throw new Error("Managed-positions artifact summary is invalid");
@@ -363,7 +363,7 @@ export function formatPositionsSummary(result) {
   const lines = [`Managed positions: instruments=${result.summary.instruments} open_fills=${result.summary.openFills} | job=${result.job} execution=${result.execution}`];
   for (const row of result.positions ?? []) {
     const sell = Array.isArray(row.sellStates) && row.sellStates.length ? row.sellStates.join(",") : "-";
-    lines.push(`${row.instrument} remaining_usd=${row.remainingCostUsd ?? "-"} open_fills=${row.openFills} sell=${sell} next_sell=${formatTimelineInstant(row.nextSellTime)} next_force_sell=${formatTimelineInstant(row.nextForceSellTime)} protected=${row.protectedFills ?? 0} dust=${row.dustPendingFills ?? 0}`);
+    lines.push(`${row.instrument} remaining_usd=${row.remainingCostUsd ?? "-"} open_fills=${row.openFills} sell=${sell} next_sell=${formatTimelineInstant(row.nextSellTime)} next_force_sell=${formatTimelineInstant(row.nextForceSellTime)} protected=${row.protectedFills ?? 0} unprotected_waiting=${row.unprotectedWaitingFills ?? 0} next_anchor=${formatTimelineInstant(row.nextProtectionAnchorTime)} anchor_due_unprotected=${row.anchorDueUnprotectedFills ?? 0} dust=${row.dustPendingFills ?? 0}`);
   }
   return lines.join("\n");
 }

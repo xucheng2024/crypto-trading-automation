@@ -15,7 +15,7 @@ import { VirtualSloMetrics } from "./slo-metrics.js";
 import { EngineRecurringWork } from "./engine-recurring-work.js";
 import { EngineWorkLoop } from "./engine-work-loop.js";
 import { ExitSubmissionReconciler } from "./exit-submission-reconciler.js";
-import { BuySignalPlanner, normalizeConfirmed3mCandle } from "./buy-signal-planner.js";
+import { BuySignalPlanner, normalizeConfirmed3mCandle, normalizeConfirmed3mCandleAt } from "./buy-signal-planner.js";
 import { evaluateWatchdog } from "./operations-watchdog.js";
 import { ManagedIdentityCredential } from "@azure/identity";
 
@@ -93,12 +93,13 @@ export async function composeProductionRuntime(env, injected = {}) {
     const candle = normalizeConfirmed3mCandle(instId, await rest.candles(instId, { bar: "3m", limit: 3 }));
     if (candle) engine.receiveCandle(candle);
   };
+  const recoverAnchorCandle = async (instId, anchorTs) => normalizeConfirmed3mCandleAt(instId, await rest.candles(instId, { bar: "3m", after: anchorTs + 180_000, before: anchorTs - 1, limit: 1 }), anchorTs);
   let clockSyncPromise = null;
   const clockSync = () => {
     if (!clockSyncPromise) clockSyncPromise = Promise.resolve(rest.syncServerTime()).finally(() => { clockSyncPromise = null; });
     return clockSyncPromise;
   };
-  sellService = injected.sellService ?? new SellService({ state, transaction, coordinator, market, clock: runtime.clock, exchangeNowMs: () => runtime.clock.nowMs() + Number(rest.clockSkewMs ?? 0), clockFresh: () => rest.clockFresh(CLOCK_SYNC_STALE_AFTER_MS), triggerClockSync: clockSync, isDelisting: (instId) => delistingInstIds.has(instId), refreshCandle, telemetry });
+  sellService = injected.sellService ?? new SellService({ state, transaction, coordinator, market, clock: runtime.clock, exchangeNowMs: () => runtime.clock.nowMs() + Number(rest.clockSkewMs ?? 0), clockFresh: () => rest.clockFresh(CLOCK_SYNC_STALE_AFTER_MS), triggerClockSync: clockSync, isDelisting: (instId) => delistingInstIds.has(instId), refreshCandle, recoverAnchorCandle, telemetry });
   function rebuildSellWatches(ledger, attempts = []) {
     sellService.rebuild(ledger);
     const active = new Set(attempts.filter((attempt) => ["SELL", "DELIST"].includes(attempt.intent) && !["NOT_CREATED", "SETTLED"].includes(attempt.state)).map((attempt) => attempt.source_buy_trade_id ?? attempt.sourceBuyTradeId));
@@ -183,8 +184,10 @@ export async function composeProductionRuntime(env, injected = {}) {
         try { Promise.resolve(telemetry({ type: "execution_routes", reason: "ROUTES_REFRESHED", ...counts })).catch(() => {}); } catch {}
         return counts;
       } catch (error) { readyGate.set("account", false); throw error; }
-    }, weeklyReconcile: injected.weeklyReconcile ?? reconcile, clockSync, reviewCandles: () => {
+    }, weeklyReconcile: injected.weeklyReconcile ?? reconcile, clockSync, reviewCandles: async () => {
       sellService.reviewCandleFreshness();
+      engine.enqueueSellEvents(sellService.reviewDueWatches());
+      engine.enqueueSellEvents(await sellService.recoverDueAnchors());
       engine.enqueueSellEvents(sellService.reviewForceHold());
     },
     reviewDust: async () => {
@@ -210,6 +213,7 @@ export async function composeProductionRuntime(env, injected = {}) {
         for (const instId of instIds) maybeConfirmExpTime(instId, market.instrument(instId)?.expTime);
         if (injected.baseline && !injected.buyPlanner) readyGate.set("strategy", true); else await buyPlanner.prime();
         for (const instId of instIds) for (const event of sellService.observeCandle?.(instId) ?? []) engine.queue.enqueue({ ...event, enqueuedAt: runtime.clock.nowMs() });
+        engine.enqueueSellEvents?.(await sellService.recoverDueAnchors?.() ?? []);
         for (const client of Object.values(ws)) client.connect?.(); engine.startWatchdog(); workLoop.start?.(); recurring.start?.();
       }
       catch (error) { readyGate.set("owner", false); for (const client of Object.values(ws)) client.stop?.(); await exitConfirmation.stop?.(); recurring.stop?.(); workLoop.stop?.(); engine.stopWatchdog?.(); await ownerGuard.release(); throw error; }

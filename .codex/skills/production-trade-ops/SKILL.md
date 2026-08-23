@@ -27,7 +27,7 @@ Use the existing operations entry points; do not construct ad-hoc Azure, Postgre
    npm run ops:status -- positions --request
    ```
 
-   This is SELECT-only on unclosed BUY fills. Remaining USD is durable fill cost, not mark-to-market. Expect tens of seconds. Do not open Postgres from the laptop or invent GRANT SQL while diagnosing. Report instrument, remaining USD, open fills, sell states, and next sell time from the helper output only.
+   This is SELECT-only on unclosed BUY fills. Remaining USD is durable fill cost, not mark-to-market. Expect tens of seconds. Do not open Postgres from the laptop or invent GRANT SQL while diagnosing. Report instrument, remaining USD, open fills, sell states, next sell time, protected fills, and the unprotected-WAITING / next-anchor fields from the helper output only.
 
 4. For one instrument's durable timeline, require an exact uppercase symbol and start the VNet `timeline-read` job:
 
@@ -44,7 +44,7 @@ Use the existing operations entry points; do not construct ad-hoc Azure, Postgre
    - `positions --request` is the current unclosed-BUY aggregate; the instrument timeline is the durable source for returned fills, prices, quantities, sell timing, and watch state.
    - absence of a trace never proves absence of execution.
 
-6. Interpret sell watch state precisely: `WAITING` with a null protection price can mean the hold period has not reached `sellTime`; it is not proof that a watch is missing. Report `sellTime`, `forceSellTime`, `sellState`, and `protectionPrice` together. Positions `SELL_TRIGGERED` is current ledger state, not a timeline of when the trigger fired.
+6. Interpret sell watch state precisely: `WAITING` with a null protection price can mean the hold period has not reached `sellTime`; it is not proof that a watch is missing. Report `sellTime`, `forceSellTime`, `sellState`, and `protectionPrice` together. `anchor_due_unprotected > 0` means an exact post-hold anchor candle should already have established the first floor; inspect recent `SELL_PROTECTION_MISSING` or `SELL_ANCHOR_RECOVERY_FAILED` telemetry with `report --details`, then use the instrument timeline. Positions `SELL_TRIGGERED` is current ledger state, not a timeline of when the trigger fired.
 
 ## Safety
 

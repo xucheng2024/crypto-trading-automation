@@ -20,6 +20,7 @@ function messageFor(event) {
 export function isImportantTelemetry(event) {
   if (!event || typeof event !== "object") return false;
   if (["trading_decision", "block_evidence", "order_lifecycle", "trade_lifecycle", "sell_watch_armed", "sell_watch_loaded", "fill_reconciliation", "metric_snapshot", "strategy_baseline", "instrument_pipeline_coverage"].includes(event.type)) return true;
+  if (event.type === "sell_protection") return /SELL_(CANDLE_(PENDING|MISSING|STALE)|PROTECTION_(UNARMED|MISSING)|ANCHOR_RECOVERY_FAILED|CLOCK_SYNC_STALE)/.test(event.reason ?? "");
   if (event.error || event?.event?.startsWith("MAINTENANCE_") || event.type === "recovery_loaded") return true;
   return IMPORTANT.test([event.reason, event.outcome, ...(event.reasons ?? [])].filter(Boolean).join(" "));
 }

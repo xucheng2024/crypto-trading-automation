@@ -1,5 +1,5 @@
 import { compareDecimal, multiplyDecimal, roundToStep, subtractDecimal } from "../decimal.js";
-import { candleFreshness, sellBreakdownPrice, takeProfitPrice } from "../domain/rules.js";
+import { candleFreshness, sellBreakdownPrice, sellProtectionAnchorClose, sellProtectionAnchorTs, takeProfitPrice } from "../domain/rules.js";
 
 const field = (row, snake, camel) => row[snake] ?? row[camel];
 
@@ -9,13 +9,18 @@ const field = (row, snake, camel) => row[snake] ?? row[camel];
  * consume* runs later and is the only part that reads/writes durable state.
  */
 export class SellService {
-  constructor({ state, transaction = async (fn) => fn(null), coordinator, market, clock = { nowMs: () => Date.now() }, exchangeNowMs = () => clock.nowMs(), clockFresh = () => true, triggerClockSync = () => {}, refreshCandle = async () => {}, isDelisting = () => false, telemetry = () => {}, loadFill = async (_tx, key) => this.fills.get(key) }) {
-    Object.assign(this, { state, transaction, coordinator, market, clock, exchangeNowMs, clockFresh, triggerClockSync, refreshCandle, isDelisting, telemetry, loadFill });
-    this.fills = new Map(); this.byInst = new Map(); this.latches = new Set(); this.candleRefreshes = new Set(); this.clockSyncStale = false;
+  constructor({ state, transaction = async (fn) => fn(null), coordinator, market, clock = { nowMs: () => Date.now() }, exchangeNowMs = () => clock.nowMs(), clockFresh = () => true, triggerClockSync = () => {}, refreshCandle = async () => {}, recoverAnchorCandle = async () => null, isDelisting = () => false, telemetry = () => {}, loadFill = async (_tx, key) => this.fills.get(key) }) {
+    Object.assign(this, { state, transaction, coordinator, market, clock, exchangeNowMs, clockFresh, triggerClockSync, refreshCandle, recoverAnchorCandle, isDelisting, telemetry, loadFill });
+    this.fills = new Map(); this.byInst = new Map(); this.latches = new Set(); this.candleRefreshes = new Set(); this.anchorCandles = new Map(); this.anchorRecoveries = new Set(); this.pendingProtections = new Map(); this.clockSyncStale = false;
   }
   key(fill) { return `${field(fill, "account_id", "accountId")}:${field(fill, "inst_id", "instId")}:${field(fill, "trade_id", "tradeId")}`; }
   _emit(event) { try { Promise.resolve(this.telemetry(event)).catch(() => {}); } catch { /* best effort */ } }
   releaseLatch(event, reason) {
+    if (event?.type === "SELL_PROTECTION" && event.key) {
+      if (this.pendingProtections.get(event.key) !== event.protection) return false;
+      this.pendingProtections.delete(event.key);
+      return true;
+    }
     if (event?.type !== "SELL_BREACH" || !event.key) return false;
     const released = this.latches.delete(event.key);
     if (released) this._emit({ type: "sell_trigger_retry", reason, instId: event.instId, key: event.key });
@@ -35,7 +40,7 @@ export class SellService {
     this._emit({ type: "sell_trigger_retry", reason: "SELL_EVENT_RETRY_SCHEDULED", retryReason: reason, retryCount: event.retryCount, delayMs, instId: event.instId, key: event.key });
   }
   rebuild(fills) {
-    this.fills.clear(); this.byInst.clear(); this.latches.clear();
+    this.fills.clear(); this.byInst.clear(); this.latches.clear(); this.pendingProtections.clear(); this.anchorCandles.clear(); this.anchorRecoveries.clear();
     const snapshot = { total: 0, instruments: new Set(), waiting: 0, triggered: 0, dustPending: 0 };
     for (const fill of fills) {
       if (field(fill, "side", "side") !== "BUY" || !["WAITING", "SELL_TRIGGERED", "DUST_PENDING"].includes(field(fill, "sell_state", "sellState"))) continue;
@@ -104,18 +109,64 @@ export class SellService {
       const fills = [...(this.byInst.get(instId) ?? [])].map((key) => this.fills.get(key)).filter(Boolean);
       this._emit({ type: "sell_protection", reason, instId, candleTs: candle?.ts, expectedTs: freshness.expectedTs, age: freshness.age });
       for (const fill of fills) if (!fill.protection_price) this._emit({ type: "sell_protection", reason: "SELL_PROTECTION_UNARMED", instId, sourceBuyTradeId: field(fill, "trade_id", "tradeId") });
-      this._refreshCandle(instId);
-      return this.observeTicker(instId);
+      const events = this.observeTicker(instId);
+      return events;
     }
+    return this.observeTicker(instId);
+  }
+  _anchorKey(instId, anchorTs) { return `${instId}:${anchorTs}`; }
+  _cacheAnchor(instId, anchorTs, candle) {
+    if (!candle?.confirm || Number(candle.ts) !== anchorTs) return null;
+    this.anchorCandles.set(this._anchorKey(instId, anchorTs), candle);
+    this.anchorRecoveries.delete(this._anchorKey(instId, anchorTs));
+    return candle;
+  }
+  _requestAnchor(instId, anchorTs, fill) {
+    const key = this._anchorKey(instId, anchorTs);
+    if (!this.anchorRecoveries.has(key)) this._emit({ type: "sell_protection", reason: "SELL_PROTECTION_MISSING", instId, sourceBuyTradeId: field(fill, "trade_id", "tradeId"), anchorTs });
+    this.anchorRecoveries.add(key);
+  }
+  _candidateProtection(fill, instId, candle) {
+    if (!fill || field(fill, "sell_state", "sellState") !== "WAITING" || !this.clockFresh()) return null;
+    const sellTime = Number(field(fill, "sell_time", "sellTime"));
+    if (!Number.isFinite(sellTime) || sellTime > this.clock.nowMs()) return null;
+    if (fill.protection_price) {
+      if (!candle?.confirm || candleFreshness({ candle, exchangeNowMs: this.exchangeNowMs() }).state !== "FRESH") return null;
+      return { protection: sellBreakdownPrice(candle.low), candle };
+    }
+    const anchorClose = sellProtectionAnchorClose(sellTime);
+    if (this.exchangeNowMs() < anchorClose) return null;
+    const anchorTs = sellProtectionAnchorTs(sellTime);
+    const exact = this._cacheAnchor(instId, anchorTs, candle) ?? this.anchorCandles.get(this._anchorKey(instId, anchorTs));
+    if (!exact) { this._requestAnchor(instId, anchorTs, fill); return null; }
+    return { protection: sellBreakdownPrice(exact.low), candle: exact };
+  }
+  _protectionEvent(key, instId, protection, candle) {
+    if (this.pendingProtections.get(key) === protection) return null;
+    this.pendingProtections.set(key, protection);
+    return { type: "SELL_PROTECTION", key, instId, protection, candleTs: candle.ts, previousClosedLow: candle.low };
+  }
+  reviewDueWatches() {
     const events = [];
-    for (const key of this.byInst.get(instId) ?? []) {
-      const fill = this.fills.get(key); if (!fill || Number(field(fill, "sell_time", "sellTime")) > this.clock.nowMs()) continue;
-      const protection = sellBreakdownPrice(candle.low);
-      if (!fill.protection_price || compareDecimal(protection, fill.protection_price) > 0) {
-        events.push({ type: "SELL_PROTECTION", key, instId, protection, candleTs: candle.ts, previousClosedLow: candle.low });
+    for (const instId of this.byInst.keys()) events.push(...this.observeTicker(instId));
+    return events;
+  }
+  async recoverDueAnchors() {
+    const events = [];
+    for (const key of [...this.anchorRecoveries]) {
+      const [instId, anchorText] = key.split(":"); const anchorTs = Number(anchorText);
+      try {
+        const candle = await this.recoverAnchorCandle(instId, anchorTs);
+        if (!this._cacheAnchor(instId, anchorTs, candle)) {
+          this._emit({ type: "sell_protection", reason: "SELL_PROTECTION_MISSING", instId, anchorTs });
+          continue;
+        }
+        events.push(...this.observeTicker(instId));
+      } catch (error) {
+        this._emit({ type: "sell_protection", reason: "SELL_ANCHOR_RECOVERY_FAILED", instId, anchorTs, error: error?.message });
       }
     }
-    return [...events, ...this.observeTicker(instId)];
+    return events;
   }
   reviewCandleFreshness() {
     for (const instId of this.byInst.keys()) {
@@ -164,14 +215,24 @@ export class SellService {
       }
     }
     events.push(...this.checkForceHold(instId, this.clock.nowMs()));
-    if (!quote) return events;
+    const candle = this.market.candle?.(instId);
     for (const key of this.byInst.get(instId) ?? []) {
       const fill = this.fills.get(key); const state = fill && field(fill, "sell_state", "sellState");
       // DUST_PENDING is owned exclusively by reviewDust(): it decides
       // sellability from remaining size/notional, not from price alone.
-      if (!fill || state === "SOLD" || state === "DUST_PENDING" || Number(field(fill, "sell_time", "sellTime")) > this.clock.nowMs() || !fill.protection_price || compareDecimal(quote.last, fill.protection_price) >= 0 || this.latches.has(key)) continue;
-      this.latches.add(key); // must happen before event enqueue / any await
-      events.push({ type: "SELL_BREACH", priority: "critical", key, instId, protection: fill.protection_price, triggerPrice: quote.last, quoteTs: quote.ts, reason: "PRICE_BREAKDOWN" });
+      if (!fill || state !== "WAITING" || Number(field(fill, "sell_time", "sellTime")) > this.clock.nowMs() || this.latches.has(key)) continue;
+      const candidate = this._candidateProtection(fill, instId, candle);
+      const effectiveFloor = candidate ? (fill.protection_price && compareDecimal(fill.protection_price, candidate.protection) > 0 ? fill.protection_price : candidate.protection) : fill.protection_price;
+      if (!effectiveFloor) continue;
+      if (quote && compareDecimal(quote.last, effectiveFloor) < 0) {
+        this.latches.add(key); // must happen before event enqueue / any await
+        events.push({ type: "SELL_BREACH", priority: "critical", key, instId, protection: effectiveFloor, triggerPrice: quote.last, quoteTs: quote.ts, reason: "PRICE_BREAKDOWN" });
+        continue;
+      }
+      if (candidate && (!fill.protection_price || compareDecimal(candidate.protection, fill.protection_price) > 0)) {
+        const event = this._protectionEvent(key, instId, candidate.protection, candidate.candle);
+        if (event) events.push(event);
+      }
     }
     return events;
   }
@@ -180,10 +241,15 @@ export class SellService {
     if (!fill) { this.releaseLatch(event, "FILL_MISSING"); return { accepted: false, reason: "FILL_MISSING" }; }
     const accountId = field(fill, "account_id", "accountId"); const instId = field(fill, "inst_id", "instId"); const tradeId = field(fill, "trade_id", "tradeId");
     if (event.type === "SELL_PROTECTION") {
+      if (fill.protection_price && compareDecimal(fill.protection_price, event.protection) >= 0) {
+        this.releaseLatch(event, "PROTECTION_ALREADY_APPLIED");
+        return { accepted: true, reason: "PROTECTION_ALREADY_APPLIED" };
+      }
       const result = await this.transaction((tx) => this.state.raiseProtection(tx, { accountId, instId, tradeId, version: fill.version, protectionPrice: event.protection }));
       if (result?.rowCount === 1) {
         const current = result.rows?.[0] ?? { ...fill, protection_price: event.protection, version: BigInt(fill.version) + 1n };
         this.fills.set(event.key, current);
+        this.releaseLatch(event, "PROTECTION_UPDATED");
         this._emit({ type: "sell_watch_armed", reason: "SELL_WATCH_ARMED", instId, sourceBuyTradeId: tradeId, sellTime: field(fill, "sell_time", "sellTime"), candleTs: event.candleTs, previousClosedLow: event.previousClosedLow, breakdownPrice: event.protection });
       }
       if (result?.rowCount !== 1) return { accepted: false, reason: "CAS_LOST", retryable: true };

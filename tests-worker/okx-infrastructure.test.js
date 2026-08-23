@@ -94,10 +94,12 @@ test("P1 recovery endpoints preserve pagination cursors and GET timeout errors r
   await client.ordersPending("SPOT", { after: "100", before: "200", limit: 50 });
   await client.ordersHistory("MARGIN", { after: "300", limit: 75 });
   await client.ordersHistoryArchive("SPOT", { before: "400", limit: 100 });
+  await client.candles("BTC-USDT", { bar: "3m", after: 360_000, before: 179_999, limit: 1 });
   assert.deepEqual(delays, [1_000]);
   assert.match(urls[1], /orders-pending.*after=100.*before=200.*limit=50.*instType=SPOT/);
   assert.match(urls[2], /orders-history.*after=300.*limit=75.*instType=MARGIN/);
   assert.match(urls[3], /orders-history-archive.*before=400.*limit=100.*instType=SPOT/);
+  assert.match(urls[4], /market\/candles.*instId=BTC-USDT.*bar=3m.*limit=1.*after=360000.*before=179999/);
 });
 
 class FakeSocket {

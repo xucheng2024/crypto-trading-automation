@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { normalizeInstrument } from "../src/domain/instrument.js";
 import { assertAttemptState, createClOrdId, createDecisionId, payloadHash } from "../src/domain/order.js";
-import { buySignal, CANDLE_STALE_HARD_MS, candleFreshness, dailyLimit, delistPlan, expectedClosedCandleTs, normalizeHoldHours, sellBreakdownPrice, strategyDay, takeProfitPrice } from "../src/domain/rules.js";
+import { buySignal, CANDLE_STALE_HARD_MS, candleFreshness, dailyLimit, delistPlan, expectedClosedCandleTs, normalizeHoldHours, sellBreakdownPrice, sellProtectionAnchorClose, sellProtectionAnchorTs, strategyDay, takeProfitPrice } from "../src/domain/rules.js";
 
 test("domain instrument and order contracts normalize deterministically", async () => {
   assert.deepEqual(normalizeInstrument({ instId: "btc-usdt", tickSz: "0.1", lotSz: "0.001", state: "live" }), { instId: "BTC-USDT", base: "BTC", quote: "USDT", tickSz: "0.1", lotSz: "0.001", minSz: "0.001", state: "live", expTime: null });
@@ -36,6 +36,10 @@ test("daily, duration, clock, buy, leverage and exit boundaries are pure", () =>
   assert.equal(sellBreakdownPrice("100"), "99.7");
   assert.equal(takeProfitPrice("100"), "120");
   assert.throws(() => takeProfitPrice("0"));
+  assert.equal(sellProtectionAnchorClose(180_000), 180_000);
+  assert.equal(sellProtectionAnchorTs(180_000), 0);
+  assert.equal(sellProtectionAnchorClose(180_001), 360_000);
+  assert.equal(sellProtectionAnchorTs(180_001), 180_000);
   assert.throws(() => takeProfitPrice("-5"));
   assert.deepEqual(delistPlan({ fillSize: "2", disposedSize: "0.5", availableSize: "1.2", availSell: "1", lotSz: "0.1", minSz: "0.1", price: "10" }), { executable: true, size: "1" });
 });

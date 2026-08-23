@@ -99,7 +99,7 @@ export class TradingStateRepository {
 
   async markSellTriggered(tx, { accountId, instId, tradeId, version, protectionPrice, sellTriggerReason }) {
     return tx.query(`UPDATE filled_orders SET sell_state='SELL_TRIGGERED',
-      protection_price=CASE WHEN $6='TAKE_PROFIT' THEN protection_price ELSE $5::numeric END,
+      protection_price=CASE WHEN $5::numeric IS NULL THEN protection_price ELSE GREATEST(COALESCE(protection_price,$5::numeric),$5::numeric) END,
       sell_trigger_reason=$6,version=version+1
       WHERE account_id=$1 AND inst_id=$2 AND trade_id=$3 AND side='BUY' AND version=$4
       AND sell_state IN ('WAITING','SELL_TRIGGERED','DUST_PENDING') RETURNING *`, [accountId, instId, tradeId, version, protectionPrice, sellTriggerReason]);

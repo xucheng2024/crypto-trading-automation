@@ -57,6 +57,11 @@ export function summarizeInstrumentPipelineCoverage({ instIds = [], market, stra
 
 export function normalizeConfirmed3mCandle(instId, rows) {
   const row = (rows ?? []).filter((value) => String(value?.[8]) === "1").sort((a, b) => Number(b[0]) - Number(a[0]))[0];
+  return normalizeConfirmed3mCandleAt(instId, row ? [row] : [], row?.[0]);
+}
+
+export function normalizeConfirmed3mCandleAt(instId, rows, expectedTs) {
+  const row = (rows ?? []).find((value) => String(value?.[8]) === "1" && Number(value?.[0]) === Number(expectedTs));
   if (!row) return null;
   const [ts, open, high, low, close, volume, volumeCcy, volumeCcyQuote] = row;
   if (!Number.isFinite(Number(ts))) return null;

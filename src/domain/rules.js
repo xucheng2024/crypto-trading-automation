@@ -4,6 +4,16 @@ export const TRADE_FEE_RATE = "0.0005";
 export const CANDLE_INTERVAL_MS = 180_000;
 export const CANDLE_STALE_HARD_MS = 390_000;
 
+export function sellProtectionAnchorClose(sellTime) {
+  const value = Number(sellTime);
+  if (!Number.isFinite(value) || value < 0) throw new Error("sell time is required");
+  return Math.ceil(value / CANDLE_INTERVAL_MS) * CANDLE_INTERVAL_MS;
+}
+
+export function sellProtectionAnchorTs(sellTime) {
+  return sellProtectionAnchorClose(sellTime) - CANDLE_INTERVAL_MS;
+}
+
 export function expectedClosedCandleTs(exchangeTimeMs) {
   if (!Number.isFinite(exchangeTimeMs)) throw new Error("exchange time is required");
   return Math.floor(exchangeTimeMs / CANDLE_INTERVAL_MS) * CANDLE_INTERVAL_MS - CANDLE_INTERVAL_MS;

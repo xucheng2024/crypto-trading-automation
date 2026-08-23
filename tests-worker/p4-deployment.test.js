@@ -210,7 +210,7 @@ test("P5 telemetry sends only important structured traces and strips secrets", a
   telemetry({ type: "trading_decision", reason: "BREAKOUT_NOT_CONFIRMED", instId: "ETH-USDT", last: "1" });
   telemetry({ type: "fill_reconciliation", reason: "FILL_BATCH_COMMITTED", inserted: 1, linked: 0, systemBuys: 1 });
   telemetry({ type: "metric_snapshot", reason: "RUNTIME_METRICS", queue_wait_p99_ms: 4, ready: 1 });
-  assert.equal(isImportantTelemetry({ type: "ticker" }), false); assert.equal(isImportantTelemetry({ type: "sell_watch_loaded" }), true); assert.equal(isImportantTelemetry({ type: "instrument_pipeline_coverage" }), true); assert.equal(traces.length, 4);
+  assert.equal(isImportantTelemetry({ type: "ticker" }), false); assert.equal(isImportantTelemetry({ type: "sell_watch_loaded" }), true); assert.equal(isImportantTelemetry({ type: "sell_protection", reason: "SELL_PROTECTION_MISSING" }), true); assert.equal(isImportantTelemetry({ type: "sell_protection", reason: "SELL_PROTECTION_UPDATED" }), false); assert.equal(isImportantTelemetry({ type: "instrument_pipeline_coverage" }), true); assert.equal(traces.length, 4);
   assert.match(traces[0].message, /UNKNOWN_ORDER/); assert.equal(traces[0].properties.instId, "BTC-USDT");
   assert.equal(traces[0].properties.apiKey, undefined); assert.equal(traces[0].properties.token, undefined);
   assert.match(traces[1].message, /BREAKOUT_NOT_CONFIRMED/); assert.deepEqual(metrics, [{ name: "queue_wait_p99_ms", value: 4 }, { name: "ready", value: 1 }]);

@@ -22,6 +22,9 @@ export const MANAGED_POSITIONS_SQL = `
       min(sell_time) AS next_sell_time,
       min(force_sell_time) AS next_force_sell_time,
       count(*) FILTER (WHERE protection_price IS NOT NULL)::int AS protected_fills,
+      count(*) FILTER (WHERE sell_state='WAITING' AND protection_price IS NULL)::int AS unprotected_waiting_fills,
+      min((CEIL(sell_time::numeric / 180000) * 180000)::bigint) FILTER (WHERE sell_state='WAITING' AND protection_price IS NULL AND sell_time IS NOT NULL) AS next_protection_anchor_time,
+      count(*) FILTER (WHERE sell_state='WAITING' AND protection_price IS NULL AND sell_time IS NOT NULL AND (CEIL(sell_time::numeric / 180000) * 180000) <= EXTRACT(EPOCH FROM clock_timestamp()) * 1000)::int AS anchor_due_unprotected_fills,
       count(*) FILTER (WHERE sell_state='DUST_PENDING')::int AS dust_pending_fills
     FROM open_buys
     GROUP BY inst_id
@@ -40,6 +43,9 @@ export function redactManagedPositions(rows) {
     nextSellTime: row.next_sell_time,
     nextForceSellTime: row.next_force_sell_time,
     protectedFills: Number(row.protected_fills),
+    unprotectedWaitingFills: Number(row.unprotected_waiting_fills),
+    nextProtectionAnchorTime: row.next_protection_anchor_time,
+    anchorDueUnprotectedFills: Number(row.anchor_due_unprotected_fills),
     dustPendingFills: Number(row.dust_pending_fills),
   }));
   return { summary: { instruments: positions.length, openFills: positions.reduce((total, row) => total + row.openFills, 0) }, positions };
