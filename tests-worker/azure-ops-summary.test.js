@@ -51,7 +51,7 @@ test("positions CLI starts the VNet job and redacts log JSON", async () => {
   const requested = await runPositionsCommand(parseArgs(["positions", "--request", "--resource-group", "rg", "--app", "trading-cae-engine"]), {
     command: (bin, args) => {
       calls.push([bin, ...args]);
-      if (bin === "az" && args.includes("logs")) return 'ts MANAGED_POSITIONS_JSON:{"summary":{"instruments":1,"openFills":2,"forbidden":"no"},"positions":[{"instrument":"BTC-USDT","remainingCostUsd":"100","openFills":2,"sellStates":["WAITING"],"nextSellTime":1,"accountId":"forbidden"}]}';
+      if (bin === "az" && args.includes("logs")) return 'ts MANAGED_POSITIONS_JSON:{"summary":{"instruments":1,"openFills":2,"forbidden":"no"},"positions":[{"instrument":"BTC-USDT","remainingCostUsd":"100","openFills":2,"sellStates":["WAITING"],"nextSellTime":1,"nextForceSellTime":2,"accountId":"forbidden"}]}';
       throw new Error(`unexpected command ${bin} ${args.join(" ")}`);
     },
     json: (bin, args) => {
@@ -62,8 +62,8 @@ test("positions CLI starts the VNet job and redacts log JSON", async () => {
     },
     sleep: async () => {},
   });
-  assert.deepEqual(requested, { command: "positions", requested: false, job: "trading-cae-positions-read", execution: "trading-cae-positions-read-abc", summary: { instruments: 1, openFills: 2 }, positions: [{ instrument: "BTC-USDT", remainingCostUsd: "100", openFills: 2, sellStates: ["WAITING"], nextSellTime: 1 }] });
-  assert.match(formatPositionsSummary(requested), /BTC-USDT remaining_usd=100 open_fills=2 sell=WAITING/);
+  assert.deepEqual(requested, { command: "positions", requested: false, job: "trading-cae-positions-read", execution: "trading-cae-positions-read-abc", summary: { instruments: 1, openFills: 2 }, positions: [{ instrument: "BTC-USDT", remainingCostUsd: "100", openFills: 2, sellStates: ["WAITING"], nextSellTime: 1, nextForceSellTime: 2 }] });
+  assert.match(formatPositionsSummary(requested), /BTC-USDT remaining_usd=100 open_fills=2 sell=WAITING next_sell=1970-01-01T00:00:00.001Z next_force_sell=1970-01-01T00:00:00.002Z/);
   assert.equal(formatInstrumentTimelineSummary({
     instrument: "CFG-USDT", job: "timeline-read",
     timeline: [

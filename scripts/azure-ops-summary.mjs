@@ -363,7 +363,7 @@ export function formatPositionsSummary(result) {
   const lines = [`Managed positions: instruments=${result.summary.instruments} open_fills=${result.summary.openFills} | job=${result.job} execution=${result.execution}`];
   for (const row of result.positions ?? []) {
     const sell = Array.isArray(row.sellStates) && row.sellStates.length ? row.sellStates.join(",") : "-";
-    lines.push(`${row.instrument} remaining_usd=${row.remainingCostUsd ?? "-"} open_fills=${row.openFills} sell=${sell} next_sell=${row.nextSellTime ?? "-"} protected=${row.protectedFills ?? 0}`);
+    lines.push(`${row.instrument} remaining_usd=${row.remainingCostUsd ?? "-"} open_fills=${row.openFills} sell=${sell} next_sell=${formatTimelineInstant(row.nextSellTime)} next_force_sell=${formatTimelineInstant(row.nextForceSellTime)} protected=${row.protectedFills ?? 0} dust=${row.dustPendingFills ?? 0}`);
   }
   return lines.join("\n");
 }
@@ -658,6 +658,12 @@ export async function main(argv = process.argv.slice(2)) {
   const resourceGroup = options.resourceGroup ?? run("gh", ["variable", "get", "AZURE_RESOURCE_GROUP"]);
   const appName = options.app ?? run("gh", ["variable", "get", "CONTAINER_APP_NAME"]);
   if (["deploy", "runner"].includes(options.command)) return runInfrastructureCommand(options, resourceGroup, appName);
+  // `report` is the operator's complete health view. Start the read-only VNet
+  // query alongside telemetry collection so it includes durable open-BUY state
+  // (and each fill's next SELL/force-SELL boundary) without delaying it twice.
+  const positionsRead = options.command === "report"
+    ? runPositionsCommand({ resourceGroup, app: appName }).then((result) => ({ result })).catch(() => ({ unavailable: true }))
+    : null;
   let checkpointFallback = false;
   if (options.sinceLast) {
     const checkpoint = await readFile(checkpointPath, "utf8").then(JSON.parse).catch(() => null);
@@ -714,6 +720,7 @@ export async function main(argv = process.argv.slice(2)) {
   const strategyReadyInstruments = baseline.status === "STRATEGY_READY" ? baseline.instruments : null;
   const severe = classifySevereTraces(errors, revision?.name);
   const replicaContainers = replicas.flatMap((replica) => replica.properties?.containers ?? []);
+  const managedPositions = positionsRead ? await positionsRead : null;
   const summary = {
     command: options.command,
     healthy: assessment.healthy,
@@ -728,6 +735,8 @@ export async function main(argv = process.argv.slice(2)) {
     },
     telemetry: { ...metric, configuredInstruments: artifact.enabled_count, repoEnabledInstruments: artifact.enabled_count, runtimeInstruments, strategyReadyInstruments, strategyBaseline: baseline, observedInstruments: decisions.instruments, decisions: decisions.decisions, reasons: decisions.reasons, pipelineCoverage },
     trading,
+    managedPositions: managedPositions?.result ?? null,
+    managedPositionsCoverage: managedPositions?.unavailable ? "UNAVAILABLE" : positionsRead ? "DURABLE_CURRENT_STATE" : "NOT_REQUESTED",
     severeTraces: severe.traces, currentSevereTraces: severe.current, inactiveSevereTraces: severe.inactive, transitionTraces: severe.transitions,
     riskSignals: [...severe.current, ...severe.inactive].filter((row) => /HALT|READY_FALSE|WATCHDOG|UNKNOWN|OWNER_LOST|STALE/i.test(row.message ?? "")),
     checks: assessment.checks,
@@ -751,6 +760,8 @@ export async function main(argv = process.argv.slice(2)) {
       console.log(`Trading telemetry: opportunities=${trading.events.queued} prepared=${trading.events.prepared} submitted=${trading.events.submitted} settled=${trading.events.settled} ledger_confirmed=${trading.events.ledgerConfirmed} coverage=${trading.observability.lifecycleCoverage}`);
       console.log(`Durable recovery confirmation: coverage=${trading.observability.reconciliationCoverage} inserted=${trading.observability.recoveredInserted} linked=${trading.observability.recoveredLinked}`);
       console.log(`Current states: waiting=${trading.currentStates.waiting} policy=${trading.currentStates.policy} blocked=${trading.currentStates.blocked} opportunity=${trading.currentStates.opportunity}`);
+      if (summary.managedPositions) console.log(formatPositionsSummary(summary.managedPositions));
+      else console.log("Managed positions: unavailable (read-only VNet query did not return a valid result)");
       console.log(`Severe traces: current=${severe.current.length} inactive=${severe.inactive.length} expected_transition=${severe.transitions.length}${severe.current.length || severe.inactive.length ? ` | ${[...severe.current, ...severe.inactive].slice(0, 3).map((row) => row.message).join("; ")}` : ""}`);
     } else if (options.command === "snapshot") {
       console.log(`Azure production: ${summary.healthy ? "HEALTHY" : "UNHEALTHY"}`);
