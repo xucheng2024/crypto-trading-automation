@@ -18,7 +18,20 @@ export class OrderCoordinator {
     Object.assign(this, { transaction, orders, state, transport, ownerGuard, readyGate, market, account, mode, executionRoute, tradeQuoteCurrency, isBuyAllowed, clock, config, telemetry, onBuySettled, onExitSettled, onExitSubmitted, onExitDust, slo });
     this.pending = { BUY: new Map(), SELL: new Map(), DELIST: new Map() }; this.submitting = false; this.accepting = true; this.isolatedBases = new Set(); this.buyBlockStates = new Map();
   }
-  enqueue(intent) { if (!this.accepting) return false; const group = this.pending[intent.intent]; if (!group) throw new Error("unknown intent"); const key = intent.intent === "BUY" ? intent.instId : `${intent.baseCcy}:${intent.sourceBuyTradeId}`; group.set(key, intent); return true; }
+  enqueue(intent) {
+    if (!this.accepting) return false;
+    const group = this.pending[intent.intent];
+    if (!group) throw new Error("unknown intent");
+    const key = intent.intent === "BUY" ? intent.instId : `${intent.baseCcy}:${intent.sourceBuyTradeId}`;
+    const current = group.get(key);
+    // A SELL/DELIST event can be replayed while its availability read is in
+    // backoff. Refresh its market evidence, but never let that duplicate erase
+    // the account-wide retry deadline and recreate a request storm.
+    if (intent.intent !== "BUY" && Number.isFinite(current?.notBefore) && current.notBefore > this.clock.nowMs()) {
+      group.set(key, { ...intent, notBefore: current.notBefore, firstDeferredAt: current.firstDeferredAt, lastDeferReason: current.lastDeferReason });
+    } else group.set(key, intent);
+    return true;
+  }
   stopNewMutations() { this.accepting = false; }
   async finishInFlight() { while (this.submitting) await new Promise((resolve) => setTimeout(resolve, 1)); }
   _emit(event) { try { Promise.resolve(this.telemetry(event)).catch(() => {}); } catch { /* telemetry cannot block trading */ } }
