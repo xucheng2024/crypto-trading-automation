@@ -17,6 +17,7 @@ import { InstrumentProtectionService } from "../src/application/instrument-prote
 import { P3_DELETE_TERMINAL_ATTEMPTS_SQL, P3_RETENTION_VERSION, retainTerminalAttempts, retainTerminalAttemptsAsMaintenance } from "../src/infrastructure/postgres/retention.js";
 import { importOfflineProtection } from "../src/infrastructure/postgres/offline-import.js";
 import { convertD1Export } from "../tools/convert-d1-export.mjs";
+import { postgresMigrations } from "../scripts/postgres-migration-manifest.mjs";
 import { expectedClosedCandleTs } from "../src/domain/rules.js";
 
 const run = promisify(execFile);
@@ -69,8 +70,7 @@ async function startPostgres() {
     await run("pg_ctl", ["-D", dir, "-l", logPath, "-o", `-p ${port} -h 127.0.0.1`, "-w", "start"]);
     started = true;
     let admin = await connect();
-    const migrations = ["0001_p1_core.sql", "0002_p3_exit.sql", "0003_p4_import.sql", "0004_hybrid_execution.sql", "0005_execution_route.sql", "0006_decision_observability.sql", "0007_sell_force_hold.sql", "0008_buy_decision_correlation.sql", "0009_okx_capacity_admission.sql", "0010_sell_take_profit.sql"];
-    for (const migration of migrations) {
+    for (const migration of postgresMigrations) {
       const sql = await readFile(new URL(`../migrations/postgres/${migration}`, import.meta.url), "utf8");
       await admin.query(sql); await admin.query(sql);
     }
