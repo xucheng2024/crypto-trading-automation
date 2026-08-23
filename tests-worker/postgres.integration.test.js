@@ -521,18 +521,22 @@ test("temporary PostgreSQL enforces P1-B invariants", { timeout: 60_000 }, async
     await t.test("P3 reconcileAll automatically allocates a watermark-safe PENDING ACCOUNT SELL, with no manual allocateSafeAccountSells call", async () => {
       const accountId = "p3-auto-alloc"; const instId = "BTC-USDT"; const baseCcy = "BTC";
       await tx(db.admin, async (client) => {
-        await state.insertFill(client, { accountId, instId, baseCcy, tradeId: "auto-buy", billId: "1", source: "SYSTEM", side: "BUY", fillSize: "1", fillTime: 10, holdHours: "24", strategyConfigHash: "cfg", sellTime: 11, sellState: "WAITING" });
+        await state.insertFill(client, { accountId, instId, baseCcy, tradeId: "auto-buy", source: "SYSTEM", side: "BUY", fillSize: "1", fillTime: 10, holdHours: "24", strategyConfigHash: "cfg", sellTime: 11, sellState: "WAITING" });
         await state.insertFill(client, { accountId, instId, baseCcy, tradeId: "auto-sell", billId: "2", source: "ACCOUNT", side: "SELL", fillSize: "1", fillTime: 20, allocationState: "PENDING" });
         await orders.upsertWatermark(client, { accountId, instType: "SPOT", endpoint: "fills", watermark: 30, overlapBegin: 0, healthy: true });
         await orders.upsertWatermark(client, { accountId, instType: "MARGIN", endpoint: "fills", watermark: 30, overlapBegin: 0, healthy: true });
       });
-      const service = new ReconciliationService({ ownerGuard: { isHeld: () => true, onLost: () => {} }, readyGate: new ReadyGate(), safetyWaitMs: 0, transaction: (fn) => tx(db.admin, fn), state, orders, transport: {},
-        ownership: { accountId, managedAfter: 0, enabledInstIds: [instId] } });
+      const service = new ReconciliationService({ ownerGuard: { isHeld: () => true, onLost: () => {} }, readyGate: new ReadyGate(), safetyWaitMs: 0, transaction: (fn) => tx(db.admin, fn), state, orders,
+        transport: {
+          fills: async (instType) => instType === "MARGIN" ? [{ instType, instId, side: "buy", tradeId: "auto-buy", billId: "1", fillTime: "10", fillSz: "1" }] : [],
+          fillsHistory: async () => [], order: async () => ({ tdMode: "cross", clOrdId: "auto-cl" }),
+        },
+        ownership: { accountId, managedAfter: 0, enabledInstIds: [instId], attemptClOrdIds: new Set(["auto-cl"]), holdHoursByInst: { [instId]: "24" }, configHash: "cfg" } });
       // Neither this test nor production-composition.js's reconcile()/recover() ever calls
       // allocateSafeAccountSells directly — reconcileAll must sweep every base with a PENDING
       // ACCOUNT SELL on its own, or a manual sell permanently blocks that base's SYSTEM exits.
       await service.reconcileAll({ accountId, attempts: [], watermarks: [] });
-      assert.deepEqual((await db.admin.query("SELECT disposed_size,sell_state FROM filled_orders WHERE trade_id='auto-buy'")).rows[0], { disposed_size: "1", sell_state: "SOLD" });
+      assert.deepEqual((await db.admin.query("SELECT bill_id,disposed_size,sell_state FROM filled_orders WHERE trade_id='auto-buy'")).rows[0], { bill_id: "1", disposed_size: "1", sell_state: "SOLD" });
       assert.equal((await db.admin.query("SELECT allocation_state FROM filled_orders WHERE trade_id='auto-sell'")).rows[0].allocation_state, "APPLIED");
     });
 

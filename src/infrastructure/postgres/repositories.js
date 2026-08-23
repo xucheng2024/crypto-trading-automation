@@ -73,6 +73,15 @@ export class TradingStateRepository {
         AND source_attempt_cl_ord_id IS NULL`, [accountId, instId, tradeId, sourceAttemptClOrdId]);
   }
 
+  // A terminal order update may persist a fill before the fills endpoint
+  // supplies its chronological account bill key. Recovery may enrich only
+  // that missing key; it never replaces an existing value.
+  async attachFillBillId(tx, { accountId, instId, tradeId, billId }) {
+    return tx.query(`UPDATE filled_orders SET bill_id=$4,version=version+1
+      WHERE account_id=$1 AND inst_id=$2 AND trade_id=$3 AND bill_id IS NULL
+        AND $4 ~ '^[0-9]+$'`, [accountId, instId, tradeId, billId ?? null]);
+  }
+
   async recordAdversePrice(tx, { accountId, instId, price }) {
     return tx.query(`UPDATE filled_orders SET
       min_price_after_fill=LEAST(COALESCE(min_price_after_fill,fill_price),$3::numeric),

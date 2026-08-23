@@ -230,6 +230,9 @@ export class ReconciliationService {
       sourceAttemptClOrdId,
       ...(isBuy ? { holdHours: this.ownership.holdHoursByInst?.[managed.instId], maxHoldHours: this.ownership.maxHoldHoursByInst?.[managed.instId] ?? null, strategyConfigHash: this.ownership.configHash, sellTime: Number(managed.fillTime) + Number(this.ownership.holdHoursByInst?.[managed.instId] ?? 0) * 3_600_000, forceSellTime: this.ownership.maxHoldHoursByInst?.[managed.instId] ? Number(managed.fillTime) + Number(this.ownership.maxHoldHoursByInst[managed.instId]) * 3_600_000 : null, sellState: "WAITING" } : { allocationState: "PENDING" }),
     });
+    if (inserted?.rowCount === 0) await this.state.attachFillBillId?.(tx, {
+      accountId: this.ownership.accountId, instId: managed.instId, tradeId: managed.tradeId, billId: managed.billId,
+    });
     let linked = 0;
     if (managed.source === "SYSTEM" && sourceAttemptClOrdId && inserted?.rowCount === 0) {
       linked = (await this.state.attachSystemFillAttempt?.(tx, { accountId: this.ownership.accountId, instId: managed.instId, tradeId: managed.tradeId, sourceAttemptClOrdId }))?.rowCount ?? 0;

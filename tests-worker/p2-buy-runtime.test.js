@@ -340,8 +340,8 @@ test("P2 BUY settlement records fills with reservation conversion atomically and
   assert.deepEqual(await coordinator.settleBuy({ attempt, fills: [{ tradeId: "late", fillSz: "0.5", fillTime: "5" }], exchangeState: "canceled", accFillSz: "1" }), { settled: false, reason: "FILLS_INCOMPLETE" });
   assert.equal(fills.length, 0); assert.deepEqual(await coordinator.settleBuy({ attempt, fills: [], exchangeState: "canceled", accFillSz: "0" }), { settled: true });
   assert.equal(settled.at(-1).reservation, "RELEASED");
-  assert.deepEqual(await coordinator.settleBuy({ attempt, fills: [{ tradeId: "late", fillSz: "0.5", fillTime: "5" }], exchangeState: "canceled", accFillSz: "0.5" }), { settled: true });
-  assert.equal(fills.length, 1); assert.equal(settled.at(-1).reservation, "CONVERTED");
+  assert.deepEqual(await coordinator.settleBuy({ attempt, fills: [{ tradeId: "late", billId: "7", fillSz: "0.5", fillTime: "5" }], exchangeState: "canceled", accFillSz: "0.5" }), { settled: true });
+  assert.equal(fills.length, 1); assert.equal(fills[0].billId, "7"); assert.equal(settled.at(-1).reservation, "CONVERTED");
   assert.equal(coordinator.canCreateNextBuy({ previousAttempt: { state: "SUBMITTED", decision_market_key: "q1" }, nextMarketKey: "q2" }), false);
   assert.equal(coordinator.canCreateNextBuy({ previousAttempt: { state: "SETTLED", decision_market_key: "q1" }, nextMarketKey: "q1" }), false);
   assert.equal(coordinator.canCreateNextBuy({ previousAttempt: { state: "SETTLED", decision_market_key: "q1" }, nextMarketKey: "q2" }), true);
