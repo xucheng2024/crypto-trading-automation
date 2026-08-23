@@ -35,7 +35,9 @@ Use the existing operations entry points; do not construct ad-hoc Azure, Postgre
    npm run ops:status -- trade --instrument BTC-USDT --request
    ```
 
-   This is SELECT-only on `order_attempts`, `filled_orders`, and `instrument_protection`. Expect tens of seconds. Do not open Postgres from the laptop, dispatch GitHub `production-ops-read`, or invent GRANT SQL while diagnosing. Interpret `DURABLE_EVENT` fills as ledger facts. Treat `CURRENT_STATE_SNAPSHOT` order/protection rows as current state, not historical transitions. `attemptRef` is an anonymous query-local link only.
+   This is SELECT-only on `order_attempts`, `filled_orders`, `instrument_protection`, and `sync_watermarks`. Expect tens of seconds. Do not open Postgres from the laptop, dispatch GitHub `production-ops-read`, or invent GRANT SQL while diagnosing. Interpret `DURABLE_EVENT` fills as ledger facts. Treat `CURRENT_STATE_SNAPSHOT` order/protection rows as current state, not historical transitions. `attemptRef` is an anonymous query-local link only.
+
+   For a PENDING ACCOUNT SELL, interpret `summary.reconciliation` in this order: both SPOT/MARGIN watermarks must exist; `safeWatermark` must be at or after `oldestPendingFillTime`; `activeSystemExits` must be zero; and `invalidBillIds` must be zero. If all hold but `eligiblePendingAccountSells` remains nonzero after a completed recovery cycle, inspect allocation shortfall evidence. Never infer rate limiting or place a replacement SELL from a PENDING row.
 
 5. Distinguish evidence explicitly:
 
