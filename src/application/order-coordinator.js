@@ -138,7 +138,7 @@ export class OrderCoordinator {
           decisionQuoteTs: quote.ts, decisionQuoteHash: await payloadHash(quote), decisionCandleTs: candle.ts, decisionCandleHash: await payloadHash(candle), decisionMarketKey: marketKey,
           executionLimitPrice: executionPrice, instrumentVersion: String(instrument.version ?? "1"), holdHours: intent.holdHours, maxHoldHours: intent.maxHoldHours, strategyConfigHash: intent.configHash,
           accountSnapshotVersion: String(this.account.value?.version ?? "capacity"), executionMode, executionRoute,
-          decisionTriggerPrice: quote.last, decisionReferencePrice: guard.signal.breakoutPrice, decisionReason: "BUY_BREAKOUT_CONFIRMED",
+          decisionTriggerPrice: quote.last, decisionReferencePrice: guard.signal.trigger === "DIP" ? guard.signal.dipPrice : guard.signal.breakoutPrice, decisionReason: guard.signal.trigger === "DIP" ? "BUY_DIP_CONFIRMED" : "BUY_BREAKOUT_CONFIRMED",
         };
         try {
           const reserveStarted = this.clock.nowMs();
@@ -445,11 +445,20 @@ export class OrderCoordinator {
     if (!quote || !candle || !instrument || instrument.state !== "live" || intent.protected || intent.enabled === false || intent.dailyReady === false || !this.isBuyAllowed(intent.instId)) return { allowed: false, reason: "MARKET", evidence: marketEvidence };
     const candleState = candleFreshness({ candle, exchangeNowMs }).state;
     if (candleState !== "FRESH") return { allowed: false, reason: "MARKET", evidence: { ...marketEvidence, candleState } };
-    const limitPrice = roundToStep(intent.dailyLimitPrice, instrument.tickSz, "down");
-    const signal = buySignal({ last: quote.last, askPx: quote.askPx, limitPrice, previousClosedHigh: candle.high });
+    // Signal eligibility (breakout/DIP thresholds, PRICE_OUTSIDE/ASK_ABOVE_LIMIT) is evaluated
+    // against the cached daily_limit_price, matching the planner's evaluation exactly — tickSz
+    // can change intraday, and rounding it here first would make the DIP/breakout thresholds
+    // drift from what the planner already queued against. The tick-rounded execution price is
+    // computed independently in submitBuys() and used only for the ask check, sizing, and payload.
+    const signal = buySignal({ last: quote.last, askPx: quote.askPx, limitPrice: intent.dailyLimitPrice, previousClosedHigh: candle.high });
+    const generationValue = Number(intent.generation);
+    const isFirstGeneration = intent.generation !== null && intent.generation !== undefined && Number.isInteger(generationValue) && generationValue === 0;
+    if (signal.eligible && signal.trigger === "DIP" && !isFirstGeneration) {
+      return { allowed: false, reason: "DIP_FIRST_ENTRY_ONLY", evidence: { last: quote.last, askPx: quote.askPx, dailyLimitPrice: intent.dailyLimitPrice, generation: intent.generation, breakoutPrice: signal.breakoutPrice, dipPrice: signal.dipPrice, trigger: signal.trigger, ...marketEvidence } };
+    }
     // The same snapshot backs both the allow/deny decision and attempt construction in
     // submitBuys, so a quote/candle read can never drift from the freshness check that gated it.
-    return signal.eligible ? { allowed: true, quote, candle, instrument, signal } : { allowed: false, reason: signal.reason, evidence: { last: quote.last, askPx: quote.askPx, dailyLimitPrice: limitPrice, breakoutPrice: signal.breakoutPrice, breakoutGap: subtractDecimal(quote.last, signal.breakoutPrice), priceLimitGap: subtractDecimal(limitPrice, quote.askPx), ...marketEvidence } };
+    return signal.eligible ? { allowed: true, quote, candle, instrument, signal } : { allowed: false, reason: signal.reason, evidence: { last: quote.last, askPx: quote.askPx, dailyLimitPrice: intent.dailyLimitPrice, breakoutPrice: signal.breakoutPrice, dipPrice: signal.dipPrice, breakoutGap: subtractDecimal(quote.last, signal.breakoutPrice), priceLimitGap: subtractDecimal(intent.dailyLimitPrice, quote.askPx), ...marketEvidence } };
   }
   _exitGuard(intent, kind) {
     if (!this.ownerGuard.isHeld()) return { allowed: false, reason: "OWNER" };

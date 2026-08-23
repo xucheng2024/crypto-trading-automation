@@ -41,14 +41,18 @@ export function dailyLimit({ todayOpen, yesterdayOpen, yesterdayClose, bestLimit
 }
 
 export const BUY_BREAKOUT_MULTIPLIER = "1.003";
+export const BUY_DIP_MULTIPLIER = "0.94";
 export const SELL_BREAKDOWN_MULTIPLIER = "0.997";
 
 export function buySignal({ last, askPx, limitPrice, previousClosedHigh }) {
-  if (compareDecimal(last, limitPrice) > 0) return { eligible: false, reason: "PRICE_OUTSIDE" };
   const breakoutPrice = multiplyDecimal(previousClosedHigh, BUY_BREAKOUT_MULTIPLIER);
-  if (compareDecimal(last, breakoutPrice) <= 0) return { eligible: false, reason: "BREAKOUT_NOT_CONFIRMED", breakoutPrice };
-  if (compareDecimal(askPx, limitPrice) > 0) return { eligible: false, reason: "ASK_ABOVE_LIMIT" };
-  return { eligible: true, reason: "ELIGIBLE", breakoutPrice };
+  const dipPrice = multiplyDecimal(limitPrice, BUY_DIP_MULTIPLIER);
+  if (compareDecimal(last, limitPrice) > 0) return { eligible: false, reason: "PRICE_OUTSIDE", breakoutPrice, dipPrice };
+  const breakoutConfirmed = compareDecimal(last, breakoutPrice) > 0;
+  const dipConfirmed = compareDecimal(last, dipPrice) <= 0;
+  if (!breakoutConfirmed && !dipConfirmed) return { eligible: false, reason: "BREAKOUT_NOT_CONFIRMED", breakoutPrice, dipPrice };
+  if (compareDecimal(askPx, limitPrice) > 0) return { eligible: false, reason: "ASK_ABOVE_LIMIT", breakoutPrice, dipPrice };
+  return { eligible: true, reason: "ELIGIBLE", breakoutPrice, dipPrice, trigger: breakoutConfirmed ? "BREAKOUT" : "DIP" };
 }
 
 export function sellBreakdownPrice(previousClosedLow) {

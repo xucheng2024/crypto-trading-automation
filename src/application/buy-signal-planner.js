@@ -151,7 +151,7 @@ export class BuySignalPlanner {
     else if (!this.rest.clockFresh(CLOCK_SYNC_STALE_AFTER_MS)) reason = "CLOCK_SYNC_STALE";
     if (reason) { this.emitDecision(instId, { ...base, reason }); return { queued: false, reason }; }
     const signal = buySignal({ last: quote.last, askPx: quote.askPx, limitPrice: daily.dailyLimitPrice, previousClosedHigh: candle.high });
-    if (!signal.eligible) { this.emitDecision(instId, { ...base, reason: signal.reason, breakoutPrice: signal.breakoutPrice }); return { queued: false, reason: signal.reason }; }
+    if (!signal.eligible) { this.emitDecision(instId, { ...base, reason: signal.reason, breakoutPrice: signal.breakoutPrice, dipPrice: signal.dipPrice }); return { queued: false, reason: signal.reason }; }
     const cycleStarted = this.clock.nowMs();
     let cycle;
     try { cycle = await this.transaction((tx) => this.orders.listBuyCycle(tx, this.accountId, instId, day)); }
@@ -162,10 +162,14 @@ export class BuySignalPlanner {
     const marketKey = await payloadHash({ quote, candle });
     if (previous && previous.decision_market_key === marketKey) { this.emitDecision(instId, { ...base, reason: "DUPLICATE_MARKET_SNAPSHOT" }); return { queued: false, reason: "DUPLICATE_MARKET_SNAPSHOT" }; }
     const generation = previous ? Number(previous.generation) + 1 : 0;
+    if (signal.trigger === "DIP" && generation !== 0) {
+      this.emitDecision(instId, { ...base, reason: "DIP_FIRST_ENTRY_ONLY", breakoutPrice: signal.breakoutPrice, dipPrice: signal.dipPrice, trigger: signal.trigger, generation });
+      return { queued: false, reason: "DIP_FIRST_ENTRY_ONLY" };
+    }
     const decisionId = await createDecisionId({ accountId: this.accountId, instId, strategyDay: day, generation, marketKey });
-    const intent = { intent: "BUY", accountId: this.accountId, instId, decisionId, generation, eligibleSince: this.clock.nowMs(), signalAt: this.clock.nowMs(), strategyDay: day, dailyLimitPrice: daily.dailyLimitPrice, breakoutPrice: signal.breakoutPrice, holdHours: this.strategyConfig.rows[instId].holdHours, maxHoldHours: this.strategyConfig.rows[instId].maxHoldHours, configHash: this.strategyConfig.contentHash, previousAttempt: previous, nextMarketKey: marketKey };
+    const intent = { intent: "BUY", accountId: this.accountId, instId, decisionId, generation, eligibleSince: this.clock.nowMs(), signalAt: this.clock.nowMs(), strategyDay: day, dailyLimitPrice: daily.dailyLimitPrice, breakoutPrice: signal.breakoutPrice, dipPrice: signal.dipPrice, trigger: signal.trigger, holdHours: this.strategyConfig.rows[instId].holdHours, maxHoldHours: this.strategyConfig.rows[instId].maxHoldHours, configHash: this.strategyConfig.contentHash, previousAttempt: previous, nextMarketKey: marketKey };
     const queued = this.coordinator.enqueue(intent);
-    this.emitDecision(instId, { ...base, reason: queued ? "BUY_QUEUED" : "BUY_QUEUE_REJECTED", decisionId, breakoutPrice: signal.breakoutPrice, breakoutGap: subtractDecimal(quote.last, signal.breakoutPrice), priceLimitGap: subtractDecimal(daily.dailyLimitPrice, quote.askPx), generation: intent.generation }, true);
+    this.emitDecision(instId, { ...base, reason: queued ? "BUY_QUEUED" : "BUY_QUEUE_REJECTED", decisionId, breakoutPrice: signal.breakoutPrice, dipPrice: signal.dipPrice, trigger: signal.trigger, breakoutGap: subtractDecimal(quote.last, signal.breakoutPrice), priceLimitGap: subtractDecimal(daily.dailyLimitPrice, quote.askPx), generation: intent.generation }, true);
     return { queued, reason: queued ? "BUY_QUEUED" : "BUY_QUEUE_REJECTED" };
   }
   pipelineCoverage() {

@@ -1,91 +1,47 @@
-# 02 资金、杠杆与买入
+# 02 资金与买入
 
-## 资金口径
+> 历史版本曾维护一套内部杠杆/权益准入模型（`totalEq/adjEq` 冻结目标、`BUY_ADMISSION_LEVERAGE=2.95`、`MAX_STRATEGY_EFFECTIVE_LEVERAGE=3` 等）。提交 `c854fe8`「Use OKX capacity for buy admission」已将其整体移除；下述内容描述当前实现。
 
-计划资金来自最新内存 AccountCapitalSnapshot：
+## 账户快照：仅作为新鲜度门控
 
-~~~text
-unlevered_net_asset_value_usd = OKX totalEq
-adjusted_net_equity_usd = min(totalEq, adjEq)
-~~~
+`AccountCapitalSnapshot`（`src/application/trading-engine.js`）仍订阅 account/balance WS 并保留 `totalEq/adjEq`，但只用于两件事：
 
-`totalEq` 是 OKX 已按 USD 汇总且已反映负债的账户净权益。例：130 USDT + 价值 20 USDT 且没有对应借款的 crypto，`totalEq=150`；借 100 USDT 再买入价值 100 USDT 的币不会把净权益虚增为 250。
+- 校验快照本身有效（`totalEq>0 且 adjEq>0` 才接受更新，否则整条更新被丢弃）；
+- 提供 `account.fresh(ACCOUNT_MAX_AGE_MS)`（默认 5000ms）给 READY 门控和每次 `_buyGuard` 使用。
 
-要求：
+`totalEq/adjEq` 的具体数值不再参与任何资金规划、杠杆计算或订单 sizing；应用不维护 `managed_fill_remaining_exposure_usd`、`strategy_effective_leverage`、冻结目标资金等概念，也不再区分 SYSTEM/ACCOUNT managed fill 的 exposure 归属。只在启动、相关 Private WS 重连、过期或矛盾时用 REST 恢复账户数据；Public/Business 重连不触发无关的全账户查询。
 
-- 不使用固定 OKX_ORDER_SIZE=100 作为整轮买入资金。
-- 快照由 account/balance WS 增量更新，以 `totalEq/adjEq` 为共享账户净资产事实值；应用不保存或拆算币种级手续费、借款本金和利息。本策略 exposure 使用全部 managed BUY fills（SYSTEM 及管理起点后的 ACCOUNT）未卖完部分和新鲜 `bidPx` 做保守估值。
-- 只在启动、相关 Private WS 重连、过期或矛盾时用 REST 恢复账户数据；Public/Business 重连不触发无关的全账户查询。
-- 不再自行执行“资产减负债”或手续费/利息累计公式，避免与 OKX `totalEq/adjEq` 重复计算。
-- 0.1 USDT 以下尘埃仍参与净资产和风险计算。
-- 首次满足 BUY 信号并创建 generation 0 时冻结本轮目标资金；同一 `instId + strategy_day` 的后续 IOC generation 只消耗剩余目标，风险预算下降时可缩单，不能扩大目标。
+## 买入容量：OKX max-avail-size 是唯一权威来源
 
-每个新币种本轮的冻结目标资金默认直接等于进入首次风险评估时 OKX `totalEq` 的可信正值（例如 130 USDT + 价值 20 USDT crypto = 150 USDT），再按 execution_limit_price/lotSz 换算 base size；`totalEq<=0` 或无效时不创建轮次。不设置持仓币种数量上限；本次 max-avail 或剩余 BUY 准入空间更小时必须缩单。
+不设杠杆上限、不设账户级 exposure 预算、不设持仓币种数量上限、不设每轮冻结目标资金。每一批候选 BUY intent 在 `OrderCoordinator.prepareBuys()`（`src/application/order-coordinator.js`）中：
 
-## 三倍硬限制
+1. 按 `executionMode`（固定为 `cross`）与 `capacityCcy`（路由的报价币种，通常为 USDT）分组；
+2. 对每一组调用一次 `GET /api/v5/account/max-avail-size`（margin 路由带 `ccy`），取回 `availBuy`；
+3. `availBuy<=0` 的 instId 记录 `intent.waitForRiskVersion = 当前 account.version`，暂缓提交，直到账户风险快照产生新版本号才重新尝试（`INSUFFICIENT_FUNDS_WAIT_RISK_VERSION`）；
+4. `availBuy>0` 的 instId 带着这个数值进入 `submitBuys()`。
+
+`submitBuys()` 中按此计算下单量（`TRADE_FEE_RATE=0.0005` 仍是代码常量，作为手续费缓冲；不从 OKX fee tier 动态同步，也不按 feeCcy 分摊）：
 
 ~~~text
-AUTO_LOAN_REQUIRED=true
-TRADE_FEE_RATE=0.0005
-MAX_CONFIGURED_LEVERAGE=3
-MAX_STRATEGY_EFFECTIVE_LEVERAGE=3
-BUY_ADMISSION_LEVERAGE=2.95
-MIN_MARGIN_RATIO=1
+executionPrice = roundToStep(dailyLimitPrice, tickSz, down)
+maxNotional = availBuy
+size = roundToStep(maxNotional / (executionPrice * (1 + TRADE_FEE_RATE)), lotSz, down)
 ~~~
 
-`MAX_STRATEGY_EFFECTIVE_LEVERAGE=3` 是本策略运行时硬停止线；`BUY_ADMISSION_LEVERAGE=2.95` 是订单准入线，用于吸收手续费、取整和快照到提交之间的小幅变化。它不代表共享账户总杠杆；账户级安全继续依赖 OKX 的新鲜 `mgnRatio`、`adjEq` 和订单时点 `max-avail-size`。
-
-`TRADE_FEE_RATE=0.0005` 是代码常量而非可调运行配置，不从 OKX fee tier 动态同步，也不按 feeCcy 分摊。BUY 资金规划使用 `estimated_order_cost = order_notional * (1 + TRADE_FEE_RATE)`；SELL 只用相同费率估算成本，不影响 base 下单数量。实际账户变化继续以 OKX `totalEq/adjEq` 和余额为准。借款利息不单独计算或预测。
-
-首版固定 `ACCOUNT_MODE=MULTI_CURRENCY`。启动读取 `GET /api/v5/account/config` 并严格要求 `acctLv=3`；不匹配则保持 NOT_READY，不自动切换账户模式，也不实现 Portfolio Margin 分支。
-
-通过 `GET /api/v5/account/leverage-info?ccy=USDT&mgnMode=cross` 读取币种级配置杠杆并要求 `lever <= 3`；本策略 effective leverage 作为独立门控。
-
-~~~text
-strategy_committed_exposure_usd
-  = managed_fill_remaining_exposure_usd
-  + system_unfilled_or_reserved_buy_exposure_usd
-
-strategy_effective_leverage
-  = strategy_committed_exposure_usd / adjusted_net_equity_usd
-
-remaining_leverage_capacity
-  = BUY_ADMISSION_LEVERAGE * adjusted_net_equity_usd
-  - strategy_committed_exposure_usd
-~~~
-
-adjusted_net_equity_usd 直接取 OKX `totalEq` 与 `adjEq` 的较小可信值；二者差异超过配置容差时先恢复快照并 BUY HALT，不能选择更乐观的一方。
-
-`managed_fill_remaining_exposure_usd` 统计管理起点之后配置交易对的所有已确认 SPOT/MARGIN BUY fills，其 remaining 为 `fill_size-disposed_size`，按新鲜 `bidPx` 保守估值，包括尘埃。Margin 与 Spot 路由共享同一账户级 exposure 上限；SYSTEM/ACCOUNT SELL 都增加同一个 `disposed_size`。切换前余额和 FUTURES/SWAP/OPTION fills 不进入本策略 exposure；不接受 isolated fill。
-
-`system_unfilled_or_reserved_buy_exposure_usd` 只统计本系统尚未转成 managed fill 的 BUY 未成交/reservation。BUY fill 到账时，同量 reservation 转入 managed fill exposure，任何时刻同一数量只计一次。
-
-如果 adjusted_net_equity_usd <= 0，或任一必要估值无法确定，直接 BUY HALT，不能计算或放行杠杆。
-
-候选新增订单成本取以下最小值，反推 order_notional 和 base `sz`：
-
-- 本轮剩余计划资金；
-- 本次订单专用 max-avail-size；
-- remaining_leverage_capacity；
-- instrument/lot/min 规则允许值。
+`size < minSz` 时该 intent 以 `MINIMUM_SIZE` 拒绝，不重试更小路由。Margin 路由的 `availBuy` 已反映自有 USDT、自动借贷额度和 OKX 风控；Spot-only 路由只反映自有资金；两者不互相兜底。
 
 启动和 BUY 前必须确认：
 
 - API 域名和账户注册实体匹配；
-- Cross Margin/account level 可用；
-- autoLoan=true；
-- 相关 scope 配置杠杆不超过 3；
-- 订单时点 `max-avail-size.availBuy` 足以覆盖可用资金与可借额度；不维护独立借贷流动性状态；
+- Cross Margin/account level 可用，`autoLoan=true`（`GET /api/v5/account/config` 确认；系统不自动修改账户设置）；
 - account/risk/instrument/quote 快照新鲜；
 - instrument 为 live，系统无交易维护；
-- `mmr=0` 时允许 `mgnRatio` 为空；`mmr>0` 时必须 `mgnRatio>1`。首版不再增加未定义的业务缓冲值。
-- 开启新 BUY 轮次前，当前 instId 没有本策略非尘埃 managed fill、活动 BUY generation 或未释放 BUY reservation；同一轮已产生的 SYSTEM managed fills 不阻止该轮继续消耗冻结目标，但其他轮次或 ACCOUNT managed fill 会停止后续 IOC。共享账户同币种其他未纳管余额不参与该判断。
+- 订单时点 `max-avail-size.availBuy` 足以覆盖 minSz 对应的最小下单成本；不维护独立借贷流动性状态；
+- 开启新 BUY 轮次前，当前 instId 没有本策略非尘埃 managed fill、活动 BUY generation 或未释放 BUY reservation（见 §BUY_WATCH）。
 
-任何必要字段缺失、借款失败、账户风险不安全、本策略杠杆达到 3 或候选预计杠杆超过 BUY 准入线时停止本次 BUY。SELL 和 DELIST 不受 BUY HALT 阻止。
+任何必要字段缺失、快照不新鲜或 `max-avail-size` 请求失败（`MAX_AVAIL_FAILED`）时该批候选直接跳过，不猜测容量。SELL 和 DELIST 不受 BUY 容量检查影响，且在同一 drain 周期中优先于 BUY（见 §BUY_WATCH 命中条件 2）。
 
-本策略 managed fills 使用新鲜 bidPx 估值；尘埃 fill 同样进入本策略 exposure，不存在持仓名额判断。
-
-3 倍是本策略运行时硬停止线，2.95 是默认订单准入不变量。共享账户其他活动不归本策略管理；若它们降低 `adjEq/mgnRatio/max-avail-size`，本系统自然停止或缩小 BUY。
+系统不调用、缓存或对账 `GET /api/v5/account/max-loan`：它不参与 BUY 准入，也不能替代订单时点的 `max-avail-size.availBuy`、风险快照和原子 reservation。
 
 ## Daily limit
 
@@ -120,30 +76,33 @@ BUYING -> BUY_WATCH | RISK_HALTED | TARGET_FILLED | CANCELLED | ERROR
 RISK_HALTED -> BUY_WATCH
 ~~~
 
-BUY_WATCH 是纯内存状态，重启后由最新 ticker、candle 和 daily limit 重新计算；当天未完成 BUY 轮次的冻结目标从已有 BUY attempts 恢复并按真实 fills 重算剩余量，不建立独立 buy_cycles 表。attempt 生命周期只存在于统一订单账本。
+BUY_WATCH 是纯内存状态，重启后由最新 ticker、candle 和 daily limit 重新计算；当天是否已有持仓/进行中的 BUY attempt（用于判定是否允许下一 generation）从已有 BUY attempts 和 managed fills 直接查询恢复，不建立独立 buy_cycles 表，也不缓存任何资金额度。attempt 生命周期只存在于统一订单账本。
 
 Ticker 规则：
 
 1. last <= daily_limit_price：进入或保持 BUY_WATCH。
 2. last > daily_limit_price：立即退出；该 ticker 不得买入。
 3. 读取最近一根 `confirm=1` 的 OKX 原生 3m candle high。
-4. 只有 `last > previous_closed_high * 1.003` 才满足突破条件；严格大于，相等不触发。
+4. 触发条件为下列两条之一（满足其一即可,`buySignal()`/`src/domain/rules.js`）：
+   - **BREAKOUT**：`last > previous_closed_high * 1.003`；严格大于,相等不触发。
+   - **DIP**：`last <= daily_limit_price * 0.94`（相对当日限价再跌至少 6%）；**仅允许触发当日首个 BUY generation（`generation === 0`）**——同一 instId 当天一旦进入 generation 1+，只有 BREAKOUT 能继续买入,DIP 不再生效,避免下跌途中反复加仓。两条件同时成立时 BREAKOUT 优先。
 5. 同一新鲜 quote 必须满足 askPx <= execution_limit_price。
 6. 不满足第 5 条时不得调用 max-avail-size，也不得提交必然零成交的 IOC。
+7. DIP 只改变"是否触发买入"，不影响成交价格上限（仍是 `execution_limit_price`）、下单量计算或 `max-avail-size` 风控。
 
-进入或保持 `BUY_WATCH` 的前提是 instId 仍为 `live` 且不存在 active protection（BLACKLISTED/EXITING/EXITED/DELIST_DUST）。该条件在 watch 事件处理、创建 exposure reservation 前和最终提交 IOC 前均检查；任一点失效都终止本次 BUY。已经提交的 IOC 不在此路径撤销，只按实际结果对账。
+进入或保持 `BUY_WATCH` 的前提是 instId 仍为 `live` 且不存在 active protection（BLACKLISTED/EXITING/EXITED/DELIST_DUST）。该条件在 watch 事件处理、创建 reservation 前和最终提交 IOC 前均检查；任一点失效都终止本次 BUY。已经提交的 IOC 不在此路径撤销，只按实际结果对账。
 
 命中条件后：
 
-1. 校验 AccountCapitalSnapshot 和 instrument version，把不含数量的 BUY 意图放入内存优先级队列；排队阶段不请求或缓存 max-avail。
-2. Order Coordinator 按 `(generation, eligible_since, instId)` 立即选当前最多 5 个不同 instId；不等待凑批。这个只读准备阶段不占不可抢占的 mutation submit slot，并逐项重新校验 READY、quote、account risk freshness、instrument/protection 和业务状态。
-3. 对仍合格项固定以 `tdMode=cross` 调用一次 `GET /api/v5/account/max-avail-size`；调用前冻结每个交易对的 `execution_route`，刷新不能改变当前批次。Margin 路由的 `availBuy` 已反映自有 USDT、自动借贷额度和 OKX 风控，Spot-only 路由只反映自有资金；返回零或下单失败都不会用另一条路由重试。每项响应的 `availBuy` 是 quote currency（本策略为 USDT），先与计划资金和剩余杠杆空间取最小值，再除以 `1.0005 * execution_limit_price` 得到 base `sz`；不能把 `availBuy` 直接当 base 数量。
-4. max-avail 返回后才申请 mutation submit slot；若此时出现 DELIST/SELL，BUY 释放申请并回队列，不能挡住退出。取得 slot 后在同一短事务内取得 account-scoped transaction advisory lock，重新汇总 active BUY reservations，并按上述确定顺序逐项扣减剩余杠杆容量、创建最多 5 个唯一 BUY `PREPARED` attempt。容量不足的后续项不创建 attempt，保持 RISK_HALTED 等待账户状态变化。每个 attempt 写入 exposure reservation、本轮 `strategy_day`、generation、首次 generation 冻结的目标资金、`decision_quote_ts`、规范化 quote payload hash、`decision_candle_ts/candle_hash`、instrument version/execution_limit_price、hold_hours/config hash 和本次准入使用的 equity/exposure/version 摘要。后续 generation 继承同一冻结目标。
+1. 校验 quote/candle/daily/instrument/protection 状态，把不含数量的 BUY 意图放入内存优先级队列（`OrderCoordinator.pending.BUY`，按 instId 去重，同一 instId 只保留最新意图）；排队阶段不请求或缓存 max-avail。
+2. Order Coordinator 按 `(generation, eligible_since, instId)` 排序，立即选当前最多 5 个候选；不等待凑批。这个只读准备阶段不占不可抢占的 mutation submit slot，并逐项重新校验 TRADING_MODE=FULL、owner lock、READY、account freshness、clock freshness、quote/candle freshness、instrument/protection 和 buySignal（即完整 `_buyGuard`）。
+3. 对仍合格项按 `(executionMode, capacityCcy)` 分组，各组调用一次 `GET /api/v5/account/max-avail-size`；调用前冻结每个交易对的 `execution_route`，刷新不能改变当前批次。Margin 路由的 `availBuy` 已反映自有 USDT、自动借贷额度和 OKX 风控，Spot-only 路由只反映自有资金；返回零或下单失败都不会用另一条路由重试，也不会用计划资金或杠杆空间去限制它——`availBuy` 就是当前订单允许消耗的全部报价币种资金。`availBuy<=0` 的 instId 记录当前 `account.version` 并暂缓，直到该版本号前进才重新尝试。每项响应的 `availBuy` 是 quote currency（本策略为 USDT），除以 `(1+TRADE_FEE_RATE) * execution_limit_price` 再按 lotSz 向下取整得到 base `sz`；不能把 `availBuy` 直接当 base 数量。
+4. max-avail 返回后才申请 mutation submit slot；若此时出现 DELIST/SELL，BUY 释放申请并回队列，不能挡住退出。取得 slot 后在同一短事务内对每个候选再次执行完整 `_buyGuard`（含 askPx 相对 execution_limit_price 的检查、`MINIMUM_SIZE` 检查），逐个调用 `orders.reserveBuy()`（Postgres advisory lock + 唯一约束）原子创建 BUY `PREPARED` attempt，最多 5 个。被拒绝的候选只记录 block 原因，不重试当前批次；下一轮 drain 时如仍满足信号会重新排队。每个 attempt 写入 `decision_quote_ts/decision_quote_hash`、`decision_candle_ts/decision_candle_hash`、`decision_market_key`、`execution_limit_price`、`instrument_version`、`hold_hours/max_hold_hours`、`strategy_config_hash`、`account_snapshot_version`（数据库层 `order_attempts_buy_decision_evidence_ck` 约束强制这些字段全部非空）。
 5. 事务结束后重新校验 TRADING_MODE=FULL、owner lock、READY、当前最新的新鲜 quote/account risk 和 instrument/protection；quote version 变新本身不导致失败，只要 last/askPx/3m 条件仍成立即可立即提交。若已不安全或 instrument/config 被移除，将 PREPARED 置为 NOT_CREATED 并原子释放 reservation。
 
-本轮已消费资金只按该轮 SYSTEM BUY fills 计算：`sum(fillSz * fillPx * 1.0005)`；剩余目标为首次冻结目标减去该值，活动 attempt 的 reservation 另行占用，不能重复使用。后续 SYSTEM/ACCOUNT SELL 只改变 managed remaining，不返还或重新打开本轮 BUY 预算，避免买卖循环。跨日后才回补到的 SYSTEM BUY fill 仍按其 BUY attempt 的旧 strategy_day、冻结目标和配置归属，不能计入新一天。
+同一 `instId + strategy_day` 不维护累计消费预算或冻结目标；每个 generation 的下单量都由当时最新的 `max-avail-size.availBuy` 独立决定。后续 SYSTEM/ACCOUNT SELL 不影响下一次 BUY 的容量计算，容量完全交给 OKX 实时判断，避免买卖循环。跨日后才回补到的 SYSTEM BUY fill 仍按其 BUY attempt 的旧 strategy_day 和配置归属，不能计入新一天。
 
-`decision_market_key = hash(quote.ts,last,askPx,bidPx,previous_closed_candle_ts,closed_candle_hash)`。同一 instId 最多一条 pending BUY 意图，只保留最新市场投影。除首次 generation 外，新 attempt 必须满足 quote/candle 时间不倒退且 decision_market_key 与上一 generation 不同；因此同毫秒但价格不同的 ticker、新 ticker、新 closed 3m candle 或同 ts 的 candle 修正都可触发重新判断，完全重复/倒序事件不能重发。closed candle 到达或被修正时也用最新新鲜 quote 重评，避免 ticker 先到、candle 后到造成漏判。IOC 在途或集中限频器等待期间到达的事件全部合并，attempt 原子结算后直接用最新且已变化的 market key 重新判断。只要仍是同一 strategy_day、信号与全部准入条件成立且剩余目标不低于最小下单量，就可串行创建下一 generation；不设置额外 cooldown，也不并发提交。
+`decision_market_key = hash(quote.ts,last,askPx,bidPx,previous_closed_candle_ts,closed_candle_hash)`。同一 instId 最多一条 pending BUY 意图，只保留最新市场投影。除首次 generation 外，新 attempt 必须满足 quote/candle 时间不倒退且 decision_market_key 与上一 generation 不同；因此同毫秒但价格不同的 ticker、新 ticker、新 closed 3m candle 或同 ts 的 candle 修正都可触发重新判断，完全重复/倒序事件不能重发。closed candle 到达或被修正时也用最新新鲜 quote 重评，避免 ticker 先到、candle 后到造成漏判。IOC 在途或集中限频器等待期间到达的事件全部合并，attempt 原子结算后直接用最新且已变化的 market key 重新判断。只要仍是同一 strategy_day、信号与全部准入条件成立且当时的 `availBuy` 换算出的下单量不低于 minSz，就可串行创建下一 generation；不设置额外 cooldown，也不并发提交。
 
 首版不调用 `order-precheck`。它不能替代实际下单时的新鲜 quote、max-avail、账户风险和最终 OKX 校验，却会引入“每个部署/配置版本首单”的额外状态；相同 payload 契约由 fake transport、只读账户预检和首单正常 UNKNOWN/失败处理覆盖。
 
@@ -168,44 +127,43 @@ autoLoan 是账户级配置，不是普通下单字段。启动和后台刷新�
 
 ## IOC 结果
 
-- 全部或部分成交：保存每个 tradeId，按实际成交额扣减本轮目标；仍有可下单剩余量时，上一 attempt 原子结算后由非重复且不倒退的合格 `decision_market_key` 创建下一 generation。
+- 全部或部分成交：保存每个 tradeId 并转入 managed fill；只要当前 `availBuy` 换算出的下单量仍不低于 minSz，上一 attempt 原子结算后由非重复且不倒退的合格 `decision_market_key` 创建下一 generation。
 - 零成交：该 generation 原子结算并释放 reservation；只有非重复且不倒退的新 `decision_market_key` 合格时才能创建下一 generation。
 - 结果未知：保留 reservation，按 clOrdId/ordId 查询。
 - NOT_CREATED：原子释放 reservation；只有 decision_market_key 或导致失败的 account/instrument/config/protection version 已变化时才允许新 generation。相同 payload hash、相同依赖版本和相同 OKX sCode/reason 不得循环重试。
 - 信号、行情新鲜度、额度或风险暂时失效：暂停提交并回到观察；同一 strategy_day 内后续更新恢复合格时继续原轮次。
-- 本轮剩余目标低于交易所最小值、strategy_day 结束、交易对从部署配置移除、进入 instrument protection 或出现其他轮次/非尘埃 ACCOUNT managed fill：结束本轮；已产生的 managed fills 仍保留 SELL/DELIST 管理。
+- 本次 `availBuy` 对应下单量低于交易所最小值（`MINIMUM_SIZE`）、strategy_day 结束、交易对从部署配置移除、进入 instrument protection 或出现其他轮次/非尘埃 ACCOUNT managed fill：结束本轮；已产生的 managed fills 仍保留 SELL/DELIST 管理。
 
-NOT_CREATED，或 exchange terminal 且 fills 完整后，在原子结算事务中释放未成交 reservation；实际成交数量转入 managed fill exposure。仅观察到交易所终态但 fills 未补齐时不能提前释放。
+NOT_CREATED，或 exchange terminal 且 fills 完整后，在原子结算事务中释放未成交 reservation；实际成交数量转入 managed fill（`insertFill`）。仅观察到交易所终态但 fills 未补齐时不能提前释放。
 
-同 instId 最多一个 IOC 在途。不同币种可以并行完成只读检查，但账户 reservation 必须原子，确保合计预计杠杆不超过 BUY 准入线。
+同 instId 最多一个 IOC 在途（`ACTIVE_BUY_ATTEMPT` 门控）。不同币种可以并行完成只读检查，但账户 reservation 必须通过 `pg_advisory_xact_lock` 原子完成，确保同一 clOrdId/业务键只被创建一次。
 
 ## 大面积下跌与持续下跌
 
-- BTC 和大量币同时触发时，不平均切碎资金，也不突破 2.95 准入线。系统按 `generation -> 首次合格时间 -> instId` 确定顺序，单币默认冻结目标等于当时 `2.95 * adjusted equity`，因此最先合格的单币可以使用全部账户级安全容量；实际规模仍取该目标、OKX `max-avail-size` 和剩余容量的最小值。原子 reservation 会拒绝后续重复占用，资金不足的候选保留观察，待容量或账户状态变化后重评。
-- generation 0 永远排在任何 generation 1+ 前，避免某个币的连续 IOC 抢占所有提交机会；这只提供一次公平尝试，不承诺为每个币预留资金。
-- 买入后价格不再严格高于 `previous_closed_high * 1.003` 时，不满足突破条件，暂停该币后续 IOC，不在下跌途中自动摊平。之后出现新的合格突破市场投影时，只能继续首次冻结目标的剩余部分；目标用完后不因再跌而追加。
-- 多币下跌使 `adjEq/mgnRatio/max-avail-size` 恶化时，所有新 BUY 立即 fail closed；已成交仓位仍按各自 sell_time/保护价管理，SELL/DELIST 不被 BUY halt 阻塞。
-- 若人工先买入系统此前零成交或尚未买到的配置币种，非尘埃 ACCOUNT cross BUY fill 立即纳管并终止该 instId 当前 SYSTEM BUY 轮次；若系统 IOC 已发出则只对账其结果，两边真实 fills 都纳管，但不再创建下一 generation。处于 EXITING/BLACKLISTED 的币则直接进入退出路径，不重新进入正常持有。
+- BTC 和大量币同时触发时，不平均切碎资金：`drainOnce()` 每轮固定取当前最多 5 个 BUY 候选（`generation -> eligible_since -> instId` 排序），逐个查询各自路由的 `max-avail-size` 并独立 sizing；不存在共享的账户级 exposure 预算，也不预先按币种分配份额。资金不足的候选记录 `waitForRiskVersion` 并保留观察，待账户风险快照产生新版本号后重新参与。
+- generation 0 永远排在任何 generation 1+ 前，避免某个币的连续 IOC 抢占所有提交机会；这只提供一次公平的排队顺序，不承诺为每个币预留资金。
+- 买入后价格不再严格高于 `previous_closed_high * 1.003` 时，不满足突破条件，暂停该币后续 IOC，不在下跌途中自动摊平。之后出现新的合格突破市场投影（`decision_market_key` 变化）时可以继续下一 generation；每个 generation 的下单量都由当时最新的 `availBuy` 独立决定，不存在"用完即止"的固定目标。
+- 多币下跌使账户可用资金枯竭时，OKX `max-avail-size` 会自然把 `availBuy` 收敛到 0，新 BUY 因而自动 fail closed，不需要本地重算杠杆；已成交仓位仍按各自 sell_time/保护价管理，SELL/DELIST 不被 BUY 容量不足阻塞。
+- 若人工先买入系统此前零成交或尚未买到的配置币种，非尘埃 ACCOUNT cross BUY fill 立即纳管并终止该 instId 当前 SYSTEM BUY 轮次（`STRATEGY_POSITION_EXISTS`）；若系统 IOC 已发出则只对账其结果，两边真实 fills 都纳管，但不再创建下一 generation。处于 EXITING/BLACKLISTED 的币则直接进入退出路径，不重新进入正常持有。
 
 ## 必测不变量
 
-- 130 + 20 = 150；固定费用只用于 0.05% 留量，借款利息不建模，净值直接采用 OKX `totalEq/adjEq`。
-- totalEq 已反映负债时不重复扣减；adjEq 更低时使用更保守分母。
 - ticker 等于 daily limit 时仍必须严格满足 `last > previous_closed_high * 1.003`。
-- askPx 大于 limit 时不调用下单专用 REST。
-- 完全重复/倒序 ticker+candle 不产生新 generation；同毫秒但 payload 不同的 ticker或新 closed candle 可以重评。IOC 在途或限频等待时只合并保留最新市场投影，上一 attempt 原子结算后才允许串行创建下一 generation。
-- IOC 部分成交累计不超过冻结计划量。
-- 同一 BUY 轮次可在同一根 closed 3m candle 内连续 IOC；最新信号/风控失效时暂停，当天恢复后继续，累计不超过冻结目标。
-- 两个币种并发候选无法重复使用同一杠杆空间。
-- BUY fill 与其未成交 reservation 在转换期间不会对同一数量重复计算 exposure。
-- attempt 的 SETTLED、真实 fills、reservation 转换/释放在同一事务完成；崩溃不能暴露“已结算但 fills 尚未计入”的窗口。
-- ACCOUNT/SYSTEM SELL 不返还当日 BUY 预算；迟到 fill 始终归原 BUY strategy_day。
+- askPx 大于 limit 时不调用下单专用 REST（`ASK_ABOVE_LIMIT` 在 max-avail 之前已经过滤）。
+- 完全重复/倒序 ticker+candle 不产生新 generation；同毫秒但 payload 不同的 ticker 或新 closed candle 可以重评。IOC 在途或限频等待时只合并保留最新市场投影，上一 attempt 原子结算后才允许串行创建下一 generation。
+- IOC 部分成交累计不超过该 attempt 的 `plannedSize`（由下单时的 `availBuy` 决定，不是账户级预算的一部分）。
+- 同一 BUY 轮次可在同一根 closed 3m candle 内连续 IOC；最新信号/风控失效时暂停，当天恢复后继续，每次都重新查询 `availBuy`。
+- 两个币种并发候选各自独立查询 `max-avail-size`，不共享或预留同一份容量数字（是否真的有钱由 OKX 在下单时判定）。
+- BUY fill 与其未成交 reservation 在转换期间不会对同一数量重复计入 managed fill。
+- attempt 的 SETTLED、真实 fills、reservation 转换/释放在同一事务完成；崩溃不能暴露"已结算但 fills 尚未计入"的窗口。
+- 迟到 fill 始终归原 BUY attempt 的 strategy_day，不计入新一天。
 - 共享账户可已有余额、负债、订单和仓位；它们不会进入本策略 ledger，也不会阻塞 READY。
-- 外部活动降低账户风险或额度时，BUY 由 `adjEq/mgnRatio/max-avail-size` fail closed 或缩单。
+- 外部活动降低账户可用资金时，下一次 `max-avail-size` 查询自然反映出更小的 `availBuy`，BUY 随之缩单或 fail closed，无需本地重算。
 - autoLoan 只校验账户配置，不出现在 order payload。
-- max-avail `availBuy` 按 quote currency 处理，按固定 0.05% 费用留量后计算 base `sz`。
+- max-avail `availBuy` 按 quote currency 处理，按 `TRADE_FEE_RATE=0.0005` 留量后计算 base `sz`。
 - REST `expTime` 只在 header；MARGIN IOC 不发送 `posSide` 或 Futures-mode-only `ccy`。
-- stale/缺失风险数据 fail closed。
+- stale/缺失风险数据或 `max-avail-size` 请求失败时 fail closed，不猜测容量。
 - mutation 超时后不会盲目重发。
-- account totalEq/adjEq 缺失或异常时 BUY HALT；应用不使用币种级负债重算净值。
+- account `totalEq/adjEq` 缺失或异常时该次 account 更新被丢弃，进而使 `account.fresh()` 过期触发 NOT_READY；`totalEq/adjEq` 的数值本身不再参与容量计算。
+- 每个 BUY attempt 必须携带完整决策证据字段（quote/candle hash、执行价、hold_hours、config hash、account snapshot version），由 `order_attempts_buy_decision_evidence_ck` 约束强制。
 - 并发 BUY 判断通过数据库原子写入，确保同一交易日只产生一个不可变 daily limit。

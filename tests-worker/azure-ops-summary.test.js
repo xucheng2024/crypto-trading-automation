@@ -128,6 +128,20 @@ test("Azure ops summary separates waiting, policy, opportunity, and safety block
   assert.deepEqual(trading.blockClasses, { LIKELY_RECOVERABLE: 2, MARKET_MOVED: 0, SAFETY_BOUNDARY: 0 }); assert.deepEqual(trading.blockStages, { PLANNER: 1, AVAILABILITY: 1 });
 });
 
+test("Azure ops summary classifies a DIP_FIRST_ENTRY_ONLY block as policy, not a safety block", () => {
+  assert.equal(classifyDecision("DIP_FIRST_ENTRY_ONLY"), "policy");
+  const blockEvents = [{ timestamp: "1", type: "block_evidence", stage: "COORDINATOR_GUARD", reason: "DIP_FIRST_ENTRY_ONLY", decisionId: "D1", instId: "BTC-USDT", generation: 1, dipPrice: "94" }];
+  const trading = summarizeTrading([], [], new Map(), [], blockEvents);
+  assert.equal(trading.blocked.length, 0);
+  assert.deepEqual(trading.blockedReasons, {});
+  assert.deepEqual(trading.blockClasses, { LIKELY_RECOVERABLE: 0, MARKET_MOVED: 0, SAFETY_BOUNDARY: 0 });
+  assert.equal(trading.policy.length, 1);
+  assert.equal(trading.policy[0].reason, "DIP_FIRST_ENTRY_ONLY");
+  assert.equal(trading.policy[0].optimizationClass, undefined);
+  const timeline = trading.attemptTimelines.find((row) => row.decisionId === "D1").timeline[0];
+  assert.equal(timeline.evidence.optimizationClass, undefined, "the attempt timeline must not label a policy skip as a safety-boundary block");
+});
+
 test("Azure ops summary labels lifecycle telemetry separately from durable recovery confirmation", () => {
   const trading = summarizeTrading([], [], new Map(), [], [], [
     { type: "fill_reconciliation", reason: "FILL_BATCH_COMMITTED", inserted: "2", linked: "1" },

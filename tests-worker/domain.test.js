@@ -26,8 +26,13 @@ test("daily, duration, clock, buy, leverage and exit boundaries are pure", () =>
   assert.equal(dailyLimit({ todayOpen: "100", yesterdayOpen: "100", yesterdayClose: "110", bestLimit: "90", tickSz: "0.1" }).skipped, false);
   assert.equal(dailyLimit({ todayOpen: "100", yesterdayOpen: "100", yesterdayClose: "110.01", bestLimit: "90", tickSz: "0.1" }).skipped, true);
   assert.equal(buySignal({ last: "90", askPx: "90", limitPrice: "90", previousClosedHigh: "89" }).eligible, true);
+  assert.deepEqual(buySignal({ last: "84", askPx: "84", limitPrice: "90", previousClosedHigh: "89" }), { eligible: true, reason: "ELIGIBLE", breakoutPrice: "89.267", dipPrice: "84.6", trigger: "DIP" });
+  assert.equal(buySignal({ last: "84.6", askPx: "84.6", limitPrice: "90", previousClosedHigh: "89" }).trigger, "DIP");
   assert.equal(buySignal({ last: "89.267", askPx: "89.267", limitPrice: "90", previousClosedHigh: "89" }).reason, "BREAKOUT_NOT_CONFIRMED");
-  assert.equal(buySignal({ last: "90", askPx: "90.1", limitPrice: "90", previousClosedHigh: "89" }).reason, "ASK_ABOVE_LIMIT");
+  assert.equal(buySignal({ last: "85", askPx: "85", limitPrice: "90", previousClosedHigh: "89" }).reason, "BREAKOUT_NOT_CONFIRMED");
+  assert.deepEqual(buySignal({ last: "80", askPx: "80", limitPrice: "90", previousClosedHigh: "10" }), { eligible: true, reason: "ELIGIBLE", breakoutPrice: "10.03", dipPrice: "84.6", trigger: "BREAKOUT" });
+  assert.deepEqual(buySignal({ last: "90.1", askPx: "90", limitPrice: "90", previousClosedHigh: "89" }), { eligible: false, reason: "PRICE_OUTSIDE", breakoutPrice: "89.267", dipPrice: "84.6" });
+  assert.deepEqual(buySignal({ last: "90", askPx: "90.1", limitPrice: "90", previousClosedHigh: "89" }), { eligible: false, reason: "ASK_ABOVE_LIMIT", breakoutPrice: "89.267", dipPrice: "84.6" });
   assert.equal(sellBreakdownPrice("100"), "99.7");
   assert.deepEqual(delistPlan({ fillSize: "2", disposedSize: "0.5", availableSize: "1.2", availSell: "1", lotSz: "0.1", minSz: "0.1", price: "10" }), { executable: true, size: "1" });
 });

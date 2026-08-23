@@ -98,7 +98,7 @@ export function parsePipelineCoverageRow(row) {
 }
 
 const WAITING_REASONS = new Set(["PRICE_OUTSIDE", "BREAKOUT_NOT_CONFIRMED", "CANDLE_PENDING", "ASK_ABOVE_LIMIT"]);
-const POLICY_REASONS = new Set(["SKIPPED_YESTERDAY_GAIN", "STRATEGY_POSITION_EXISTS", "ACTIVE_BUY_ATTEMPT", "TARGET_FILLED"]);
+const POLICY_REASONS = new Set(["SKIPPED_YESTERDAY_GAIN", "STRATEGY_POSITION_EXISTS", "ACTIVE_BUY_ATTEMPT", "TARGET_FILLED", "DIP_FIRST_ENTRY_ONLY"]);
 const OPPORTUNITY_REASONS = new Set(["BUY_QUEUED"]);
 
 export function classifyDecision(reason) {
@@ -140,7 +140,7 @@ export function summarizeTrading(decisionEvents, lifecycleEvents, routeByInst = 
     if (left === undefined || right === undefined) return undefined;
     try { return subtractDecimal(left, right); } catch { return undefined; }
   };
-  const detail = (event, isBlock = classifyDecision(event.reason) === "blocked" || event.type === "block_evidence") => {
+  const detail = (event, isBlock = classifyDecision(event.reason) !== "policy" && (classifyDecision(event.reason) === "blocked" || event.type === "block_evidence")) => {
     const apiBoundary = event.reason === "BUY_QUEUE_REJECTED" ? "COORDINATOR_QUEUE_REJECTED" : "PRE_API_STRATEGY_DECISION";
     return {
       timestamp: event.timestamp, decisionId: event.decisionId, clOrdId: event.clOrdId, stage: event.stage, instId: event.instId, reason: event.reason, route: event.executionRoute ?? routeByInst.get(event.instId), apiBoundary: event.stage ? `PRE_API_${event.stage}` : apiBoundary,
@@ -155,8 +155,9 @@ export function summarizeTrading(decisionEvents, lifecycleEvents, routeByInst = 
       optimizationClass: isBlock ? classifyBlock(event.reason) : undefined,
     };
   };
-  const blocked = [...decisionEvents.filter((event) => classifyDecision(event.reason) === "blocked"), ...blockEvents].map((event) => detail(event, true));
-  const policy = [...latest.values()].filter((event) => classifyDecision(event.reason) === "policy").map(detail);
+  const policyBlockEvents = blockEvents.filter((event) => classifyDecision(event.reason) === "policy");
+  const blocked = [...decisionEvents.filter((event) => classifyDecision(event.reason) === "blocked"), ...blockEvents.filter((event) => classifyDecision(event.reason) !== "policy")].map((event) => detail(event, true));
+  const policy = [...[...latest.values()].filter((event) => classifyDecision(event.reason) === "policy"), ...policyBlockEvents].map((event) => detail(event, false));
   const blockedReasons = {};
   for (const row of blocked) blockedReasons[row.reason] = (blockedReasons[row.reason] ?? 0) + 1;
   const blockClasses = { LIKELY_RECOVERABLE: 0, MARKET_MOVED: 0, SAFETY_BOUNDARY: 0 };
