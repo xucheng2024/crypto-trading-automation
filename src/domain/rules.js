@@ -60,6 +60,13 @@ export function sellBreakdownPrice(previousClosedLow) {
   return multiplyDecimal(previousClosedLow, SELL_BREAKDOWN_MULTIPLIER);
 }
 
+export const SELL_TAKE_PROFIT_MULTIPLIER = "1.20";
+
+export function takeProfitPrice(fillPrice) {
+  if (compareDecimal(fillPrice, "0") <= 0) throw new Error("fill price must be positive");
+  return multiplyDecimal(fillPrice, SELL_TAKE_PROFIT_MULTIPLIER);
+}
+
 function addDecimal(left, right) {
   const scale = Math.max((String(left).split(".")[1] || "").length, (String(right).split(".")[1] || "").length);
   const factor = 10n ** BigInt(scale);

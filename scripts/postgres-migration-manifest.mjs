@@ -8,4 +8,5 @@ export const postgresMigrations = [
   "0007_sell_force_hold.sql",
   "0008_buy_decision_correlation.sql",
   "0009_okx_capacity_admission.sql",
+  "0010_sell_take_profit.sql",
 ];

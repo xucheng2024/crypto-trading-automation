@@ -1,5 +1,5 @@
 import { compareDecimal, multiplyDecimal, roundToStep, subtractDecimal } from "../decimal.js";
-import { candleFreshness, sellBreakdownPrice } from "../domain/rules.js";
+import { candleFreshness, sellBreakdownPrice, takeProfitPrice } from "../domain/rules.js";
 
 const field = (row, snake, camel) => row[snake] ?? row[camel];
 
@@ -54,7 +54,10 @@ export class SellService {
       const tradeId = field(fill, "trade_id", "tradeId");
       if (field(fill, "sell_state", "sellState") !== "SELL_TRIGGERED" || activeSourceTradeIds.has(tradeId) || this.latches.has(key)) continue;
       this.latches.add(key);
-      events.push({ type: "SELL_BREACH", priority: "critical", key, instId: field(fill, "inst_id", "instId"), protection: fill.protection_price, resumed: true });
+      const reason = field(fill, "sell_trigger_reason", "sellTriggerReason") ?? "PRICE_BREAKDOWN";
+      const fillPrice = field(fill, "fill_price", "fillPrice");
+      const referencePrice = reason === "TAKE_PROFIT" && fillPrice ? takeProfitPrice(fillPrice) : undefined;
+      events.push({ type: "SELL_BREACH", priority: "critical", key, instId: field(fill, "inst_id", "instId"), protection: fill.protection_price, referencePrice, reason, resumed: true });
     }
     return events;
   }
@@ -137,8 +140,31 @@ export class SellService {
     }
   }
   observeTicker(instId) {
-    const events = this.checkForceHold(instId, this.clock.nowMs());
-    const quote = this.market.freshQuote(instId, this.market.quoteFreshMs ?? 30_000); if (!quote) return events;
+    const quote = this.market.freshQuote(instId, this.market.quoteFreshMs ?? 30_000);
+    const events = [];
+    // Requires a fresh quote *and* an actual bidPx — no `?? last` fallback. A market SELL
+    // fills against the bid; falling back to `last` when bidPx is missing would trigger on
+    // a price nobody can actually sell at. Missing bidPx just waits for the next full quote.
+    if (quote && quote.bidPx) {
+      for (const key of this.byInst.get(instId) ?? []) {
+        const fill = this.fills.get(key); const state = fill && field(fill, "sell_state", "sellState");
+        // Only WAITING fills — never re-evaluate an already SELL_TRIGGERED fill here. If its
+        // latch was released (queue-full retry, restart) it must be re-armed by
+        // resumeTriggered() from the durable sell_trigger_reason, never relabeled TAKE_PROFIT
+        // just because price happens to be up when it's re-scanned for an unrelated reason.
+        if (!fill || state !== "WAITING" || this.latches.has(key)) continue;
+        const fillPrice = field(fill, "fill_price", "fillPrice");
+        const takeProfit = fillPrice ? takeProfitPrice(fillPrice) : null;
+        if (!takeProfit || compareDecimal(quote.bidPx, takeProfit) < 0) continue;
+        this.latches.add(key); // must happen before event enqueue / any await
+        // Never write fillPrice*1.20 into `protection` — that field is durably persisted
+        // as filled_orders.protection_price (the downside trailing floor) by consume();
+        // the take-profit target only travels as referencePrice for decision evidence.
+        events.push({ type: "SELL_BREACH", priority: "critical", key, instId, protection: fill.protection_price, referencePrice: takeProfit, triggerPrice: quote.bidPx, quoteTs: quote.ts, reason: "TAKE_PROFIT" });
+      }
+    }
+    events.push(...this.checkForceHold(instId, this.clock.nowMs()));
+    if (!quote) return events;
     for (const key of this.byInst.get(instId) ?? []) {
       const fill = this.fills.get(key); const state = fill && field(fill, "sell_state", "sellState");
       // DUST_PENDING is owned exclusively by reviewDust(): it decides
@@ -183,7 +209,7 @@ export class SellService {
     // _exitGuard only accepts a DELIST-kind attempt for it — a fill reclaimed
     // here while delisting must route the same way or it can never sell.
     const intentKind = this.isDelisting(instId) ? "DELIST" : "SELL";
-    const accepted = this.coordinator.enqueue({ intent: intentKind, accountId, instId, baseCcy: field(fill, "base_ccy", "baseCcy"), sourceBuyTradeId: tradeId, remainingSize: subtractDecimal(field(fill, "fill_size", "fillSize"), field(fill, "disposed_size", "disposedSize") ?? "0"), fillVersion: fill.version, sellTime: Number(field(fill, "sell_time", "sellTime")), availableBase: fill.availableBase, bidPx: quote?.bidPx ?? quote?.last, protection: event.protection ?? fill.protection_price, triggerPrice: event.triggerPrice, quoteTs: event.quoteTs, executionMode: field(fill, "execution_mode", "executionMode"), executionRoute: field(fill, "execution_route", "executionRoute") });
+    const accepted = this.coordinator.enqueue({ intent: intentKind, accountId, instId, baseCcy: field(fill, "base_ccy", "baseCcy"), sourceBuyTradeId: tradeId, remainingSize: subtractDecimal(field(fill, "fill_size", "fillSize"), field(fill, "disposed_size", "disposedSize") ?? "0"), fillVersion: fill.version, sellTime: Number(field(fill, "sell_time", "sellTime")), availableBase: fill.availableBase, bidPx: quote?.bidPx ?? quote?.last, protection: event.protection ?? fill.protection_price, referencePrice: event.referencePrice, reason: event.reason, triggerPrice: event.triggerPrice, quoteTs: event.quoteTs, executionMode: field(fill, "execution_mode", "executionMode"), executionRoute: field(fill, "execution_route", "executionRoute") });
     if (!accepted) {
       this._emit({ type: "sell_trigger_retry", reason: "COORDINATOR_REJECTED", instId, sourceBuyTradeId: tradeId });
       return { accepted: false, reason: "COORDINATOR_REJECTED", retryable: true };

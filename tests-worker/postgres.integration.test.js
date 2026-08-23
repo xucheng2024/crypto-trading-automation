@@ -69,7 +69,7 @@ async function startPostgres() {
     await run("pg_ctl", ["-D", dir, "-l", logPath, "-o", `-p ${port} -h 127.0.0.1`, "-w", "start"]);
     started = true;
     let admin = await connect();
-    const migrations = ["0001_p1_core.sql", "0002_p3_exit.sql", "0003_p4_import.sql", "0004_hybrid_execution.sql", "0005_execution_route.sql", "0006_decision_observability.sql", "0007_sell_force_hold.sql", "0008_buy_decision_correlation.sql", "0009_okx_capacity_admission.sql"];
+    const migrations = ["0001_p1_core.sql", "0002_p3_exit.sql", "0003_p4_import.sql", "0004_hybrid_execution.sql", "0005_execution_route.sql", "0006_decision_observability.sql", "0007_sell_force_hold.sql", "0008_buy_decision_correlation.sql", "0009_okx_capacity_admission.sql", "0010_sell_take_profit.sql"];
     for (const migration of migrations) {
       const sql = await readFile(new URL(`../migrations/postgres/${migration}`, import.meta.url), "utf8");
       await admin.query(sql); await admin.query(sql);
@@ -213,6 +213,15 @@ test("temporary PostgreSQL enforces P1-B invariants", { timeout: 60_000 }, async
       assert.equal(first.rowCount, 1); assert.equal(first.rows[0].protection_price, "94.715");
       const second = await tx(db.admin, (client) => state.raiseProtection(client, { accountId: "threshold", instId: "BTC-USDT", tradeId: "threshold-buy", version: first.rows[0].version, protectionPrice: "79.76" }));
       assert.equal(second.rowCount, 1); assert.equal(second.rows[0].protection_price, "94.715"); assert.equal(BigInt(second.rows[0].version), 3n);
+    });
+
+    await t.test("take-profit trigger atomically preserves a protection ratchet that advanced after observation", async () => {
+      await tx(db.admin, (client) => state.insertFill(client, { accountId: "take-profit", instId: "BTC-USDT", baseCcy: "BTC", tradeId: "take-profit-buy", source: "SYSTEM", side: "BUY", fillSize: "1", fillTime: 1, fillPrice: "100", holdHours: "24", strategyConfigHash: "cfg", sellTime: 2, sellState: "WAITING", protectionPrice: "90" }));
+      const ratcheted = await tx(db.admin, (client) => state.raiseProtection(client, { accountId: "take-profit", instId: "BTC-USDT", tradeId: "take-profit-buy", version: 1, protectionPrice: "95" }));
+      const triggered = await tx(db.admin, (client) => state.markSellTriggered(client, { accountId: "take-profit", instId: "BTC-USDT", tradeId: "take-profit-buy", version: ratcheted.rows[0].version, protectionPrice: "90", sellTriggerReason: "TAKE_PROFIT" }));
+      assert.equal(triggered.rowCount, 1);
+      assert.equal(triggered.rows[0].protection_price, "95", "a stale take-profit event must not overwrite the newer durable downside floor");
+      assert.equal(triggered.rows[0].sell_trigger_reason, "TAKE_PROFIT");
     });
 
     await t.test("attempt and reservation roll back together", async () => {

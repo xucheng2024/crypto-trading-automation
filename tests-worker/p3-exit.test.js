@@ -138,6 +138,126 @@ test("P3 SELL uses a strict 3m breakdown: equality does not trigger", async () =
   assert.equal(sell.observeTicker("BTC-USDT").length, 1);
 });
 
+test("P3 take-profit fires immediately from bidPx, independent of sell_time, without touching protection_price", async () => {
+  const now = clock(); const market = new MarketProjection({ clock: now });
+  market.updateInstrument({ instId: "BTC-USDT", ts: 1, state: "live", tickSz: "0.1", lotSz: "0.1", minSz: "0.1", base: "BTC" });
+  market.updateTicker({ instId: "BTC-USDT", ts: 2, last: "120", bidPx: "120" });
+  const fill = { account_id: "a", inst_id: "BTC-USDT", base_ccy: "BTC", trade_id: "tp-fast", side: "BUY", fill_size: "1", disposed_size: "0", fill_price: "100", sell_time: 999_999_999_999, sell_state: "WAITING", version: 1 };
+  let markCall;
+  const sell = new SellService({ market, clock: now, coordinator: { enqueue: () => true }, loadFill: async () => fill, state: { markSellTriggered: async (_tx, row) => { markCall = row; return { rowCount: 1, rows: [{ ...fill, sell_state: "SELL_TRIGGERED", version: 2 }] }; } } });
+  sell.rebuild([fill]);
+  const events = sell.observeTicker("BTC-USDT");
+  assert.equal(events.length, 1);
+  assert.equal(events[0].reason, "TAKE_PROFIT");
+  assert.equal(events[0].referencePrice, "120");
+  assert.equal(events[0].protection, undefined, "no downside floor was ever armed for this fill");
+  await sell.consume(events[0]);
+  assert.equal(markCall.protectionPrice, undefined, "take-profit must not write a fabricated floor into protection_price");
+  assert.equal(markCall.sellTriggerReason, "TAKE_PROFIT");
+});
+
+test("P3 take-profit boundary is inclusive and judged by bidPx, not last", async () => {
+  const now = clock(); const market = new MarketProjection({ clock: now });
+  market.updateInstrument({ instId: "BTC-USDT", ts: 1, state: "live", tickSz: "0.1", lotSz: "0.1", minSz: "0.1", base: "BTC" });
+  const fill = { account_id: "a", inst_id: "BTC-USDT", base_ccy: "BTC", trade_id: "tp-boundary", side: "BUY", fill_size: "1", disposed_size: "0", fill_price: "100", sell_time: 1, sell_state: "WAITING", version: 1 };
+  const sell = new SellService({ market, clock: now, coordinator: { enqueue: () => true }, state: {} });
+  sell.rebuild([fill]);
+  market.updateTicker({ instId: "BTC-USDT", ts: 2, last: "120", bidPx: "119.99" });
+  assert.equal(sell.observeTicker("BTC-USDT").length, 0, "just under the 1.20x line does not trigger");
+  market.updateTicker({ instId: "BTC-USDT", ts: 3, last: "120", bidPx: "120" });
+  assert.equal(sell.observeTicker("BTC-USDT").length, 1, "exactly at the 1.20x line triggers (>=)");
+  sell.latches.clear();
+  market.updateTicker({ instId: "BTC-USDT", ts: 4, last: "125", bidPx: "115" });
+  assert.equal(sell.observeTicker("BTC-USDT").length, 0, "last looks up 25% but bidPx is still under the line — must not trigger on last");
+});
+
+test("P3 take-profit ignores non-WAITING fills and requires a complete quote", async () => {
+  const now = clock(); const market = new MarketProjection({ clock: now });
+  market.updateInstrument({ instId: "BTC-USDT", ts: 1, state: "live", tickSz: "0.1", lotSz: "0.1", minSz: "0.1", base: "BTC" });
+  market.updateTicker({ instId: "BTC-USDT", ts: 2, last: "120", bidPx: "120" });
+  const base = { account_id: "a", inst_id: "BTC-USDT", base_ccy: "BTC", side: "BUY", fill_size: "1", disposed_size: "0", fill_price: "100", sell_time: 1, version: 1 };
+  const sold = { ...base, trade_id: "tp-sold", sell_state: "SOLD" };
+  const dust = { ...base, trade_id: "tp-dust", sell_state: "DUST_PENDING" };
+  const triggered = { ...base, trade_id: "tp-triggered", sell_state: "SELL_TRIGGERED", sell_trigger_reason: "MAX_HOLD_EXPIRED" };
+  const sell = new SellService({ market, clock: now, coordinator: { enqueue: () => true }, state: {} });
+  sell.rebuild([sold, dust, triggered]);
+  assert.equal(sell.observeTicker("BTC-USDT").length, 0, "SOLD/DUST_PENDING/SELL_TRIGGERED must never be relabeled TAKE_PROFIT by this scan");
+  const waiting = { ...base, trade_id: "tp-waiting", sell_state: "WAITING" };
+  sell.rebuild([waiting]);
+  market.updateTicker({ instId: "BTC-USDT", ts: 3, last: "120" });
+  assert.equal(sell.observeTicker("BTC-USDT").length, 0, "missing bidPx must wait for a complete quote, not fall back to last");
+  market.updateTicker({ instId: "BTC-USDT", ts: 4, last: "120", bidPx: "120" });
+  assert.equal(sell.observeTicker("BTC-USDT").length, 1);
+});
+
+test("P3 take-profit outranks force hold with a fresh quote, but force hold still fires without one", () => {
+  const now = clock(); const market = new MarketProjection({ clock: now });
+  market.updateInstrument({ instId: "BTC-USDT", ts: 1, state: "live", tickSz: "0.1", lotSz: "0.1", minSz: "0.1", base: "BTC" });
+  const fill = { account_id: "a", inst_id: "BTC-USDT", base_ccy: "BTC", trade_id: "tp-vs-hold", side: "BUY", fill_size: "1", disposed_size: "0", fill_price: "100", sell_time: 1, force_sell_time: 1_000, sell_state: "WAITING", version: 1 };
+  const sellWithQuote = new SellService({ market, clock: now, coordinator: { enqueue: () => true }, state: {} });
+  sellWithQuote.rebuild([fill]);
+  market.updateTicker({ instId: "BTC-USDT", ts: 2, last: "120", bidPx: "120" });
+  const events = sellWithQuote.observeTicker("BTC-USDT");
+  assert.equal(events.length, 1, "force hold must not also fire once take-profit has already latched this fill");
+  assert.equal(events[0].reason, "TAKE_PROFIT");
+  const sellNoQuote = new SellService({ market: { freshQuote: () => undefined }, clock: now, coordinator: { enqueue: () => true }, state: {} });
+  sellNoQuote.rebuild([fill]);
+  const withoutQuote = sellNoQuote.observeTicker("BTC-USDT");
+  assert.equal(withoutQuote.length, 1, "force hold must still fire independently when no fresh quote exists");
+  assert.equal(withoutQuote[0].reason, "MAX_HOLD_EXPIRED");
+});
+
+test("P3 take-profit decision reason and reference price persist through submitExits", async () => {
+  const now = clock(); const market = new MarketProjection({ clock: now }); const account = new AccountCapitalSnapshot({ clock: now }); account.update({ ts: 1, totalEq: "100", adjEq: "100" });
+  market.updateInstrument({ instId: "BTC-USDT", ts: 1, state: "live", tickSz: "0.1", lotSz: "0.1", minSz: "0.1", base: "BTC" });
+  let attempt;
+  const coordinator = new OrderCoordinator({ transaction: async (fn) => fn({}), state: {}, market, account, readyGate: gate(), ownerGuard: { isHeld: () => true }, mode: () => "OFF", clock: now, config,
+    orders: { reserveExit: async (_tx, row) => { attempt = row; return { authorized: true }; }, markSubmitted: async () => {} },
+    transport: { maxAvailSize: async () => [{ instId: "BTC-USDT", availSell: "1" }], submitBatchOrders: async (rows) => rows.map((row) => ({ clOrdId: row.clOrdId, status: "SUBMITTED", ordId: "tp" })) },
+  });
+  coordinator.enqueue({ intent: "SELL", instId: "BTC-USDT", baseCcy: "BTC", sourceBuyTradeId: "tp-1", remainingSize: "1", fillVersion: 1, sellTime: 0, availableBase: "1", bidPx: "120", referencePrice: "120", reason: "TAKE_PROFIT" });
+  await coordinator.drainOnce();
+  assert.equal(attempt.decisionReason, "SELL_TAKE_PROFIT_CONFIRMED");
+  assert.equal(attempt.decisionReferencePrice, "120");
+});
+
+test("P3 breakdown-triggered exits still record SELL_BREAKDOWN_CONFIRMED (regression)", async () => {
+  const now = clock(); const market = new MarketProjection({ clock: now }); const account = new AccountCapitalSnapshot({ clock: now }); account.update({ ts: 1, totalEq: "100", adjEq: "100" });
+  market.updateInstrument({ instId: "BTC-USDT", ts: 1, state: "live", tickSz: "0.1", lotSz: "0.1", minSz: "0.1", base: "BTC" });
+  let attempt;
+  const coordinator = new OrderCoordinator({ transaction: async (fn) => fn({}), state: {}, market, account, readyGate: gate(), ownerGuard: { isHeld: () => true }, mode: () => "OFF", clock: now, config,
+    orders: { reserveExit: async (_tx, row) => { attempt = row; return { authorized: true }; }, markSubmitted: async () => {} },
+    transport: { maxAvailSize: async () => [{ instId: "BTC-USDT", availSell: "1" }], submitBatchOrders: async (rows) => rows.map((row) => ({ clOrdId: row.clOrdId, status: "SUBMITTED", ordId: "bd" })) },
+  });
+  coordinator.enqueue({ intent: "SELL", instId: "BTC-USDT", baseCcy: "BTC", sourceBuyTradeId: "bd-1", remainingSize: "1", fillVersion: 1, sellTime: 0, availableBase: "1", bidPx: "90", protection: "90", reason: "PRICE_BREAKDOWN" });
+  await coordinator.drainOnce();
+  assert.equal(attempt.decisionReason, "SELL_BREAKDOWN_CONFIRMED");
+  assert.equal(attempt.decisionReferencePrice, "90");
+});
+
+test("P3 settleExit partial-fill continuations preserve the original trigger reason", async () => {
+  const now = clock(); const market = new MarketProjection({ clock: now });
+  market.updateInstrument({ instId: "BTC-USDT", ts: 1, state: "live", tickSz: "0.1", lotSz: "0.1", minSz: "0.1", base: "BTC" });
+  const takeProfitAttempt = { intent: "SELL", account_id: "a", inst_id: "BTC-USDT", base_ccy: "BTC", source_buy_trade_id: "tp-partial", generation: 0, cl_ord_id: "tp-partial-1" };
+  const takeProfitSource = { fill_size: "2", disposed_size: "1", version: 5, sell_trigger_reason: "TAKE_PROFIT", fill_price: "100", protection_price: null };
+  const tpCoordinator = new OrderCoordinator({ transaction: async (fn) => fn({}), state: { recordSystemSell: async () => ({ source: takeProfitSource }) }, orders: { markSettled: async () => ({ rowCount: 1 }) }, market, account: new AccountCapitalSnapshot({ clock: now }), readyGate: gate(), ownerGuard: { isHeld: () => true }, mode: () => "OFF", clock: now, config });
+  const tpResult = await tpCoordinator.settleExit({ attempt: takeProfitAttempt, fills: [{ tradeId: "t1", fillSz: "1", fillTime: "1" }], exchangeState: "canceled", accFillSz: "1" });
+  assert.deepEqual(tpResult, { settled: true, remaining: "1" });
+  const tpQueued = [...tpCoordinator.pending.SELL.values()][0];
+  assert.equal(tpQueued.reason, "TAKE_PROFIT");
+  assert.equal(tpQueued.referencePrice, "120");
+  assert.equal(tpQueued.protection == null, true, "no downside floor was ever armed — must stay null/undefined, never the take-profit target");
+
+  const breakdownAttempt = { intent: "SELL", account_id: "a", inst_id: "BTC-USDT", base_ccy: "BTC", source_buy_trade_id: "bd-partial", generation: 0, cl_ord_id: "bd-partial-1" };
+  const breakdownSource = { fill_size: "2", disposed_size: "1", version: 5, sell_trigger_reason: "PRICE_BREAKDOWN", fill_price: "100", protection_price: "95" };
+  const bdCoordinator = new OrderCoordinator({ transaction: async (fn) => fn({}), state: { recordSystemSell: async () => ({ source: breakdownSource }) }, orders: { markSettled: async () => ({ rowCount: 1 }) }, market, account: new AccountCapitalSnapshot({ clock: now }), readyGate: gate(), ownerGuard: { isHeld: () => true }, mode: () => "OFF", clock: now, config });
+  await bdCoordinator.settleExit({ attempt: breakdownAttempt, fills: [{ tradeId: "t2", fillSz: "1", fillTime: "1" }], exchangeState: "canceled", accFillSz: "1" });
+  const bdQueued = [...bdCoordinator.pending.SELL.values()][0];
+  assert.equal(bdQueued.reason, "PRICE_BREAKDOWN");
+  assert.equal(bdQueued.referencePrice, undefined);
+  assert.equal(bdQueued.protection, "95");
+});
+
 test("P3 rebuild reports a redacted sell-watch state snapshot", () => {
   const telemetry = []; const sell = new SellService({ market: new MarketProjection({ clock: { nowMs: () => 1 } }), coordinator: { enqueue: () => true }, telemetry: (event) => telemetry.push(event) });
   sell.rebuild([
@@ -225,6 +345,22 @@ test("P3 resumes durable SELL_TRIGGERED exits without another price breach", asy
   assert.equal(events.length, 1); assert.equal(events[0].resumed, true);
   assert.equal((await sell.consume(events[0])).reason, "SELL_TRIGGERED_RESUMED");
   assert.equal(marks, 0); assert.equal(intents.length, 1);
+});
+
+test("P3 resume recovers TAKE_PROFIT attribution and recomputed referencePrice from durable state", async () => {
+  const now = clock(); const market = new MarketProjection({ clock: now }); const intents = []; let marks = 0;
+  market.updateInstrument({ instId: "BTC-USDT", ts: 1, state: "live", tickSz: "0.1", lotSz: "0.1", minSz: "0.1", base: "BTC" });
+  market.updateTicker({ instId: "BTC-USDT", ts: 2, last: "120", bidPx: "120" });
+  const fill = { account_id: "a", inst_id: "BTC-USDT", base_ccy: "BTC", trade_id: "tp-durable", side: "BUY", fill_size: "1", disposed_size: "0", fill_price: "100", sell_time: 1, sell_state: "SELL_TRIGGERED", sell_trigger_reason: "TAKE_PROFIT", version: 2, protection_price: null };
+  const sell = new SellService({ market, clock: now, coordinator: { enqueue: (intent) => Boolean(intents.push(intent)) }, loadFill: async () => fill, state: { markSellTriggered: async () => { marks += 1; } } });
+  sell.rebuild([fill]); const [event] = sell.resumeTriggered();
+  assert.equal(event.reason, "TAKE_PROFIT");
+  assert.equal(event.referencePrice, "120");
+  assert.equal(event.protection, null, "protection_price is carried through untouched, never overwritten with the take-profit target");
+  assert.equal((await sell.consume(event)).reason, "SELL_TRIGGERED_RESUMED");
+  assert.equal(marks, 0, "an already-triggered fill is never re-written on resume");
+  assert.equal(intents[0].reason, "TAKE_PROFIT");
+  assert.equal(intents[0].referencePrice, "120");
 });
 
 test("P3 retries Coordinator rejection after persisting SELL_TRIGGERED", async () => {

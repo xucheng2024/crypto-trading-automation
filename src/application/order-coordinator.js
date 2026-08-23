@@ -1,5 +1,5 @@
 import { compareDecimal, divideDecimal, multiplyDecimal, parseDecimal, formatDecimal, roundToStep, subtractDecimal } from "../decimal.js";
-import { TRADE_FEE_RATE, buySignal, candleFreshness } from "../domain/rules.js";
+import { TRADE_FEE_RATE, buySignal, candleFreshness, takeProfitPrice } from "../domain/rules.js";
 import { CLOCK_SYNC_STALE_AFTER_MS } from "../infrastructure/okx/rest-client.js";
 import { createClOrdId, payloadHash } from "../domain/order.js";
 
@@ -306,7 +306,7 @@ export class OrderCoordinator {
           const payload = { instId: intent.instId, tdMode: executionMode, side: "sell", ordType: "market", ...(executionMode === "cross" && executionRoute === "margin" ? { reduceOnly: true } : {}), sz: intent.plannedSize, tag: this.config.strategyTag };
           const tuple = { instId: intent.instId, tradeId: intent.sourceBuyTradeId, generation: intent.generation ?? 0, intent: kind };
           const clOrdId = await createClOrdId(this.config.orderVersion, kind, tuple); payload.clOrdId = clOrdId;
-          const attempt = { accountId: this.config.accountId, intent: kind, instId: intent.instId, baseCcy: intent.baseCcy ?? instrument.base, clOrdId, payloadHash: await payloadHash(payload), sourceBuyTradeId: intent.sourceBuyTradeId, generation: intent.generation ?? 0, plannedSize: intent.plannedSize, reservedBaseSize: intent.plannedSize, executionMode, executionRoute, decisionTriggerPrice: intent.triggerPrice ?? this.market.ticker(intent.instId)?.last, decisionReferencePrice: intent.protection, decisionReason: kind === "DELIST" ? "DELIST_EXIT" : "SELL_BREAKDOWN_CONFIRMED" };
+          const attempt = { accountId: this.config.accountId, intent: kind, instId: intent.instId, baseCcy: intent.baseCcy ?? instrument.base, clOrdId, payloadHash: await payloadHash(payload), sourceBuyTradeId: intent.sourceBuyTradeId, generation: intent.generation ?? 0, plannedSize: intent.plannedSize, reservedBaseSize: intent.plannedSize, executionMode, executionRoute, decisionTriggerPrice: intent.triggerPrice ?? this.market.ticker(intent.instId)?.last, decisionReferencePrice: intent.referencePrice ?? intent.protection, decisionReason: kind === "DELIST" ? "DELIST_EXIT" : intent.reason === "TAKE_PROFIT" ? "SELL_TAKE_PROFIT_CONFIRMED" : intent.reason === "MAX_HOLD_EXPIRED" ? "SELL_MAX_HOLD_CONFIRMED" : "SELL_BREAKDOWN_CONFIRMED" };
           try {
             const reserve = await this.orders.reserveExit(tx, attempt);
             if (reserve?.authorized !== false) rows.push({ intent, attempt, payload });
@@ -403,7 +403,13 @@ export class OrderCoordinator {
     const remaining = source ? subtractDecimal(source.fill_size, source.disposed_size) : "0";
     if (settled?.rowCount === 1 && compareDecimal(remaining, "0") > 0 && (attempt.intent !== "DELIST" || !this.onExitSettled)) {
       const instId = attempt.inst_id ?? attempt.instId; const quote = this.market.ticker(instId);
-      this.enqueue({ intent: attempt.intent, accountId: attempt.account_id ?? attempt.accountId, instId, baseCcy: attempt.base_ccy ?? attempt.baseCcy, sourceBuyTradeId: attempt.source_buy_trade_id ?? attempt.sourceBuyTradeId, remainingSize: remaining, fillVersion: source.version, generation: Number(attempt.generation) + 1, sellTime: 0, availableBase: remaining, bidPx: quote?.bidPx ?? quote?.last, executionMode: source.execution_mode ?? source.executionMode ?? attempt.execution_mode ?? attempt.executionMode, executionRoute: source.execution_route ?? source.executionRoute ?? attempt.execution_route ?? attempt.executionRoute });
+      // Read the original trigger reason from the durable filled_orders row (set once by
+      // markSellTriggered, stable across every retry generation of the same exit) rather than
+      // reverse-parsing the display-oriented attempt.decision_reason string.
+      const reason = source?.sell_trigger_reason ?? source?.sellTriggerReason;
+      const sourceFillPrice = source?.fill_price ?? source?.fillPrice;
+      const referencePrice = reason === "TAKE_PROFIT" && sourceFillPrice ? takeProfitPrice(sourceFillPrice) : undefined;
+      this.enqueue({ intent: attempt.intent, accountId: attempt.account_id ?? attempt.accountId, instId, baseCcy: attempt.base_ccy ?? attempt.baseCcy, sourceBuyTradeId: attempt.source_buy_trade_id ?? attempt.sourceBuyTradeId, remainingSize: remaining, fillVersion: source.version, generation: Number(attempt.generation) + 1, sellTime: 0, availableBase: remaining, bidPx: quote?.bidPx ?? quote?.last, protection: source?.protection_price ?? source?.protectionPrice, referencePrice, reason, executionMode: source.execution_mode ?? source.executionMode ?? attempt.execution_mode ?? attempt.executionMode, executionRoute: source.execution_route ?? source.executionRoute ?? attempt.execution_route ?? attempt.executionRoute });
     }
     if (settled?.rowCount === 1 && this.onExitSettled) {
       try { await this.onExitSettled({ attempt, source, remaining }); }
