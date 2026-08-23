@@ -269,6 +269,7 @@ test("P2 recovery paginates fills/history, deduplicates tradeId, persists waterm
     return { data: [{ instId: "BTC-USDT", instType, side: "buy", tradeId: `${instType}-2`, ordId: "o", fillTime: "20", billId: "2", fillSz: "1" }, { instId: "BTC-USDT", instType, side: "buy", tradeId: `${instType}-1`, ordId: "o", fillTime: "10", billId: "1", fillSz: "1" }], next: "next" };
   };
   const service = new ReconciliationService({ ownerGuard: { isHeld: () => true }, readyGate: new ReadyGate(), safetyWaitMs: 0, ownership: { accountId: "a", managedAfter: 0, enabledInstIds: ["BTC-USDT"], holdHoursByInst: { "BTC-USDT": "24" }, configHash: "cfg" },
+    clock: { nowMs: () => 300_020 },
     transaction: async (fn) => fn({}), state: { insertFill: async (_tx, row) => stored.push(row) }, orders: { upsertWatermark: async (_tx, row) => watermarks.push(row) },
     transport: { fills: page("fills"), fillsHistory: page("history"), order: async () => ({ tdMode: "cross", clOrdId: "external", tag: "other" }), ordersPending: async () => [], ordersHistory: async () => [], ordersHistoryArchive: async () => [] },
   });
@@ -276,6 +277,16 @@ test("P2 recovery paginates fills/history, deduplicates tradeId, persists waterm
   assert.equal(fills.length, 4); assert.deepEqual(stored.map((row) => row.tradeId), ["MARGIN-1", "SPOT-1", "MARGIN-2", "SPOT-2"]); assert.equal(watermarks.length, 2); assert.ok(calls.some((value) => value.endsWith(":next")));
   const outcome = await service.reconcileAttempt({ state: "UNKNOWN", instId: "BTC-USDT", clOrdId: "unknown", ord_id: null });
   assert.equal(outcome.outcome, "RETAIN_UNKNOWN");
+});
+
+test("P3 fill recovery advances an empty instType only to a lagged successful-read fence", async () => {
+  const watermarks = [];
+  const service = new ReconciliationService({ ownerGuard: { isHeld: () => true }, readyGate: new ReadyGate(), safetyWaitMs: 0, clock: { nowMs: () => 600_000 },
+    ownership: { accountId: "a", managedAfter: 0, enabledInstIds: [] }, transaction: async (fn) => fn({}), state: {}, orders: { upsertWatermark: async (_tx, row) => watermarks.push(row) },
+    transport: { fills: async (instType) => instType === "SPOT" ? [{ instId: "IGNORED-USDT", instType, side: "sell", tradeId: "s", fillTime: "100", billId: "1", fillSz: "1" }] : [], fillsHistory: async () => [] },
+  });
+  await service.recoverFills({ accountId: "a" });
+  assert.deepEqual(watermarks.map(({ instType, watermark }) => [instType, watermark]), [["SPOT", 300_000], ["MARGIN", 300_000]]);
 });
 
 test("P2 recovery links a matched SYSTEM fill and emits only post-commit aggregate evidence", async () => {

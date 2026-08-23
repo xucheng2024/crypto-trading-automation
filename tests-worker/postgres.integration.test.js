@@ -354,6 +354,7 @@ test("temporary PostgreSQL enforces P1-B invariants", { timeout: 60_000 }, async
         ], next: "next" };
       };
       const service = new ReconciliationService({ ownerGuard: { isHeld: () => true }, readyGate: new ReadyGate(), safetyWaitMs: 0,
+        clock: { nowMs: () => 300_020 },
         ownership: { accountId: "pages", managedAfter: 0, enabledInstIds: ["BTC-USDT"], holdHoursByInst: { "BTC-USDT": "24" }, configHash: "page-cfg" },
         transaction: (fn) => tx(db.admin, fn), state, orders,
         transport: { fills: pages("fills"), fillsHistory: pages("history"), order: async () => ({ tdMode: "cross", clOrdId: "manual", tag: "external" }), ordersPending: async () => [], ordersHistory: async () => [], ordersHistoryArchive: async () => [] },
@@ -372,6 +373,8 @@ test("temporary PostgreSQL enforces P1-B invariants", { timeout: 60_000 }, async
       assert.deepEqual(stored.slice(0, 2).map((row) => row.fill_time), ["10", "10"]);
       const watermark = (await db.admin.query("SELECT inst_type,watermark,healthy FROM sync_watermarks WHERE account_id='pages' ORDER BY inst_type")).rows;
       assert.deepEqual(watermark, [{ inst_type: "MARGIN", watermark: "20", healthy: true }, { inst_type: "SPOT", watermark: "20", healthy: true }]);
+      await tx(db.admin, (client) => orders.upsertWatermark(client, { accountId: "pages", instType: "SPOT", endpoint: "fills", watermark: 10, overlapBegin: 5, healthy: true }));
+      assert.equal((await db.admin.query("SELECT watermark FROM sync_watermarks WHERE account_id='pages' AND inst_type='SPOT'")).rows[0].watermark, "20", "a replayed older read cannot regress a continuous watermark");
     });
 
     await t.test("P2 real coordinator drains fifty candidates in immediate five-order batches with fee-inclusive aggregate reservations", async () => {

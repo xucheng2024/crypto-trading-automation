@@ -184,6 +184,9 @@ export function summarizeTrading(decisionEvents, lifecycleEvents, routeByInst = 
   }).sort((a, b) => String(b.latest).localeCompare(String(a.latest)));
   const reconciliation = observabilityEvents.filter((event) => event.type === "fill_reconciliation" && event.reason === "FILL_BATCH_COMMITTED");
   const watchSnapshots = observabilityEvents.filter((event) => event.type === "sell_watch_loaded" && event.reason === "SELL_WATCH_SNAPSHOT");
+  const accountSellEvents = observabilityEvents.filter((event) => event.type === "account_sell");
+  const accountSellReasons = {};
+  for (const event of accountSellEvents) accountSellReasons[event.reason] = (accountSellReasons[event.reason] ?? 0) + 1;
   const latestWatchSnapshot = watchSnapshots.at(-1);
   return {
     currentStates: states,
@@ -200,8 +203,11 @@ export function summarizeTrading(decisionEvents, lifecycleEvents, routeByInst = 
     observability: {
       lifecycleCoverage: "TELEMETRY_ONLY",
       reconciliationCoverage: reconciliation.length ? "PARTIAL_DURABLE_CONFIRMATION" : "UNAVAILABLE_IN_WINDOW",
+      recoveredObserved: reconciliation.reduce((sum, event) => sum + Number(event.observed ?? 0), 0),
+      recoveredAccountSells: reconciliation.reduce((sum, event) => sum + Number(event.accountSells ?? 0), 0),
       recoveredInserted: reconciliation.reduce((sum, event) => sum + Number(event.inserted ?? 0), 0),
       recoveredLinked: reconciliation.reduce((sum, event) => sum + Number(event.linked ?? 0), 0),
+      accountSell: { events: accountSellEvents.length, reasons: accountSellReasons, latest: accountSellEvents[0] ? { timestamp: accountSellEvents[0].timestamp, reason: accountSellEvents[0].reason, baseCcy: accountSellEvents[0].baseCcy } : null },
       sellWatchSnapshot: latestWatchSnapshot ? { total: Number(latestWatchSnapshot.total ?? 0), instruments: Number(latestWatchSnapshot.instruments ?? 0), waiting: Number(latestWatchSnapshot.waiting ?? 0), triggered: Number(latestWatchSnapshot.triggered ?? 0), dustPending: Number(latestWatchSnapshot.dustPending ?? 0) } : { coverage: "UNAVAILABLE_IN_WINDOW" },
     },
     blocked, blockedReasons, blockClasses, blockStages, minimumCapacityGap, policy, executions, attemptTimelines,
@@ -720,7 +726,7 @@ export async function main(argv = process.argv.slice(2)) {
   const decisionQuery = `traces | where ${timeFilter} | where message startswith 'trading_decision ' | project timestamp, message, customDimensions | order by timestamp desc | take 5000`;
   const currentDecisionQuery = "traces | where timestamp > ago(24h) | where message startswith 'trading_decision ' | extend instId=tostring(customDimensions.instId) | summarize arg_max(timestamp, customDimensions) by instId";
   const lifecycleQuery = `traces | where ${timeFilter} | where message startswith 'order_lifecycle BUY_' or message startswith 'trade_lifecycle BUY_' | project timestamp, message, customDimensions | order by timestamp desc | take 1000`;
-  const observabilityQuery = `traces | where ${timeFilter} | where message startswith 'fill_reconciliation FILL_BATCH_COMMITTED' or message startswith 'sell_watch_loaded SELL_WATCH_SNAPSHOT' | project timestamp, message, customDimensions | order by timestamp desc | take 1000`;
+  const observabilityQuery = `traces | where ${timeFilter} | where message startswith 'fill_reconciliation FILL_BATCH_COMMITTED' or message startswith 'sell_watch_loaded SELL_WATCH_SNAPSHOT' or message startswith 'account_sell ' | project timestamp, message, customDimensions | order by timestamp desc | take 1000`;
   const blockQuery = `traces | where ${timeFilter} | where message startswith 'block_evidence ' | project timestamp, message, customDimensions | order by timestamp desc | take 5000`;
   const errorQuery = `traces | where ${timeFilter} | where severityLevel >= 3 | project timestamp, message, cloudRoleInstance=cloud_RoleInstance, tradingMode=tostring(customDimensions.tradingMode), error=tostring(customDimensions.error), failureClass=tostring(customDimensions.failureClass), endpoint=tostring(customDimensions.endpoint), httpStatus=tostring(customDimensions.httpStatus), okxCode=tostring(customDimensions.okxCode), okxMessageClass=tostring(customDimensions.okxMessageClass), okxSummary=tostring(customDimensions.okxSummary), responseClass=tostring(customDimensions.responseClass), durationMs=toint(customDimensions.durationMs), attempts=toint(customDimensions.attempts) | order by timestamp desc | take 10`;
   const baselineQuery = strategyBaselineQuery(revision?.name);
@@ -792,7 +798,8 @@ export async function main(argv = process.argv.slice(2)) {
       console.log(`Queues: current=${metric?.queueDepth ?? "?"} pending_buy=${metric?.pendingBuy ?? "?"} exit_backlog=${metric?.exitBacklog ?? "?"}`);
       console.log(`Decisions: ${topReasons}`);
       console.log(`Trading telemetry: opportunities=${trading.events.queued} prepared=${trading.events.prepared} submitted=${trading.events.submitted} settled=${trading.events.settled} ledger_confirmed=${trading.events.ledgerConfirmed} coverage=${trading.observability.lifecycleCoverage}`);
-      console.log(`Durable recovery confirmation: coverage=${trading.observability.reconciliationCoverage} inserted=${trading.observability.recoveredInserted} linked=${trading.observability.recoveredLinked}`);
+      console.log(`Durable recovery confirmation: coverage=${trading.observability.reconciliationCoverage} observed=${trading.observability.recoveredObserved} account_sells=${trading.observability.recoveredAccountSells} inserted=${trading.observability.recoveredInserted} linked=${trading.observability.recoveredLinked}`);
+      console.log(`Account SELL reconciliation: events=${trading.observability.accountSell.events} reasons=${Object.entries(trading.observability.accountSell.reasons).map(([reason, count]) => `${reason}=${count}`).join(", ") || "none"}`);
       console.log(`Current states: waiting=${trading.currentStates.waiting} policy=${trading.currentStates.policy} blocked=${trading.currentStates.blocked} opportunity=${trading.currentStates.opportunity}`);
       if (summary.managedPositions) console.log(formatPositionsSummary(summary.managedPositions));
       else console.log("Managed positions: unavailable (read-only VNet query did not return a valid result)");

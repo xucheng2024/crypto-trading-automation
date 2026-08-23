@@ -1,6 +1,8 @@
 import { classifyManagedFill } from "../infrastructure/okx/rest-client.js";
 import { addDecimal, compareDecimal, divideDecimal, multiplyDecimal } from "../decimal.js";
 
+export const FILL_WATERMARK_SETTLEMENT_LAG_MS = 5 * 60_000;
+
 // Observability must never become part of the reconciliation correctness path.
 // Ports are intentionally fire-and-forget: both a synchronous throw and a
 // rejected promise are contained here.
@@ -70,10 +72,19 @@ export class ReconciliationService {
   }
   async recoverFills({ accountId, instTypes = ["SPOT", "MARGIN"], overlapBegin = 0 }) {
     if (typeof this.transport.fills !== "function" || typeof this.transport.fillsHistory !== "function") return [];
-    const raw = [];
+    const raw = []; const watermarks = new Map();
     for (const instType of instTypes) {
-      raw.push(...await this.pages((cursor) => this.transport.fills(instType, { begin: overlapBegin, ...cursor })));
-      raw.push(...await this.pages((cursor) => this.transport.fillsHistory(instType, { begin: overlapBegin, ...cursor })));
+      const readStartedAt = this.clock.nowMs();
+      const recent = await this.pages((cursor) => this.transport.fills(instType, { begin: overlapBegin, limit: "100", ...cursor }));
+      const history = await this.pages((cursor) => this.transport.fillsHistory(instType, { begin: overlapBegin, limit: "100", ...cursor }));
+      const rows = [...recent, ...history]; raw.push(...rows);
+      const latestFillTime = rows.reduce((latest, fill) => Math.max(latest, Number(fill?.fillTime) || 0), Number(overlapBegin) || 0);
+      // A successful non-full recent page proves the stream was read through
+      // its request boundary even when that instType has no fills. Keep a
+      // conservative settlement lag for delayed exchange visibility. A full
+      // page remains event-bounded because older omitted rows may still exist.
+      const completeThrough = recent.length < 100 ? readStartedAt - FILL_WATERMARK_SETTLEMENT_LAG_MS : 0;
+      watermarks.set(instType, Math.max(Number(overlapBegin) || 0, latestFillTime, completeThrough));
     }
     const unique = [...new Map(raw.filter((fill) => fill?.instId && fill?.tradeId).map((fill) => [keyOf(fill), fill])).values()]
       .sort((a, b) => fillKey(a).localeCompare(fillKey(b), undefined, { numeric: true }));
@@ -85,7 +96,7 @@ export class ReconciliationService {
         const order = typeof this.transport.order === "function" ? await this.transport.order({ instId: fill.instId, ordId: fill.ordId, clOrdId: fill.clOrdId }) : null;
         await this.ingestFill(tx, fill, order, accountBuys, batch, confirmedBuys);
       }
-      for (const instType of instTypes) await this.orders.upsertWatermark?.(tx, { accountId, instType, endpoint: "fills", watermark: unique.at(-1)?.fillTime ?? overlapBegin, overlapBegin, healthy: true });
+      for (const instType of instTypes) await this.orders.upsertWatermark?.(tx, { accountId, instType, endpoint: "fills", watermark: watermarks.get(instType), overlapBegin, healthy: true });
     });
     for (const instId of accountBuys) await this.refreshAccountBuy(instId);
     // This deliberately reports only post-commit aggregate counts. It is safe

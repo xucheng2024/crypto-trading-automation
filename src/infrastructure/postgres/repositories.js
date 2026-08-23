@@ -201,7 +201,7 @@ export class OrderRepository {
   async upsertWatermark(tx, { accountId, instType, endpoint, watermark, overlapBegin, managedFillStartTime = null, healthy }) {
     return tx.query(`INSERT INTO sync_watermarks(account_id,inst_type,endpoint,watermark,overlap_begin,managed_fill_start_time,healthy)
       VALUES($1,$2,$3,$4,$5,$6,$7)
-      ON CONFLICT(account_id,inst_type,endpoint) DO UPDATE SET watermark=EXCLUDED.watermark,overlap_begin=EXCLUDED.overlap_begin,
+      ON CONFLICT(account_id,inst_type,endpoint) DO UPDATE SET watermark=GREATEST(sync_watermarks.watermark,EXCLUDED.watermark),overlap_begin=EXCLUDED.overlap_begin,
       managed_fill_start_time=COALESCE(sync_watermarks.managed_fill_start_time,EXCLUDED.managed_fill_start_time),healthy=EXCLUDED.healthy,updated_at=now()`,
     [accountId, instType, endpoint, watermark, overlapBegin, managedFillStartTime, healthy]);
   }

@@ -12,6 +12,17 @@ test("Azure ops summary converts query tables and aggregates decisions", () => {
   ]), { decisions: 6, instruments: 2, latest: "2026-01-01T00:01:00Z", reasons: { PRICE_OUTSIDE: 5, CANDLE_PENDING: 1 } });
 });
 
+test("Azure ops summary retains only safe ACCOUNT SELL reconciliation evidence", () => {
+  const summary = summarizeTrading([], [], new Map(), [], [], [
+    { type: "fill_reconciliation", reason: "FILL_BATCH_COMMITTED", observed: 9, accountSells: 9, inserted: 0, linked: 0 },
+    { type: "account_sell", reason: "INVALID_BILL_ID", baseCcy: "MORPHO", tradeId: "must-not-surface", timestamp: "2026-08-23T15:00:00Z" },
+  ]);
+  assert.equal(summary.observability.recoveredObserved, 9);
+  assert.equal(summary.observability.recoveredAccountSells, 9);
+  assert.deepEqual(summary.observability.accountSell, { events: 1, reasons: { INVALID_BILL_ID: 1 }, latest: { timestamp: "2026-08-23T15:00:00Z", reason: "INVALID_BILL_ID", baseCcy: "MORPHO" } });
+  assert.equal(JSON.stringify(summary).includes("must-not-surface"), false);
+});
+
 test("Azure ops summary accepts trading, deployment, and runner commands", () => {
   assert.deepEqual(parseArgs(["report", "--since-last"]).command, "report");
   assert.deepEqual(parseArgs(["snapshot", "--minutes", "15"]).command, "snapshot");
