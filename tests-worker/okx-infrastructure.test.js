@@ -1,11 +1,16 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { OkxRestClient, classifyBatchResponse, classifyCrossFill, validateAccountProfile } from "../src/infrastructure/okx/rest-client.js";
+import { OkxRestClient, assertOkxResponse, classifyBatchResponse, classifyCrossFill, validateAccountProfile } from "../src/infrastructure/okx/rest-client.js";
 import { OkxBusinessWsClient, OkxPrivateWsClient, OkxPublicWsClient, OkxWsReconnectBudget } from "../src/infrastructure/okx/ws-client.js";
 
 const credentials = { apiKey: "key", secretKey: "secret", passphrase: "pass" };
 const ok = (data = []) => new Response(JSON.stringify({ code: "0", data }));
+
+test("P1 REST errors retain the OKX code for safe operational classification", () => {
+  assert.throws(() => assertOkxResponse({ code: "50011", msg: "rate limit" }), /OKX code 50011: rate limit/);
+  assert.throws(() => assertOkxResponse(null), /OKX code empty/);
+});
 
 test("P1 REST transport signs, syncs server time, uses expTime, retries only GET, and respects Retry-After", async () => {
   let now = 1_000;

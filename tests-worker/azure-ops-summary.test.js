@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { assessRuntime, classifyBlock, classifyDecision, classifySevereTraces, countCsvInstruments, formatDecisionTelemetryLine, formatInstrumentTimelineSummary, formatPipelineCoverageLine, formatPositionsSummary, instrumentTimelineReadJobName, parseArgs, parseInstrumentTimelineLog, parseManagedPositionsLog, parsePipelineCoverageRow, parseStrategyBaseline, positionsReadJobName, queryRows, redactPositionsArtifact, runInstrumentTimelineCommand, runPositionsCommand, strategyBaselineQuery, summarizeDecisions, summarizeDeployment, summarizeRunner, summarizeTrading, traceEvents } from "../scripts/azure-ops-summary.mjs";
+import { assessRuntime, classifyBlock, classifyDecision, classifySevereTraces, countCsvInstruments, formatDecisionTelemetryLine, formatInstrumentTimelineSummary, formatPipelineCoverageLine, formatPositionsSummary, instrumentTimelineReadJobName, parseArgs, parseInstrumentTimelineLog, parseManagedPositionsLog, parsePipelineCoverageRow, parseStrategyBaseline, positionsReadJobName, queryRows, redactOperationalError, redactPositionsArtifact, runInstrumentTimelineCommand, runPositionsCommand, strategyBaselineQuery, summarizeDecisions, summarizeDeployment, summarizeRunner, summarizeTrading, traceEvents } from "../scripts/azure-ops-summary.mjs";
 
 test("Azure ops summary converts query tables and aggregates decisions", () => {
   assert.deepEqual(queryRows({ tables: [{ columns: [{ name: "reason" }, { name: "decisions" }], rows: [["WAIT", 2]] }] }), [{ reason: "WAIT", decisions: 2 }]);
@@ -62,7 +62,7 @@ test("positions CLI starts the VNet job and redacts log JSON", async () => {
     },
     sleep: async () => {},
   });
-  assert.deepEqual(requested, { command: "positions", requested: false, job: "trading-cae-positions-read", execution: "trading-cae-positions-read-abc", summary: { instruments: 1, openFills: 2 }, positions: [{ instrument: "BTC-USDT", remainingCostUsd: "100", openFills: 2, sellStates: ["WAITING"], nextSellTime: 1, nextForceSellTime: 2, unprotectedWaitingFills: 1, nextProtectionAnchorTime: 3, anchorDueUnprotectedFills: 1 }] });
+  assert.deepEqual(requested, { command: "positions", requested: false, job: "trading-cae-positions-read", execution: "trading-cae-positions-read-abc", summary: { instruments: 1, openFills: 2 }, positions: [{ instrument: "BTC-USDT", remainingCostUsd: "100", openFills: 2, sellStates: ["WAITING"], nextSellTime: 1, nextForceSellTime: 2, unprotectedWaitingFills: 1, nextProtectionAnchorTime: 3, anchorDueUnprotectedFills: 1 }], realizedSummary: { instruments: 0, complete: 0 }, realized: [] });
   assert.match(formatPositionsSummary(requested), /BTC-USDT remaining_usd=100 open_fills=2 sell=WAITING next_sell=1970-01-01T00:00:00.001Z next_force_sell=1970-01-01T00:00:00.002Z protected=0 unprotected_waiting=1 next_anchor=1970-01-01T00:00:00.003Z anchor_due_unprotected=1 dust=0/);
   assert.equal(formatInstrumentTimelineSummary({
     instrument: "CFG-USDT", job: "timeline-read",
@@ -76,7 +76,8 @@ test("positions CLI starts the VNet job and redacts log JSON", async () => {
   assert.equal(positionsReadJobName("trading-cae-engine"), "trading-cae-positions-read");
   assert.ok(calls.some((row) => row[0] === "az" && row.includes("start")));
   assert.ok(!calls.some((row) => row[0] === "gh"));
-  assert.deepEqual(redactPositionsArtifact({ summary: { instruments: 1, openFills: 2, forbidden: "no" }, positions: [{ instrument: "BTC-USDT", remainingCostUsd: "100", openFills: 2, accountId: "forbidden" }] }).positions[0], { instrument: "BTC-USDT", remainingCostUsd: "100", openFills: 2 });
+  const redacted = redactPositionsArtifact({ summary: { instruments: 1, openFills: 2, forbidden: "no" }, positions: [{ instrument: "BTC-USDT", remainingCostUsd: "100", openFills: 2, accountId: "forbidden" }], realizedSummary: { instruments: 1, complete: 1 }, realized: [{ instrument: "BTC-USDT", netPnlUsd: "2", completeness: "COMPLETE", gapCount: 0, fee: "forbidden" }] });
+  assert.deepEqual(redacted.positions[0], { instrument: "BTC-USDT", remainingCostUsd: "100", openFills: 2 }); assert.deepEqual(redacted.realized[0], { instrument: "BTC-USDT", netPnlUsd: "2", completeness: "COMPLETE", gapCount: 0 });
   assert.throws(() => parseManagedPositionsLog("no marker"), /missing the redacted JSON marker/);
   const envelope = JSON.stringify({ TimeStamp: "t", Log: `F MANAGED_POSITIONS_JSON:${JSON.stringify({ summary: { instruments: 1, openFills: 1 }, positions: [{ instrument: "ETH-USDT", remainingCostUsd: "2", openFills: 1 }] })}` });
   assert.deepEqual(parseManagedPositionsLog(envelope).positions[0].instrument, "ETH-USDT");
@@ -90,6 +91,14 @@ test("Azure ops summary attributes expected OFF transition traces without hiding
   ], "engine--full-new");
   assert.equal(severe.transitions.length, 1); assert.equal(severe.inactive.length, 1); assert.equal(severe.current.length, 1);
   assert.equal(severe.transitions[0].classification, "EXPECTED_OFF_TRANSITION");
+});
+
+test("Azure ops summary exposes only redacted operational error classes", () => {
+  assert.equal(redactOperationalError("OKX code 50011"), "OKX_50011");
+  assert.equal(redactOperationalError("HTTP 429 response"), "HTTP_429");
+  assert.equal(redactOperationalError("request timed out"), "TIMEOUT");
+  assert.equal(redactOperationalError("credential=secret"), "REDACTED_ERROR");
+  assert.equal(redactOperationalError(), undefined);
 });
 
 test("Azure ops summary compacts workflow failures, approvals, and runner readiness", () => {

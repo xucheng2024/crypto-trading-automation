@@ -240,6 +240,17 @@ export function classifySevereTraces(rows, activeRevision) {
   };
 }
 
+export function redactOperationalError(value) {
+  const text = String(value ?? "");
+  const okx = text.match(/\bOKX\s+code\s+(\d{3,6})\b/i);
+  if (okx) return `OKX_${okx[1]}`;
+  const http = text.match(/\b(?:HTTP|status)\s+(\d{3})\b/i);
+  if (http) return `HTTP_${http[1]}`;
+  if (/timeout|timed out/i.test(text)) return "TIMEOUT";
+  if (/rate.?limit|too many requests/i.test(text)) return "RATE_LIMITED";
+  return text ? "REDACTED_ERROR" : undefined;
+}
+
 export function summarizeDeployment(runInfo, jobs = [], pendingDeployments = []) {
   const normalizedJobs = jobs.map((job) => ({
     name: job.name, status: job.status, conclusion: job.conclusion, runner: job.runner_name || null,
@@ -356,7 +367,11 @@ export function redactPositionsArtifact(artifact) {
   const positions = artifact.positions.map((row) => Object.fromEntries(allowed.filter((key) => Object.hasOwn(row, key)).map((key) => [key, row[key]])));
   const summary = { instruments: Number(artifact.summary.instruments), openFills: Number(artifact.summary.openFills) };
   if (!Number.isSafeInteger(summary.instruments) || summary.instruments < 0 || !Number.isSafeInteger(summary.openFills) || summary.openFills < 0 || summary.instruments !== positions.length) throw new Error("Managed-positions artifact summary is invalid");
-  return { summary, positions };
+  const realizedAllowed = ["instrument", "realizedSize", "costBasisUsd", "proceedsUsd", "buyFeesUsd", "sellFeesUsd", "netPnlUsd", "completeness", "gapCount"];
+  const realized = (artifact.realized ?? []).map((row) => Object.fromEntries(realizedAllowed.filter((key) => Object.hasOwn(row, key)).map((key) => [key, row[key]])));
+  const realizedSummary = artifact.realizedSummary ? { instruments: Number(artifact.realizedSummary.instruments), complete: Number(artifact.realizedSummary.complete) } : { instruments: 0, complete: 0 };
+  if (!Number.isSafeInteger(realizedSummary.instruments) || !Number.isSafeInteger(realizedSummary.complete) || realizedSummary.instruments < 0 || realizedSummary.complete < 0 || realizedSummary.complete > realizedSummary.instruments || realizedSummary.instruments !== realized.length) throw new Error("Managed realized-PnL artifact summary is invalid");
+  return { summary, positions, realizedSummary, realized };
 }
 
 export function formatPositionsSummary(result) {
@@ -365,6 +380,7 @@ export function formatPositionsSummary(result) {
     const sell = Array.isArray(row.sellStates) && row.sellStates.length ? row.sellStates.join(",") : "-";
     lines.push(`${row.instrument} remaining_usd=${row.remainingCostUsd ?? "-"} open_fills=${row.openFills} sell=${sell} next_sell=${formatTimelineInstant(row.nextSellTime)} next_force_sell=${formatTimelineInstant(row.nextForceSellTime)} protected=${row.protectedFills ?? 0} unprotected_waiting=${row.unprotectedWaitingFills ?? 0} next_anchor=${formatTimelineInstant(row.nextProtectionAnchorTime)} anchor_due_unprotected=${row.anchorDueUnprotectedFills ?? 0} dust=${row.dustPendingFills ?? 0}`);
   }
+  for (const row of result.realized ?? []) lines.push(`${row.instrument} realized_usd=${row.netPnlUsd ?? "INCOMPLETE"} proceeds_usd=${row.proceedsUsd ?? "-"} cost_usd=${row.costBasisUsd ?? "-"} fees_usd=${row.buyFeesUsd ?? "-"},${row.sellFeesUsd ?? "-"} status=${row.completeness ?? "INCOMPLETE"} gaps=${row.gapCount ?? 0}`);
   return lines.join("\n");
 }
 
@@ -688,7 +704,7 @@ export async function main(argv = process.argv.slice(2)) {
   const lifecycleQuery = `traces | where ${timeFilter} | where message startswith 'order_lifecycle BUY_' or message startswith 'trade_lifecycle BUY_' | project timestamp, message, customDimensions | order by timestamp desc | take 1000`;
   const observabilityQuery = `traces | where ${timeFilter} | where message startswith 'fill_reconciliation FILL_BATCH_COMMITTED' or message startswith 'sell_watch_loaded SELL_WATCH_SNAPSHOT' | project timestamp, message, customDimensions | order by timestamp desc | take 1000`;
   const blockQuery = `traces | where ${timeFilter} | where message startswith 'block_evidence ' | project timestamp, message, customDimensions | order by timestamp desc | take 5000`;
-  const errorQuery = `traces | where ${timeFilter} | where severityLevel >= 3 | project timestamp, message, cloudRoleInstance=cloud_RoleInstance, tradingMode=tostring(customDimensions.tradingMode) | order by timestamp desc | take 10`;
+  const errorQuery = `traces | where ${timeFilter} | where severityLevel >= 3 | project timestamp, message, cloudRoleInstance=cloud_RoleInstance, tradingMode=tostring(customDimensions.tradingMode), error=tostring(customDimensions.error) | order by timestamp desc | take 10`;
   const baselineQuery = strategyBaselineQuery(revision?.name);
   const pipelineQuery = "traces | where timestamp > ago(24h) | where message startswith 'instrument_pipeline_coverage ' | top 1 by timestamp desc | project timestamp, runtime=toint(customDimensions.runtime), quote_ready=toint(customDimensions.quote_ready), candle_ready=toint(customDimensions.candle_ready), strategy_row=toint(customDimensions.strategy_row), daily_state=toint(customDimensions.daily_state), evaluator_seen=toint(customDimensions.evaluator_seen), decision_emit=toint(customDimensions.decision_emit), no_market_data=toint(customDimensions.no_market_data), candle_not_initialized=toint(customDimensions.candle_not_initialized), no_strategy_row=toint(customDimensions.no_strategy_row), strategy_state_never_created=toint(customDimensions.strategy_state_never_created), filtered_before_evaluator=toint(customDimensions.filtered_before_evaluator), unknown=toint(customDimensions.unknown)";
   const metric = appInsightsQuery(resourceGroup, appInsights, metricQuery)[0] ?? null;
@@ -814,6 +830,13 @@ export async function main(argv = process.argv.slice(2)) {
       if (!trading.executions.length) console.log("  none");
       else for (const row of trading.executions.slice(0, 100)) console.log(`  ${row.timestamp} ${row.instId ?? "?"} route=${row.route ?? "?"} ${row.reason} boundary=${row.apiBoundary} decisionId=${row.decisionId ?? "?"} clOrdId=${row.clOrdId ?? "?"}${row.exchangeReason ? ` exchange=${row.exchangeReason}` : ""}`);
       if (trading.executions.length > 100) console.log(`  ... ${trading.executions.length - 100} more; use --json for all`);
+    }
+    if (options.details && (severe.current.length || severe.inactive.length)) {
+      console.log("Severe diagnostics:");
+      for (const row of [...severe.current, ...severe.inactive].slice(0, 10)) {
+        const error = redactOperationalError(row.error);
+        console.log(`  ${row.timestamp} ${row.classification} ${row.message}${error ? ` error=${error}` : ""}`);
+      }
     }
   }
   if (options.command === "report" && options.since) await writeFile(checkpointPath, `${JSON.stringify({ checkedAt: queryStartedAt })}\n`, "utf8");

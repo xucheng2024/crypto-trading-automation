@@ -217,7 +217,14 @@ export class OrderCoordinator {
       const groups = Map.groupBy(routed, (row) => `${row.executionMode}:${row.executionRoute}`);
       available = (await Promise.all([...groups].map(([, rows]) => { const { executionMode: tdMode, executionRoute } = rows[0]; return this.transport.maxAvailSize(rows.map(({ intent }) => intent.instId).join(","), tdMode === "cross" && executionRoute === "margin" ? { tdMode, reduceOnly: true } : { tdMode }); }))).flat();
     }
-    catch (error) { this._emit({ type: "exit_deferred", intent: kind, reason: "MAX_AVAIL_FAILED", error: error?.message }); return []; }
+    catch (error) {
+      // Availability is an account-wide read.  Leaving these intents immediately
+      // eligible turns a transient API failure into a retry storm on every work
+      // loop, which can prolong rate limiting and obscure later reconciliation.
+      for (const intent of eligible) this._deferExit(intent, kind, "MAX_AVAIL_FAILED", 1_000, false);
+      this._emit({ type: "exit_deferred", intent: kind, reason: "MAX_AVAIL_FAILED", error: error?.message, candidateCount: eligible.length });
+      return [];
+    }
     const byInst = new Map((available ?? []).map((row) => [row.instId, row.availSell]));
     const planned = [];
     for (const intent of eligible) {
@@ -243,12 +250,12 @@ export class OrderCoordinator {
     this.enqueue({ ...intent, generation: (intent.generation ?? 0) + 1 });
     this._emit({ type: "exit_deferred", intent: kind, reason, sourceBuyTradeId: intent.sourceBuyTradeId, retried: true });
   }
-  _deferExit(intent, kind, reason, delayMs = 1_000) {
+  _deferExit(intent, kind, reason, delayMs = 1_000, emit = true) {
     const key = `${intent.baseCcy}:${intent.sourceBuyTradeId}`;
     const current = this.pending[kind].get(key) ?? intent;
     const firstDeferredAt = current.firstDeferredAt ?? this.clock.nowMs();
     this.pending[kind].set(key, { ...current, notBefore: this.clock.nowMs() + delayMs, firstDeferredAt, lastDeferReason: reason });
-    this._emit({ type: "exit_deferred", intent: kind, reason, sourceBuyTradeId: intent.sourceBuyTradeId, retryAfterMs: delayMs });
+    if (emit) this._emit({ type: "exit_deferred", intent: kind, reason, sourceBuyTradeId: intent.sourceBuyTradeId, retryAfterMs: delayMs });
   }
   // Watchdog signal: an exit that has been sitting in the pending map (repeatedly
   // deferred, never reserved) for longer than a threshold — e.g. INSTRUMENT_NOT_TRADABLE

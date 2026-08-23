@@ -28,7 +28,10 @@ function retryAfter(response, nowMs) {
 }
 
 export function assertOkxResponse(result, { requireData = false } = {}) {
-  if (!result || result.code !== "0") throw new Error(result?.msg || `OKX code ${result?.code ?? "empty"}`);
+  if (!result || result.code !== "0") {
+    const code = result?.code ?? "empty";
+    throw new Error(result?.msg ? `OKX code ${code}: ${result.msg}` : `OKX code ${code}`);
+  }
   if (requireData && (!Array.isArray(result.data) || result.data.length === 0)) throw new Error("OKX response has no data");
   return result.data || [];
 }

@@ -85,6 +85,22 @@ test("P3 final exit guard bumps generation instead of permanently colliding with
   ready.set("database", true); assert.equal((await coordinator.drainOnce()).submitted, true); assert.deepEqual(attempts.map((row) => row.generation), [0, 1]);
 });
 
+test("P3 exit availability failures defer retries instead of retrying on every work loop", async () => {
+  let current = 1_000; const now = { nowMs: () => current }; const market = new MarketProjection({ clock: now }); const account = new AccountCapitalSnapshot({ clock: now }); account.update({ ts: 1, totalEq: "100", adjEq: "100" });
+  market.updateInstrument({ instId: "BTC-USDT", ts: 1, state: "live", tickSz: "0.1", lotSz: "0.1", minSz: "0.1", base: "BTC" });
+  const events = []; let availabilityCalls = 0;
+  const coordinator = new OrderCoordinator({ transaction: async (fn) => fn({}), market, account, readyGate: gate(), ownerGuard: { isHeld: () => true }, mode: () => "FULL", clock: now, config, telemetry: (event) => events.push(event),
+    transport: { maxAvailSize: async () => { availabilityCalls += 1; throw new Error("temporary unavailable"); } },
+  });
+  coordinator.enqueue({ intent: "SELL", instId: "BTC-USDT", baseCcy: "BTC", sourceBuyTradeId: "availability-retry", remainingSize: "1", fillVersion: 1, sellTime: 1 });
+  assert.equal((await coordinator.drainOnce()).reason, "NO_ELIGIBLE");
+  assert.equal(availabilityCalls, 1); assert.equal(coordinator.pending.SELL.get("BTC:availability-retry").lastDeferReason, "MAX_AVAIL_FAILED");
+  assert.equal(coordinator.pending.SELL.get("BTC:availability-retry").notBefore, 2_000);
+  await coordinator.drainOnce(); assert.equal(availabilityCalls, 1, "the retry is held until its backoff expires");
+  current = 2_000; await coordinator.drainOnce(); assert.equal(availabilityCalls, 2);
+  assert.equal(events.filter((event) => event.reason === "MAX_AVAIL_FAILED").length, 2, "each failed availability round emits one bounded error summary");
+});
+
 test("P3 market WS storm blocks BUY but never suppresses an already-triggered exit", () => {
   const now = clock(); const market = new MarketProjection({ clock: now }); const account = new AccountCapitalSnapshot({ clock: now }); account.update({ ts: 1, totalEq: "100", adjEq: "100" });
   market.updateInstrument({ instId: "BTC-USDT", ts: 1, state: "live", tickSz: "0.1", lotSz: "0.1", minSz: "0.1", base: "BTC" });
