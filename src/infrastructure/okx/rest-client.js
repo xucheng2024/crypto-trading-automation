@@ -33,6 +33,7 @@ export function assertOkxResponse(result, { requireData = false } = {}) {
     const error = new Error(result?.msg ? `OKX code ${code}: ${result.msg}` : `OKX code ${code}`);
     error.okxCode = String(code);
     error.okxMessageClass = classifyOkxMessage(result?.msg);
+    error.okxSummary = safeOkxSummary(result?.msg);
     throw error;
   }
   if (requireData && (!Array.isArray(result.data) || result.data.length === 0)) {
@@ -41,6 +42,18 @@ export function assertOkxResponse(result, { requireData = false } = {}) {
     throw error;
   }
   return result.data || [];
+}
+
+export function safeOkxSummary(message) {
+  const text = String(message ?? "").trim();
+  if (!text) return undefined;
+  return text
+    .replace(/https?:\/\/\S+/gi, "[URL]")
+    .replace(/\b(?:\d{1,3}\.){3}\d{1,3}\b/g, "[IP]")
+    .replace(/\b(api.?key|secret|passphrase|token)\s*[:=]\s*\S+/gi, "$1=[REDACTED]")
+    .replace(/\b[A-Za-z0-9+/_=-]{24,}\b/g, "[TOKEN]")
+    .replace(/\b\d{6,}\b/g, "[ID]")
+    .slice(0, 160);
 }
 
 function classifyOkxMessage(message) {
@@ -62,6 +75,7 @@ export function safeOkxFailure(error, { endpoint, durationMs, attempts } = {}) {
   const httpStatus = Number.isInteger(error?.httpStatus) ? error.httpStatus : undefined;
   const okxCode = error?.okxCode === undefined ? undefined : String(error.okxCode);
   const okxMessageClass = error?.okxMessageClass;
+  const okxSummary = error?.okxSummary;
   const responseClass = error?.responseClass ?? (/non-JSON/i.test(message) ? "NON_JSON" : undefined);
   const timeout = /timeout|timed out|abort/i.test(`${name} ${message}`);
   const network = /network|connect|connection|fetch|socket|econn|enotfound|eai_again/i.test(`${name} ${message}`);
@@ -73,6 +87,7 @@ export function safeOkxFailure(error, { endpoint, durationMs, attempts } = {}) {
     httpStatus,
     okxCode,
     okxMessageClass,
+    okxSummary,
     responseClass,
   };
 }
@@ -217,7 +232,7 @@ export class OkxRestClient {
         if (!response.ok || response.status === 429 || response.status >= 500 || result.code === "50011") {
           const error = new Error(`OKX HTTP ${response.status}: ${result.msg || raw.slice(0, 200)}`);
           error.httpStatus = response.status;
-          if (result?.code !== undefined) { error.okxCode = String(result.code); error.okxMessageClass = classifyOkxMessage(result.msg); }
+          if (result?.code !== undefined) { error.okxCode = String(result.code); error.okxMessageClass = classifyOkxMessage(result.msg); error.okxSummary = safeOkxSummary(result.msg); }
           error.retryable = response.status === 429 || response.status >= 500 || result.code === "50011";
           error.delay = retryAfter(response, this.clock.nowMs()) ?? Math.min(15_000, 1_000 * 2 ** attempt);
           throw error;

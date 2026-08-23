@@ -103,7 +103,7 @@ test("Azure ops summary exposes only redacted operational error classes", () => 
 });
 
 test("Azure ops summary prints structured max-avail diagnostics without raw exchange text", () => {
-  assert.equal(formatSevereDiagnostic({ timestamp: "t", classification: "CURRENT_OR_UNATTRIBUTED", message: "exit_deferred MAX_AVAIL_FAILED", error: "OKX_ERROR", failureClass: "OKX_ERROR", endpoint: "/api/v5/account/max-avail-size", httpStatus: "400", okxCode: "51000", okxMessageClass: "PARAMETER", responseClass: "", durationMs: 123, attempts: 4 }), "  t CURRENT_OR_UNATTRIBUTED exit_deferred MAX_AVAIL_FAILED error=OKX_ERROR class=OKX_ERROR endpoint=/api/v5/account/max-avail-size http_status=400 okx_code=51000 okx_message=PARAMETER duration_ms=123 attempts=4");
+  assert.equal(formatSevereDiagnostic({ timestamp: "t", classification: "CURRENT_OR_UNATTRIBUTED", message: "exit_deferred MAX_AVAIL_FAILED", error: "OKX_ERROR", failureClass: "OKX_ERROR", endpoint: "/api/v5/account/max-avail-size", httpStatus: "400", okxCode: "51000", okxMessageClass: "PARAMETER", okxSummary: "Parameter reduceOnly error", responseClass: "", durationMs: 123, attempts: 4 }), "  t CURRENT_OR_UNATTRIBUTED exit_deferred MAX_AVAIL_FAILED error=OKX_ERROR class=OKX_ERROR endpoint=/api/v5/account/max-avail-size http_status=400 okx_code=51000 okx_message=PARAMETER okx_summary=\"Parameter reduceOnly error\" duration_ms=123 attempts=4");
 });
 
 test("Azure ops summary compacts workflow failures, approvals, and runner readiness", () => {
