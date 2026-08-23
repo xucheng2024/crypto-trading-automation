@@ -41,17 +41,40 @@ export function countCsvInstruments(value) {
   return new Set(String(value ?? "").split(",").map((item) => item.trim()).filter(Boolean)).size;
 }
 
-export function formatDecisionTelemetryLine({ windowInstruments, currentStateCoverage, currentStates, runtimeInstruments, repoEnabled, strategyReadyInstruments }) {
+export function formatDecisionTelemetryLine({ windowInstruments, currentStateCoverage, currentStates, runtimeInstruments, repoEnabled, strategyReadyInstruments, strategyBaseline }) {
   const runtime = Number.isInteger(runtimeInstruments) ? runtimeInstruments : "missing";
   const ready = Number.isInteger(strategyReadyInstruments) ? strategyReadyInstruments : "unavailable";
   const stateCount = currentStateCoverage ?? (currentStates ? currentStates.waiting + currentStates.policy + currentStates.blocked + currentStates.opportunity : null);
   const current = stateCount == null ? "" : `; current-state=${stateCount}`;
   const split = currentStates ? ` waiting=${currentStates.waiting} policy=${currentStates.policy} blocked=${currentStates.blocked}` : "";
-  return `Decision telemetry: ${windowInstruments} instruments with decision telemetry / ${runtime} runtime / ${repoEnabled} repo-enabled${current}${split}; strategy_ready=${ready}`;
+  const baseline = strategyBaseline ? ` baseline=${strategyBaseline.status}` : "";
+  return `Decision telemetry: ${windowInstruments} instruments with decision telemetry / ${runtime} runtime / ${repoEnabled} repo-enabled${current}${split}; strategy_ready=${ready}${baseline}`;
 }
 
 function optionalInt(value) {
   return value == null || value === "" || !Number.isFinite(Number(value)) ? null : Number(value);
+}
+
+function kustoString(value) {
+  return `'${String(value).replaceAll("'", "''")}'`;
+}
+
+export function strategyBaselineQuery(revisionName) {
+  if (!revisionName) return null;
+  const revision = kustoString(revisionName);
+  const replicaPrefix = kustoString(`${revisionName}-`);
+  return `traces | where timestamp > ago(7d) | where message startswith 'strategy_baseline ' | where cloud_RoleInstance == ${revision} or cloud_RoleInstance startswith ${replicaPrefix} | top 1 by timestamp desc | project timestamp, status=tostring(customDimensions.reason), instruments=toint(customDimensions.instruments), strategyDay=tostring(customDimensions.strategyDay), instance=cloud_RoleInstance`;
+}
+
+export function parseStrategyBaseline(row) {
+  if (!row || !["STRATEGY_READY", "STRATEGY_BASELINE_FAILED"].includes(row.status)) return { status: "UNAVAILABLE" };
+  return {
+    status: row.status,
+    timestamp: row.timestamp ?? null,
+    strategyDay: row.strategyDay || null,
+    instruments: row.status === "STRATEGY_READY" ? optionalInt(row.instruments) : null,
+    instance: row.instance || null,
+  };
 }
 
 export function formatPipelineCoverageLine(row) {
@@ -647,7 +670,8 @@ export async function main(argv = process.argv.slice(2)) {
 
   const app = azJson(["containerapp", "show", "--resource-group", resourceGroup, "--name", appName]);
   const active = azJson(["containerapp", "revision", "list", "--resource-group", resourceGroup, "--name", appName]).filter((revision) => revision.properties?.active);
-  const revisionName = app.properties?.latestReadyRevisionName;
+  const revision = active[0];
+  const revisionName = revision?.name ?? app.properties?.latestReadyRevisionName;
   const replicas = azJson(["containerapp", "replica", "list", "--resource-group", resourceGroup, "--name", appName, "--revision", revisionName]);
   const traffic = azJson(["containerapp", "ingress", "traffic", "show", "--resource-group", resourceGroup, "--name", appName]);
 
@@ -658,7 +682,7 @@ export async function main(argv = process.argv.slice(2)) {
   const observabilityQuery = `traces | where ${timeFilter} | where message startswith 'fill_reconciliation FILL_BATCH_COMMITTED' or message startswith 'sell_watch_loaded SELL_WATCH_SNAPSHOT' | project timestamp, message, customDimensions | order by timestamp desc | take 1000`;
   const blockQuery = `traces | where ${timeFilter} | where message startswith 'block_evidence ' | project timestamp, message, customDimensions | order by timestamp desc | take 5000`;
   const errorQuery = `traces | where ${timeFilter} | where severityLevel >= 3 | project timestamp, message, cloudRoleInstance=cloud_RoleInstance, tradingMode=tostring(customDimensions.tradingMode) | order by timestamp desc | take 10`;
-  const baselineQuery = "traces | where timestamp > ago(7d) | where message startswith 'strategy_baseline STRATEGY_READY' | top 1 by timestamp desc | project timestamp, instruments=toint(customDimensions.instruments)";
+  const baselineQuery = strategyBaselineQuery(revision?.name);
   const pipelineQuery = "traces | where timestamp > ago(24h) | where message startswith 'instrument_pipeline_coverage ' | top 1 by timestamp desc | project timestamp, runtime=toint(customDimensions.runtime), quote_ready=toint(customDimensions.quote_ready), candle_ready=toint(customDimensions.candle_ready), strategy_row=toint(customDimensions.strategy_row), daily_state=toint(customDimensions.daily_state), evaluator_seen=toint(customDimensions.evaluator_seen), decision_emit=toint(customDimensions.decision_emit), no_market_data=toint(customDimensions.no_market_data), candle_not_initialized=toint(customDimensions.candle_not_initialized), no_strategy_row=toint(customDimensions.no_strategy_row), strategy_state_never_created=toint(customDimensions.strategy_state_never_created), filtered_before_evaluator=toint(customDimensions.filtered_before_evaluator), unknown=toint(customDimensions.unknown)";
   const metric = appInsightsQuery(resourceGroup, appInsights, metricQuery)[0] ?? null;
   const needDecisions = options.command !== "snapshot";
@@ -677,17 +701,16 @@ export async function main(argv = process.argv.slice(2)) {
   }
   const decisions = summarizeDecisions([...groupedDecisions.values()]);
   const errors = needErrors ? appInsightsQuery(resourceGroup, appInsights, errorQuery) : [];
-  const baseline = needDecisions ? appInsightsQuery(resourceGroup, appInsights, baselineQuery)[0] ?? null : null;
+  const baseline = needDecisions && baselineQuery ? parseStrategyBaseline(appInsightsQuery(resourceGroup, appInsights, baselineQuery)[0] ?? null) : { status: "UNAVAILABLE" };
   const pipelineCoverage = needDecisions ? parsePipelineCoverageRow(appInsightsQuery(resourceGroup, appInsights, pipelineQuery)[0] ?? null) : null;
   const artifact = JSON.parse(await readFile(new URL("../infrastructure/config/p5-enabled-instruments.json", import.meta.url), "utf8"));
   const routeByInst = new Map([...(artifact.routes?.margin ?? []).map((instId) => [instId, "margin"]), ...(artifact.routes?.spot ?? []).map((instId) => [instId, "spot"])]);
   const trading = summarizeTrading(decisionEvents, lifecycleEvents, routeByInst, currentDecisionEvents, blockEvents, observabilityEvents);
   const assessment = assessRuntime({ app, active, replicas, traffic, metric, expectedMode: options.expectedMode });
-  const revision = active[0]; const container = revision?.properties?.template?.containers?.[0];
+  const container = revision?.properties?.template?.containers?.[0];
   const okxInstruments = container?.env?.find((row) => row.name === "OKX_INSTRUMENTS")?.value;
   const runtimeInstruments = okxInstruments ? countCsvInstruments(okxInstruments) : null;
-  const strategyReadyRaw = baseline?.instruments;
-  const strategyReadyInstruments = strategyReadyRaw == null || strategyReadyRaw === "" || !Number.isFinite(Number(strategyReadyRaw)) ? null : Number(strategyReadyRaw);
+  const strategyReadyInstruments = baseline.status === "STRATEGY_READY" ? baseline.instruments : null;
   const severe = classifySevereTraces(errors, revision?.name);
   const replicaContainers = replicas.flatMap((replica) => replica.properties?.containers ?? []);
   const summary = {
@@ -702,7 +725,7 @@ export async function main(argv = process.argv.slice(2)) {
       replicas: replicas.length, readyContainers: replicaContainers.filter((row) => row.ready).length,
       restarts: replicaContainers.reduce((sum, row) => sum + Number(row.restartCount ?? 0), 0),
     },
-    telemetry: { ...metric, configuredInstruments: artifact.enabled_count, repoEnabledInstruments: artifact.enabled_count, runtimeInstruments, strategyReadyInstruments, observedInstruments: decisions.instruments, decisions: decisions.decisions, reasons: decisions.reasons, pipelineCoverage },
+    telemetry: { ...metric, configuredInstruments: artifact.enabled_count, repoEnabledInstruments: artifact.enabled_count, runtimeInstruments, strategyReadyInstruments, strategyBaseline: baseline, observedInstruments: decisions.instruments, decisions: decisions.decisions, reasons: decisions.reasons, pipelineCoverage },
     trading,
     severeTraces: severe.traces, currentSevereTraces: severe.current, inactiveSevereTraces: severe.inactive, transitionTraces: severe.transitions,
     riskSignals: [...severe.current, ...severe.inactive].filter((row) => /HALT|READY_FALSE|WATCHDOG|UNKNOWN|OWNER_LOST|STALE/i.test(row.message ?? "")),
@@ -719,7 +742,7 @@ export async function main(argv = process.argv.slice(2)) {
       console.log(`Revision: ${summary.runtime.revision} | ${summary.runtime.mode} | ${summary.runtime.runningState}/${summary.runtime.healthState}`);
       console.log(`Runtime: traffic=${summary.runtime.trafficWeight}% replicas=${summary.runtime.replicas} ready=${summary.runtime.readyContainers} restarts=${summary.runtime.restarts} image=${summary.runtime.image}`);
       console.log(`Latest metrics: ready=${metric?.ready ?? "missing"} events=${metric?.eventCount ?? 0} decisions=${metric?.decisionCount ?? decisions.decisions}`);
-      console.log(formatDecisionTelemetryLine({ windowInstruments: decisions.instruments, currentStateCoverage: trading.currentStateCoverage, currentStates: trading.currentStates, runtimeInstruments, repoEnabled: artifact.enabled_count, strategyReadyInstruments }));
+      console.log(formatDecisionTelemetryLine({ windowInstruments: decisions.instruments, currentStateCoverage: trading.currentStateCoverage, currentStates: trading.currentStates, runtimeInstruments, repoEnabled: artifact.enabled_count, strategyReadyInstruments, strategyBaseline: baseline }));
       console.log(formatPipelineCoverageLine(pipelineCoverage));
       console.log(`Latency: enqueue_p99=${metric?.eventP99 ?? "?"}ms decision_p99=${metric?.decisionP99 ?? "?"}ms source_lag_p99=${metric?.sourceLagP99 ?? "?"}ms`);
       console.log(`Queues: current=${metric?.queueDepth ?? "?"} pending_buy=${metric?.pendingBuy ?? "?"} exit_backlog=${metric?.exitBacklog ?? "?"}`);
@@ -736,7 +759,7 @@ export async function main(argv = process.argv.slice(2)) {
     } else if (options.command === "activity") {
       console.log(`Activity telemetry: opportunities=${trading.events.queued} prepared=${trading.events.prepared} submitted=${trading.events.submitted} settled=${trading.events.settled} ledger_confirmed=${trading.events.ledgerConfirmed} unknown=${trading.events.unknown} not_created=${trading.events.notCreated}`);
       console.log(`Durable recovery confirmation: coverage=${trading.observability.reconciliationCoverage} inserted=${trading.observability.recoveredInserted} linked=${trading.observability.recoveredLinked}`);
-      console.log(`${formatDecisionTelemetryLine({ windowInstruments: decisions.instruments, runtimeInstruments, repoEnabled: artifact.enabled_count, strategyReadyInstruments })} | ${topReasons}`);
+      console.log(`${formatDecisionTelemetryLine({ windowInstruments: decisions.instruments, runtimeInstruments, repoEnabled: artifact.enabled_count, strategyReadyInstruments, strategyBaseline: baseline })} | ${topReasons}`);
     } else {
       const blockReasons = Object.entries(trading.blockedReasons).map(([reason, count]) => `${reason}=${count}`).join(", ") || "none";
       console.log(`Blocks: safety_events=${trading.blocked.length} current_safety=${trading.currentStates.blocked} current_policy=${trading.currentStates.policy}`);

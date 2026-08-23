@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { assessRuntime, classifyBlock, classifyDecision, classifySevereTraces, countCsvInstruments, formatDecisionTelemetryLine, formatInstrumentTimelineSummary, formatPipelineCoverageLine, formatPositionsSummary, instrumentTimelineReadJobName, parseArgs, parseInstrumentTimelineLog, parseManagedPositionsLog, parsePipelineCoverageRow, positionsReadJobName, queryRows, redactPositionsArtifact, runInstrumentTimelineCommand, runPositionsCommand, summarizeDecisions, summarizeDeployment, summarizeRunner, summarizeTrading, traceEvents } from "../scripts/azure-ops-summary.mjs";
+import { assessRuntime, classifyBlock, classifyDecision, classifySevereTraces, countCsvInstruments, formatDecisionTelemetryLine, formatInstrumentTimelineSummary, formatPipelineCoverageLine, formatPositionsSummary, instrumentTimelineReadJobName, parseArgs, parseInstrumentTimelineLog, parseManagedPositionsLog, parsePipelineCoverageRow, parseStrategyBaseline, positionsReadJobName, queryRows, redactPositionsArtifact, runInstrumentTimelineCommand, runPositionsCommand, strategyBaselineQuery, summarizeDecisions, summarizeDeployment, summarizeRunner, summarizeTrading, traceEvents } from "../scripts/azure-ops-summary.mjs";
 
 test("Azure ops summary converts query tables and aggregates decisions", () => {
   assert.deepEqual(queryRows({ tables: [{ columns: [{ name: "reason" }, { name: "decisions" }], rows: [["WAIT", 2]] }] }), [{ reason: "WAIT", decisions: 2 }]);
@@ -190,6 +190,17 @@ test("Azure ops summary labels decision telemetry against runtime and repo-enabl
   assert.equal(formatDecisionTelemetryLine({
     windowInstruments: 94, runtimeInstruments: null, repoEnabled: 146, strategyReadyInstruments: 146,
   }), "Decision telemetry: 94 instruments with decision telemetry / missing runtime / 146 repo-enabled; strategy_ready=146");
+});
+
+test("Azure ops summary attributes strategy baselines to the current revision and latest outcome", () => {
+  const query = strategyBaselineQuery("engine--full-new");
+  assert.match(query, /message startswith 'strategy_baseline '/);
+  assert.match(query, /cloud_RoleInstance == 'engine--full-new' or cloud_RoleInstance startswith 'engine--full-new-'/);
+  assert.match(query, /top 1 by timestamp desc/);
+  assert.equal(parseStrategyBaseline({ timestamp: "2026-08-23T00:00:00Z", status: "STRATEGY_READY", instruments: "146", strategyDay: "2026-08-23", instance: "engine--full-new-abc" }).instruments, 146);
+  assert.deepEqual(parseStrategyBaseline({ timestamp: "2026-08-23T00:01:00Z", status: "STRATEGY_BASELINE_FAILED", instruments: "146", strategyDay: "2026-08-23", instance: "engine--full-new-abc" }), { status: "STRATEGY_BASELINE_FAILED", timestamp: "2026-08-23T00:01:00Z", strategyDay: "2026-08-23", instruments: null, instance: "engine--full-new-abc" });
+  assert.deepEqual(parseStrategyBaseline(null), { status: "UNAVAILABLE" });
+  assert.equal(strategyBaselineQuery("engine--full'o").includes("'engine--full''o'"), true);
 });
 
 test("Azure ops summary fails closed on unsafe runtime state", () => {
