@@ -116,8 +116,11 @@ test("P4 timeline-read job is manual, image-backed, and SELECT-only", async () =
   assert.match(dockerfile, /scripts\/query-instrument-timeline\.mjs/);
   assert.match(deploy, /timeline-read/);
   const sql = await readFile("docs/runbooks/P4_POSTGRES_ENTRA_BOOTSTRAP.sql", "utf8");
-  assert.match(sql, /GRANT SELECT ON TABLE order_attempts, filled_orders, instrument_protection TO "<INSTRUMENT_TIMELINE_READ_MI_NAME>"/);
+  assert.match(sql, /GRANT SELECT ON TABLE order_attempts, filled_orders, instrument_protection, sync_watermarks TO "<INSTRUMENT_TIMELINE_READ_MI_NAME>"/);
   assert.doesNotMatch(sql, /GRANT EXECUTE ON FUNCTION[\s\S]*INSTRUMENT_TIMELINE_READ/);
+  const migration = await readFile("migrations/postgres/0011_timeline_watermark_read.sql", "utf8");
+  assert.match(migration, /GRANT SELECT ON TABLE sync_watermarks TO %I/);
+  assert.doesNotMatch(migration, /GRANT (?:INSERT|UPDATE|DELETE)|GRANT EXECUTE/);
 });
 
 test("P4 positions-read job is manual, image-backed, and SELECT-only", async () => {

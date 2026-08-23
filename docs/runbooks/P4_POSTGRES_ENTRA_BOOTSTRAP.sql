@@ -24,7 +24,7 @@ GRANT SELECT, INSERT, UPDATE ON TABLE order_attempts, filled_orders, sync_waterm
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO "<ENGINE_MI_NAME>";
 GRANT SELECT ON TABLE order_attempts, filled_orders, sync_watermarks TO "<MAINTENANCE_MI_NAME>";
 GRANT SELECT ON TABLE filled_orders TO "<POSITIONS_READ_MI_NAME>";
-GRANT SELECT ON TABLE order_attempts, filled_orders, instrument_protection TO "<INSTRUMENT_TIMELINE_READ_MI_NAME>";
+GRANT SELECT ON TABLE order_attempts, filled_orders, instrument_protection, sync_watermarks TO "<INSTRUMENT_TIMELINE_READ_MI_NAME>";
 -- Retention is a fixed SECURITY DEFINER function owned by the migration role;
 -- Maintenance gets EXECUTE only, never general DELETE or order creation.
 GRANT EXECUTE ON FUNCTION p4_retain_terminal_attempts(timestamptz, integer) TO "<MAINTENANCE_MI_NAME>";
