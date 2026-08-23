@@ -16,7 +16,7 @@ function add(left, right) {
 export class OrderCoordinator {
   constructor({ transaction, orders, state, transport, ownerGuard, readyGate, market, account, mode = () => "OFF", executionRoute = () => "margin", tradeQuoteCurrency = () => null, isBuyAllowed = () => true, clock = { nowMs: () => Date.now() }, config, telemetry = () => {}, onBuySettled = null, onExitSettled = null, onExitSubmitted = null, onExitDust = null, slo = null }) {
     Object.assign(this, { transaction, orders, state, transport, ownerGuard, readyGate, market, account, mode, executionRoute, tradeQuoteCurrency, isBuyAllowed, clock, config, telemetry, onBuySettled, onExitSettled, onExitSubmitted, onExitDust, slo });
-    this.pending = { BUY: new Map(), SELL: new Map(), DELIST: new Map() }; this.submitting = false; this.accepting = true; this.isolatedBases = new Set(); this.buyBlockStates = new Map();
+    this.pending = { BUY: new Map(), SELL: new Map(), DELIST: new Map() }; this.submitting = false; this.accepting = true; this.isolatedBases = new Set(); this.buyBlockStates = new Map(); this.exitAvailabilityNotBefore = { SELL: 0, DELIST: 0 };
   }
   enqueue(intent) {
     if (!this.accepting) return false;
@@ -224,6 +224,10 @@ export class OrderCoordinator {
       }
     }
     if (!eligible.length) return [];
+    // max-avail-size is an account-wide endpoint. Its cooldown must outlive
+    // individual pending intents, because new/replayed fills can otherwise
+    // bypass their own notBefore values and recreate a request storm.
+    if ((this.exitAvailabilityNotBefore[kind] ?? 0) > this.clock.nowMs()) return [];
     let available;
     try {
       const routed = eligible.map((intent) => ({ intent, executionRoute: this._executionRoute(intent), executionMode: this._executionMode(intent) })).filter((row) => row.executionRoute && row.executionMode);
@@ -234,6 +238,8 @@ export class OrderCoordinator {
       // Availability is an account-wide read.  Leaving these intents immediately
       // eligible turns a transient API failure into a retry storm on every work
       // loop, which can prolong rate limiting and obscure later reconciliation.
+      const retryAt = this.clock.nowMs() + 1_000;
+      this.exitAvailabilityNotBefore[kind] = retryAt;
       for (const intent of eligible) this._deferExit(intent, kind, "MAX_AVAIL_FAILED", 1_000, false);
       this._emit({ type: "exit_deferred", intent: kind, reason: "MAX_AVAIL_FAILED", error: error?.message, candidateCount: eligible.length });
       return [];

@@ -98,6 +98,7 @@ test("P3 exit availability failures defer retries instead of retrying on every w
   assert.equal(coordinator.pending.SELL.get("BTC:availability-retry").notBefore, 2_000);
   coordinator.enqueue({ intent: "SELL", instId: "BTC-USDT", baseCcy: "BTC", sourceBuyTradeId: "availability-retry", remainingSize: "1", fillVersion: 1, sellTime: 1, bidPx: "99" });
   assert.equal(coordinator.pending.SELL.get("BTC:availability-retry").notBefore, 2_000, "a duplicate SELL enqueue must not erase an active availability backoff");
+  coordinator.enqueue({ intent: "SELL", instId: "ETH-USDT", baseCcy: "ETH", sourceBuyTradeId: "availability-other", remainingSize: "1", fillVersion: 1, sellTime: 1 });
   await coordinator.drainOnce(); assert.equal(availabilityCalls, 1, "the retry is held until its backoff expires");
   current = 2_000; await coordinator.drainOnce(); assert.equal(availabilityCalls, 2);
   assert.equal(events.filter((event) => event.reason === "MAX_AVAIL_FAILED").length, 2, "each failed availability round emits one bounded error summary");
