@@ -2,7 +2,10 @@
 
 The workflows in `.github/workflows/` implement the production release path:
 
-`validate → immutable linux/amd64 image → migration → one OFF revision → explicit FULL promote → one FULL revision`.
+`validate → immutable linux/amd64 image → migration → one OFF revision → one FULL revision`.
+
+The OFF revision must become healthy before the workflow automatically creates
+the FULL revision from the same immutable digest.
 
 The engine uses a PostgreSQL advisory owner lock. It is intentionally a
 singleton, so this is not a blue/green traffic deployment: a second revision
@@ -70,23 +73,23 @@ by Container Apps. Rotate `GH_RUNNER_PAT` by rerunning the bootstrap workflow.
 
 ## Use
 
-Run **Production deploy** manually. With `promote_full=false`, it stops at the
-verified OFF revision. With `promote_full=true`, the same `production`
-environment is used for the mode change; authorize that input explicitly
-before running it. The workflow has a repository-wide `production-deploy`
-concurrency group, so two deployments cannot modify revisions concurrently.
+Run **Production deploy** manually. It verifies an OFF revision, then promotes
+the same digest to FULL automatically. The workflow has a repository-wide
+`production-deploy` concurrency group, so two deployments cannot modify
+revisions concurrently.
 
-After an OFF deployment has already been verified, use **Production promote
-FULL** for the separately authorized transition. It promotes the exact healthy
-OFF digest without rebuilding, rerunning
-tests, reopening the database firewall, or reapplying migrations.
+Use **Production promote FULL** only to recover from a production deployment
+that completed at OFF before this workflow change. It promotes the exact
+healthy OFF digest without rebuilding, rerunning tests, reopening the database
+firewall, or reapplying migrations.
 
 Production deploy requires a successful `CI` run for the exact commit instead
-of repeating the suite. Images tagged with the same commit are reused. The
-PostgreSQL server records the reviewed migration-set fingerprint after a
-successful application; unchanged sets skip dependency installation. A
-changed migration waits for the same workflow run's image build to succeed
-before SQL is applied.
+of repeating the suite, and fails immediately if CI is still running. Images
+tagged with the same commit are reused. The PostgreSQL server records the
+reviewed migration-set fingerprint after a successful application; unchanged
+sets skip dependency installation. Migration runs only after the image build
+succeeds, so the single VNet migration Runner is never reserved while it waits
+for an image.
 
 `scripts/apply-postgres-migrations.mjs` stores a SHA-256 hash for each reviewed
 migration in `schema_migrations`. A changed historical migration fails closed;
