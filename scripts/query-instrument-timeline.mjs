@@ -53,9 +53,25 @@ export const INSTRUMENT_TIMELINE_SQL = `
       FROM instrument_protection
       WHERE inst_id = $1
     ) events
+  ), reconciliation AS (
+    SELECT
+      (SELECT watermark::text FROM sync_watermarks WHERE account_id=(SELECT min(account_id) FROM account_scope) AND inst_type='SPOT' AND endpoint='fills') AS spot_watermark,
+      (SELECT watermark::text FROM sync_watermarks WHERE account_id=(SELECT min(account_id) FROM account_scope) AND inst_type='MARGIN' AND endpoint='fills') AS margin_watermark,
+      LEAST(
+        (SELECT watermark FROM sync_watermarks WHERE account_id=(SELECT min(account_id) FROM account_scope) AND inst_type='SPOT' AND endpoint='fills'),
+        (SELECT watermark FROM sync_watermarks WHERE account_id=(SELECT min(account_id) FROM account_scope) AND inst_type='MARGIN' AND endpoint='fills')
+      )::text AS safe_watermark,
+      (SELECT count(*)::int FROM filled_orders WHERE account_id=(SELECT min(account_id) FROM account_scope) AND inst_id=$1 AND side='SELL' AND source='ACCOUNT' AND allocation_state='PENDING') AS pending_account_sells,
+      (SELECT count(*)::int FROM filled_orders WHERE account_id=(SELECT min(account_id) FROM account_scope) AND inst_id=$1 AND side='SELL' AND source='ACCOUNT' AND allocation_state='PENDING' AND fill_time <= LEAST(
+        (SELECT watermark FROM sync_watermarks WHERE account_id=(SELECT min(account_id) FROM account_scope) AND inst_type='SPOT' AND endpoint='fills'),
+        (SELECT watermark FROM sync_watermarks WHERE account_id=(SELECT min(account_id) FROM account_scope) AND inst_type='MARGIN' AND endpoint='fills')
+      )) AS eligible_pending_account_sells,
+      (SELECT min(fill_time)::text FROM filled_orders WHERE account_id=(SELECT min(account_id) FROM account_scope) AND inst_id=$1 AND side='SELL' AND source='ACCOUNT' AND allocation_state='PENDING') AS oldest_pending_fill_time,
+      (SELECT count(*)::int FROM filled_orders WHERE account_id=(SELECT min(account_id) FROM account_scope) AND base_ccy=(SELECT min(base_ccy) FROM filled_orders WHERE account_id=(SELECT min(account_id) FROM account_scope) AND inst_id=$1) AND ((side='SELL' AND source='ACCOUNT' AND allocation_state='PENDING') OR side='BUY') AND (bill_id IS NULL OR bill_id !~ '^[0-9]+$')) AS invalid_bill_ids,
+      (SELECT count(*)::int FROM order_attempts WHERE account_id=(SELECT min(account_id) FROM account_scope) AND base_ccy=(SELECT min(base_ccy) FROM filled_orders WHERE account_id=(SELECT min(account_id) FROM account_scope) AND inst_id=$1) AND intent IN ('SELL','DELIST') AND state IN ('PREPARED','SUBMITTED','UNKNOWN')) AS active_system_exits
   )
-  SELECT timeline.*, (SELECT count(*)::int FROM account_scope) AS scope_account_count
-  FROM timeline
+  SELECT timeline.*, (SELECT count(*)::int FROM account_scope) AS scope_account_count, reconciliation.*
+  FROM timeline CROSS JOIN reconciliation
   ORDER BY event_time ASC, event_type ASC`;
 
 export function validateInstrument(instrument) {
@@ -87,6 +103,16 @@ export function redactTimeline(instrument, rows) {
       fills: timeline.filter((row) => row.eventType === "FILL").length,
       protectionSnapshots: timeline.filter((row) => row.eventType === "PROTECTION").length,
       attemptStates: Object.fromEntries(timeline.filter((row) => row.eventType === "ORDER_ATTEMPT").reduce((counts, row) => counts.set(row.state, (counts.get(row.state) ?? 0) + 1), new Map())),
+      reconciliation: {
+        spotWatermark: rows[0]?.spot_watermark ?? null,
+        marginWatermark: rows[0]?.margin_watermark ?? null,
+        safeWatermark: rows[0]?.safe_watermark ?? null,
+        pendingAccountSells: Number(rows[0]?.pending_account_sells ?? 0),
+        eligiblePendingAccountSells: Number(rows[0]?.eligible_pending_account_sells ?? 0),
+        oldestPendingFillTime: rows[0]?.oldest_pending_fill_time ?? null,
+        invalidBillIds: Number(rows[0]?.invalid_bill_ids ?? 0),
+        activeSystemExits: Number(rows[0]?.active_system_exits ?? 0),
+      },
     },
     timeline,
   };

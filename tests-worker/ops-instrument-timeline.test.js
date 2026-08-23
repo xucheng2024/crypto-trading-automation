@@ -23,17 +23,18 @@ test("instrument timeline uses a parameterized constant SELECT inside a read-onl
   await assert.rejects(queryInstrumentTimeline({ instrument: "BTC-USDT", connectionString: "postgresql://user@host/db", credential: { getToken: async () => ({ token: "token", expiresOnTimestamp: Date.now() + 10_000 }) }, Pool: class { on() {} async connect() { return { query: async (sql) => sql === INSTRUMENT_TIMELINE_SQL ? { rows: [{ scope_account_count: 2 }] } : {}, release() {} }; } async end() {} } }), /ambiguous across accounts/);
 });
 
-test("instrument timeline output retains decimal and state fields while excluding secret ledger fields", () => {
-  const output = redactTimeline("BTC-USDT", [{ event_time: "2026-01-01T00:00:00Z", event_type: "ORDER_ATTEMPT", record_kind: "CURRENT_STATE_SNAPSHOT", state_observed_at: "2026-01-01T01:00:00Z", attempt_ref: "A1", intent: "BUY", state: "PREPARED", reservation_state: "ACTIVE", execution_mode: "cross", execution_route: "margin", planned_size: "0.123456789", reserved_exposure_usd: "12.34", execution_limit_price: "99.99", sell_time: "1", force_sell_time: "2", protection_price: "98.5", sell_trigger_reason: "PRICE_BREAKDOWN", account_id: "forbidden", trade_id: "forbidden", cl_ord_id: "forbidden", decision_id: "forbidden", payload_hash: "forbidden", fee: "forbidden", strategy_config_hash: "forbidden", error_message: "forbidden" }]);
+test("instrument timeline output retains decimal, state, and safe reconciliation evidence while excluding secret ledger fields", () => {
+  const output = redactTimeline("BTC-USDT", [{ event_time: "2026-01-01T00:00:00Z", event_type: "ORDER_ATTEMPT", record_kind: "CURRENT_STATE_SNAPSHOT", state_observed_at: "2026-01-01T01:00:00Z", attempt_ref: "A1", intent: "BUY", state: "PREPARED", reservation_state: "ACTIVE", execution_mode: "cross", execution_route: "margin", planned_size: "0.123456789", reserved_exposure_usd: "12.34", execution_limit_price: "99.99", sell_time: "1", force_sell_time: "2", protection_price: "98.5", sell_trigger_reason: "PRICE_BREAKDOWN", spot_watermark: "100", margin_watermark: "90", safe_watermark: "90", pending_account_sells: 2, eligible_pending_account_sells: 1, oldest_pending_fill_time: "95", invalid_bill_ids: 0, active_system_exits: 0, account_id: "forbidden", trade_id: "forbidden", cl_ord_id: "forbidden", decision_id: "forbidden", payload_hash: "forbidden", fee: "forbidden", strategy_config_hash: "forbidden", error_message: "forbidden" }]);
   const encoded = JSON.stringify(output); assert.match(encoded, /0.123456789/); assert.match(encoded, /PREPARED/); assert.match(encoded, /PRICE_BREAKDOWN/);
   assert.equal(output.attemptRefScope, "QUERY_SNAPSHOT"); assert.deepEqual(output.summary.attemptStates, { PREPARED: 1 }); assert.equal(output.timeline[0].stateObservedAt, "2026-01-01T01:00:00Z"); assert.equal(output.timeline[0].attemptRef, "A1");
+  assert.deepEqual(output.summary.reconciliation, { spotWatermark: "100", marginWatermark: "90", safeWatermark: "90", pendingAccountSells: 2, eligiblePendingAccountSells: 1, oldestPendingFillTime: "95", invalidBillIds: 0, activeSystemExits: 0 });
   for (const forbidden of ["account_id", "trade_id", "cl_ord_id", "decision_id", "payload_hash", "fee", "strategy_config_hash", "error_message", "forbidden"]) assert.doesNotMatch(encoded, new RegExp(forbidden));
 });
 
 test("trade CLI starts the VNet timeline job and keeps only the redacted association fields", async () => {
   const options = parseArgs(["trade", "--instrument", "BTC-USDT", "--request", "--resource-group", "rg", "--app", "trading-cae-engine"]);
   const calls = [];
-  const payload = { instrument: "BTC-USDT", attemptRefScope: "QUERY_SNAPSHOT", summary: { attemptSnapshots: 1, fills: 1, protectionSnapshots: 0, attemptStates: { SETTLED: 1 }, raw: "forbidden" }, timeline: [{ eventTime: "1", eventType: "FILL", recordKind: "DURABLE_EVENT", stateObservedAt: "1", attemptRef: "A1", tradeId: "forbidden" }] };
+  const payload = { instrument: "BTC-USDT", attemptRefScope: "QUERY_SNAPSHOT", summary: { attemptSnapshots: 1, fills: 1, protectionSnapshots: 0, attemptStates: { SETTLED: 1 }, reconciliation: { spotWatermark: "100", marginWatermark: "90", safeWatermark: "90", pendingAccountSells: 2, eligiblePendingAccountSells: 1, oldestPendingFillTime: "95", invalidBillIds: 0, activeSystemExits: 0, raw: "forbidden" }, raw: "forbidden" }, timeline: [{ eventTime: "1", eventType: "FILL", recordKind: "DURABLE_EVENT", stateObservedAt: "1", attemptRef: "A1", tradeId: "forbidden" }] };
   const result = await runTradeCommand(options, {
     command: (bin, args) => { calls.push([bin, ...args]); if (bin === "az" && args.includes("logs")) return `INSTRUMENT_TIMELINE_JSON:${JSON.stringify(payload)}`; throw new Error(`unexpected command ${bin}`); },
     json: (bin, args) => {
@@ -45,7 +46,7 @@ test("trade CLI starts the VNet timeline job and keeps only the redacted associa
     sleep: async () => {},
   });
   assert.equal(result.command, "trade"); assert.equal(result.job, "trading-cae-timeline-read"); assert.equal(result.execution, "trading-cae-timeline-read-abc");
-  assert.equal(result.attemptRefScope, "QUERY_SNAPSHOT"); assert.deepEqual(result.summary, { attemptSnapshots: 1, fills: 1, protectionSnapshots: 0, attemptStates: { SETTLED: 1 } });
+  assert.equal(result.attemptRefScope, "QUERY_SNAPSHOT"); assert.deepEqual(result.summary, { attemptSnapshots: 1, fills: 1, protectionSnapshots: 0, attemptStates: { SETTLED: 1 }, reconciliation: { spotWatermark: "100", marginWatermark: "90", safeWatermark: "90", pendingAccountSells: 2, eligiblePendingAccountSells: 1, oldestPendingFillTime: "95", invalidBillIds: 0, activeSystemExits: 0 } });
   assert.deepEqual(result.timeline, [{ eventTime: "1", eventType: "FILL", recordKind: "DURABLE_EVENT", stateObservedAt: "1", attemptRef: "A1" }]);
   assert.ok(calls.some((row) => row[0] === "az" && row.includes("start") && row.includes("--yaml")));
   assert.ok(!calls.some((row) => row[0] === "gh"));

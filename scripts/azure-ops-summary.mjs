@@ -470,6 +470,16 @@ export function redactTimelineArtifact(artifact) {
   const summary = artifact?.summary && typeof artifact.summary === "object" ? {
     attemptSnapshots: artifact.summary.attemptSnapshots, fills: artifact.summary.fills,
     protectionSnapshots: artifact.summary.protectionSnapshots, attemptStates: artifact.summary.attemptStates,
+    reconciliation: artifact.summary.reconciliation && typeof artifact.summary.reconciliation === "object" ? {
+      spotWatermark: artifact.summary.reconciliation.spotWatermark,
+      marginWatermark: artifact.summary.reconciliation.marginWatermark,
+      safeWatermark: artifact.summary.reconciliation.safeWatermark,
+      pendingAccountSells: artifact.summary.reconciliation.pendingAccountSells,
+      eligiblePendingAccountSells: artifact.summary.reconciliation.eligiblePendingAccountSells,
+      oldestPendingFillTime: artifact.summary.reconciliation.oldestPendingFillTime,
+      invalidBillIds: artifact.summary.reconciliation.invalidBillIds,
+      activeSystemExits: artifact.summary.reconciliation.activeSystemExits,
+    } : undefined,
   } : undefined;
   return {
     instrument: artifact.instrument,
