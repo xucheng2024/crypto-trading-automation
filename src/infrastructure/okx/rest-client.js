@@ -30,10 +30,41 @@ function retryAfter(response, nowMs) {
 export function assertOkxResponse(result, { requireData = false } = {}) {
   if (!result || result.code !== "0") {
     const code = result?.code ?? "empty";
-    throw new Error(result?.msg ? `OKX code ${code}: ${result.msg}` : `OKX code ${code}`);
+    const error = new Error(result?.msg ? `OKX code ${code}: ${result.msg}` : `OKX code ${code}`);
+    error.okxCode = String(code);
+    throw error;
   }
-  if (requireData && (!Array.isArray(result.data) || result.data.length === 0)) throw new Error("OKX response has no data");
+  if (requireData && (!Array.isArray(result.data) || result.data.length === 0)) {
+    const error = new Error("OKX response has no data");
+    error.responseClass = "EMPTY_DATA";
+    throw error;
+  }
   return result.data || [];
+}
+
+export function safeOkxFailure(error, { endpoint, durationMs, attempts } = {}) {
+  const name = String(error?.name ?? "");
+  const message = String(error?.message ?? "");
+  const httpStatus = Number.isInteger(error?.httpStatus) ? error.httpStatus : undefined;
+  const okxCode = error?.okxCode === undefined ? undefined : String(error.okxCode);
+  const responseClass = error?.responseClass ?? (/non-JSON/i.test(message) ? "NON_JSON" : undefined);
+  const timeout = /timeout|timed out|abort/i.test(`${name} ${message}`);
+  const network = /network|connect|connection|fetch|socket|econn|enotfound|eai_again/i.test(`${name} ${message}`);
+  return {
+    failureClass: timeout ? "TIMEOUT" : httpStatus ? "HTTP_ERROR" : okxCode ? "OKX_ERROR" : responseClass ? "RESPONSE_INVALID" : network ? "NETWORK_ERROR" : "UNCLASSIFIED",
+    endpoint,
+    durationMs: Number.isFinite(durationMs) ? Math.max(0, Math.round(durationMs)) : undefined,
+    attempts,
+    httpStatus,
+    okxCode,
+    responseClass,
+  };
+}
+
+function invalidOkxResponse(responseClass) {
+  const error = new Error(`OKX response validation failed: ${responseClass}`);
+  error.responseClass = responseClass;
+  return error;
 }
 
 export function classifyBatchResponse(result, clOrdIds) {
@@ -144,8 +175,10 @@ export class OkxRestClient {
   async request(method, path, { params, body, authenticated = true, expTime, retryReads = method === "GET" ? 3 : 0, skipWait = false } = {}) {
     const requestPath = `${path}${query(params)}`;
     const bodyText = body === undefined ? "" : JSON.stringify(body);
-    let lastError;
+    const startedAt = this.clock.nowMs();
+    let lastError; let attempts = 0;
     for (let attempt = 0; attempt <= retryReads; attempt += 1) {
+      attempts = attempt + 1;
       try {
         if (!skipWait || attempt > 0) await this.waitForSlot(path);
         const headers = { Accept: "application/json", "Content-Type": "application/json" };
@@ -159,12 +192,16 @@ export class OkxRestClient {
         let result;
         try { result = JSON.parse(raw); } catch {
           const error = new Error(`OKX returned non-JSON HTTP ${response.status}`);
+          error.httpStatus = response.status;
+          error.responseClass = "NON_JSON";
           error.retryable = response.status === 429 || response.status >= 500;
           error.delay = retryAfter(response, this.clock.nowMs()) ?? Math.min(15_000, 1_000 * 2 ** attempt);
           throw error;
         }
         if (!response.ok || response.status === 429 || response.status >= 500 || result.code === "50011") {
           const error = new Error(`OKX HTTP ${response.status}: ${result.msg || raw.slice(0, 200)}`);
+          error.httpStatus = response.status;
+          if (result?.code !== undefined) error.okxCode = String(result.code);
           error.retryable = response.status === 429 || response.status >= 500 || result.code === "50011";
           error.delay = retryAfter(response, this.clock.nowMs()) ?? Math.min(15_000, 1_000 * 2 ** attempt);
           throw error;
@@ -180,10 +217,18 @@ export class OkxRestClient {
         await this.sleep(error.delay);
       }
     }
+    lastError.diagnostic ??= safeOkxFailure(lastError, { endpoint: path, durationMs: this.clock.nowMs() - startedAt, attempts });
     throw lastError;
   }
 
-  async read(path, params = {}, authenticated = true) { return assertOkxResponse(await this.request("GET", path, { params, authenticated })); }
+  async read(path, params = {}, authenticated = true) {
+    const startedAt = this.clock.nowMs();
+    try { return assertOkxResponse(await this.request("GET", path, { params, authenticated })); }
+    catch (error) {
+      error.diagnostic ??= safeOkxFailure(error, { endpoint: path, durationMs: this.clock.nowMs() - startedAt, attempts: 1 });
+      throw error;
+    }
+  }
   async submitBatchOrders(orders, expTime) {
     if (!Array.isArray(orders) || orders.length < 1 || orders.length > 5) throw new RangeError("batch must contain 1 to 5 orders");
     const clOrdIds = orders.map((order) => order.clOrdId);
@@ -201,7 +246,20 @@ export class OkxRestClient {
   accountConfig() { return this.read("/api/v5/account/config"); }
   balance(ccy) { return this.read("/api/v5/account/balance", ccy ? { ccy } : {}); }
   leverageInfo(instId) { return this.read("/api/v5/account/leverage-info", { instId, mgnMode: "cross" }); }
-  maxAvailSize(instId, { tdMode = "cross", ccy, reduceOnly } = {}) { return this.read("/api/v5/account/max-avail-size", { instId, tdMode, ccy, reduceOnly }); }
+  async maxAvailSize(instId, { tdMode = "cross", ccy, reduceOnly } = {}) {
+    const endpoint = "/api/v5/account/max-avail-size";
+    const startedAt = this.clock.nowMs();
+    try {
+      const data = await this.read(endpoint, { instId, tdMode, ccy, reduceOnly });
+      const expected = new Set(String(instId).split(","));
+      if (!Array.isArray(data) || !data.length) throw invalidOkxResponse("EMPTY_DATA");
+      if (data.some((row) => !row || typeof row.instId !== "string" || !expected.has(row.instId) || typeof row.availBuy !== "string" || typeof row.availSell !== "string")) throw invalidOkxResponse("INVALID_AVAILABILITY_ITEM");
+      return data;
+    } catch (error) {
+      error.diagnostic ??= safeOkxFailure(error, { endpoint, durationMs: this.clock.nowMs() - startedAt, attempts: 1 });
+      throw error;
+    }
+  }
   async order({ instId, ordId, clOrdId }) { return (await this.read("/api/v5/trade/order", { instId, ordId, clOrdId }))[0] ?? { state: "NOT_FOUND", instId, ordId, clOrdId }; }
   ordersPending(instType, params = {}) { return this.read("/api/v5/trade/orders-pending", { ...params, instType }); }
   ordersHistory(instType, params = {}) { return this.read("/api/v5/trade/orders-history", { ...params, instType }); }

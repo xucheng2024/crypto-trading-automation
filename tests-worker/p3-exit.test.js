@@ -90,7 +90,7 @@ test("P3 exit availability failures defer retries instead of retrying on every w
   market.updateInstrument({ instId: "BTC-USDT", ts: 1, state: "live", tickSz: "0.1", lotSz: "0.1", minSz: "0.1", base: "BTC" });
   const events = []; let availabilityCalls = 0;
   const coordinator = new OrderCoordinator({ transaction: async (fn) => fn({}), market, account, readyGate: gate(), ownerGuard: { isHeld: () => true }, mode: () => "FULL", clock: now, config, telemetry: (event) => events.push(event),
-    transport: { maxAvailSize: async () => { availabilityCalls += 1; throw new Error("temporary unavailable"); } },
+    transport: { maxAvailSize: async () => { availabilityCalls += 1; const error = new Error("temporary unavailable"); error.diagnostic = { failureClass: "TIMEOUT", endpoint: "/api/v5/account/max-avail-size", durationMs: 15, attempts: 4 }; throw error; } },
   });
   coordinator.enqueue({ intent: "SELL", instId: "BTC-USDT", baseCcy: "BTC", sourceBuyTradeId: "availability-retry", remainingSize: "1", fillVersion: 1, sellTime: 1 });
   assert.equal((await coordinator.drainOnce()).reason, "NO_ELIGIBLE");
@@ -102,6 +102,7 @@ test("P3 exit availability failures defer retries instead of retrying on every w
   await coordinator.drainOnce(); assert.equal(availabilityCalls, 1, "the retry is held until its backoff expires");
   current = 2_000; await coordinator.drainOnce(); assert.equal(availabilityCalls, 2);
   assert.equal(events.filter((event) => event.reason === "MAX_AVAIL_FAILED").length, 2, "each failed availability round emits one bounded error summary");
+  assert.deepEqual(events.at(-1), { type: "exit_deferred", intent: "SELL", reason: "MAX_AVAIL_FAILED", candidateCount: 1, error: "TIMEOUT", failureClass: "TIMEOUT", endpoint: "/api/v5/account/max-avail-size", durationMs: 15, attempts: 4 });
 });
 
 test("P3 market WS storm blocks BUY but never suppresses an already-triggered exit", () => {

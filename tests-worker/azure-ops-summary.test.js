@@ -97,6 +97,7 @@ test("Azure ops summary exposes only redacted operational error classes", () => 
   assert.equal(redactOperationalError("OKX code 50011"), "OKX_50011");
   assert.equal(redactOperationalError("HTTP 429 response"), "HTTP_429");
   assert.equal(redactOperationalError("request timed out"), "TIMEOUT");
+  assert.equal(redactOperationalError("NETWORK_ERROR"), "NETWORK_ERROR");
   assert.equal(redactOperationalError("credential=secret"), "REDACTED_ERROR");
   assert.equal(redactOperationalError(), undefined);
 });

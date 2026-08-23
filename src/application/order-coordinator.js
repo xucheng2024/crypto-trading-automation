@@ -11,6 +11,10 @@ function add(left, right) {
   const a = parseDecimal(left); const b = parseDecimal(right); const scale = Math.max(a.scale, b.scale);
   return formatDecimal(a.n * (10n ** BigInt(scale - a.scale)) + b.n * (10n ** BigInt(scale - b.scale)), scale);
 }
+function availabilityFailure(error) {
+  const diagnostic = error?.diagnostic;
+  return diagnostic ? { error: diagnostic.failureClass, ...diagnostic } : { error: "REDACTED_ERROR", failureClass: "UNCLASSIFIED", endpoint: "/api/v5/account/max-avail-size" };
+}
 
 /** The only component allowed to invoke an injected mutation transport. */
 export class OrderCoordinator {
@@ -103,7 +107,7 @@ export class OrderCoordinator {
     let avail;
     try { avail = (await Promise.all([...groups].map(([, rows]) => { const { executionMode: tdMode, capacityCcy } = rows[0]; return this.transport.maxAvailSize(rows.map(({ intent }) => intent.instId).join(","), tdMode === "cross" ? { tdMode, ccy: capacityCcy } : { tdMode }); }))).flat(); }
     catch (error) {
-      for (const { intent, executionMode, executionRoute } of routed) this._emitBuyBlock({ ...intent, executionMode, executionRoute }, "AVAILABILITY", "MAX_AVAIL_FAILED", { error: error?.message });
+      for (const { intent, executionMode, executionRoute } of routed) this._emitBuyBlock({ ...intent, executionMode, executionRoute }, "AVAILABILITY", "MAX_AVAIL_FAILED", availabilityFailure(error));
       return [];
     } finally { this.slo?.record("signal_max_avail", maxAvailStarted); }
     const byInst = new Map((avail ?? []).map((row) => [row.instId, row.availBuy]));
@@ -241,7 +245,7 @@ export class OrderCoordinator {
       const retryAt = this.clock.nowMs() + 1_000;
       this.exitAvailabilityNotBefore[kind] = retryAt;
       for (const intent of eligible) this._deferExit(intent, kind, "MAX_AVAIL_FAILED", 1_000, false);
-      this._emit({ type: "exit_deferred", intent: kind, reason: "MAX_AVAIL_FAILED", error: error?.message, candidateCount: eligible.length });
+      this._emit({ type: "exit_deferred", intent: kind, reason: "MAX_AVAIL_FAILED", candidateCount: eligible.length, ...availabilityFailure(error) });
       return [];
     }
     const byInst = new Map((available ?? []).map((row) => [row.instId, row.availSell]));

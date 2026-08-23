@@ -242,6 +242,7 @@ export function classifySevereTraces(rows, activeRevision) {
 
 export function redactOperationalError(value) {
   const text = String(value ?? "");
+  if (/^(TIMEOUT|NETWORK_ERROR|HTTP_ERROR|OKX_ERROR|RESPONSE_INVALID|UNCLASSIFIED)$/i.test(text)) return text.toUpperCase();
   const okx = text.match(/\bOKX\s+code\s+(\d{3,6})\b/i);
   if (okx) return `OKX_${okx[1]}`;
   const http = text.match(/\b(?:HTTP|status)\s+(\d{3})\b/i);
