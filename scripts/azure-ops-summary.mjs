@@ -252,6 +252,22 @@ export function redactOperationalError(value) {
   return text ? "REDACTED_ERROR" : undefined;
 }
 
+export function formatSevereDiagnostic(row) {
+  const error = redactOperationalError(row.error);
+  const details = [
+    error && `error=${error}`,
+    row.failureClass && `class=${row.failureClass}`,
+    row.endpoint && `endpoint=${row.endpoint}`,
+    row.httpStatus && `http_status=${row.httpStatus}`,
+    row.okxCode && `okx_code=${row.okxCode}`,
+    row.okxMessageClass && `okx_message=${row.okxMessageClass}`,
+    row.responseClass && `response=${row.responseClass}`,
+    Number.isFinite(row.durationMs) && `duration_ms=${row.durationMs}`,
+    Number.isFinite(row.attempts) && `attempts=${row.attempts}`,
+  ].filter(Boolean).join(" ");
+  return `  ${row.timestamp} ${row.classification} ${row.message}${details ? ` ${details}` : ""}`;
+}
+
 export function summarizeDeployment(runInfo, jobs = [], pendingDeployments = []) {
   const normalizedJobs = jobs.map((job) => ({
     name: job.name, status: job.status, conclusion: job.conclusion, runner: job.runner_name || null,
@@ -705,7 +721,7 @@ export async function main(argv = process.argv.slice(2)) {
   const lifecycleQuery = `traces | where ${timeFilter} | where message startswith 'order_lifecycle BUY_' or message startswith 'trade_lifecycle BUY_' | project timestamp, message, customDimensions | order by timestamp desc | take 1000`;
   const observabilityQuery = `traces | where ${timeFilter} | where message startswith 'fill_reconciliation FILL_BATCH_COMMITTED' or message startswith 'sell_watch_loaded SELL_WATCH_SNAPSHOT' | project timestamp, message, customDimensions | order by timestamp desc | take 1000`;
   const blockQuery = `traces | where ${timeFilter} | where message startswith 'block_evidence ' | project timestamp, message, customDimensions | order by timestamp desc | take 5000`;
-  const errorQuery = `traces | where ${timeFilter} | where severityLevel >= 3 | project timestamp, message, cloudRoleInstance=cloud_RoleInstance, tradingMode=tostring(customDimensions.tradingMode), error=tostring(customDimensions.error) | order by timestamp desc | take 10`;
+  const errorQuery = `traces | where ${timeFilter} | where severityLevel >= 3 | project timestamp, message, cloudRoleInstance=cloud_RoleInstance, tradingMode=tostring(customDimensions.tradingMode), error=tostring(customDimensions.error), failureClass=tostring(customDimensions.failureClass), endpoint=tostring(customDimensions.endpoint), httpStatus=tostring(customDimensions.httpStatus), okxCode=tostring(customDimensions.okxCode), okxMessageClass=tostring(customDimensions.okxMessageClass), responseClass=tostring(customDimensions.responseClass), durationMs=toint(customDimensions.durationMs), attempts=toint(customDimensions.attempts) | order by timestamp desc | take 10`;
   const baselineQuery = strategyBaselineQuery(revision?.name);
   const pipelineQuery = "traces | where timestamp > ago(24h) | where message startswith 'instrument_pipeline_coverage ' | top 1 by timestamp desc | project timestamp, runtime=toint(customDimensions.runtime), quote_ready=toint(customDimensions.quote_ready), candle_ready=toint(customDimensions.candle_ready), strategy_row=toint(customDimensions.strategy_row), daily_state=toint(customDimensions.daily_state), evaluator_seen=toint(customDimensions.evaluator_seen), decision_emit=toint(customDimensions.decision_emit), no_market_data=toint(customDimensions.no_market_data), candle_not_initialized=toint(customDimensions.candle_not_initialized), no_strategy_row=toint(customDimensions.no_strategy_row), strategy_state_never_created=toint(customDimensions.strategy_state_never_created), filtered_before_evaluator=toint(customDimensions.filtered_before_evaluator), unknown=toint(customDimensions.unknown)";
   const metric = appInsightsQuery(resourceGroup, appInsights, metricQuery)[0] ?? null;
@@ -834,10 +850,7 @@ export async function main(argv = process.argv.slice(2)) {
     }
     if (options.details && (severe.current.length || severe.inactive.length)) {
       console.log("Severe diagnostics:");
-      for (const row of [...severe.current, ...severe.inactive].slice(0, 10)) {
-        const error = redactOperationalError(row.error);
-        console.log(`  ${row.timestamp} ${row.classification} ${row.message}${error ? ` error=${error}` : ""}`);
-      }
+      for (const row of [...severe.current, ...severe.inactive].slice(0, 10)) console.log(formatSevereDiagnostic(row));
     }
   }
   if (options.command === "report" && options.since) await writeFile(checkpointPath, `${JSON.stringify({ checkedAt: queryStartedAt })}\n`, "utf8");

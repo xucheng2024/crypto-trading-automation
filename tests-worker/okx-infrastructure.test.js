@@ -15,15 +15,17 @@ test("P1 REST errors retain the OKX code for safe operational classification", (
 test("P5 max-avail failures expose only structured, redacted diagnostics", async () => {
   const client = new OkxRestClient({ credentials, clock: { nowMs: () => 0 }, timeoutMs: 10, sleep: async () => {}, fetcher: async () => new Response(JSON.stringify({ code: "50100", msg: "sensitive upstream text" }), { status: 403 }) });
   await assert.rejects(client.maxAvailSize("BTC-USDT"), (error) => {
-    assert.deepEqual(error.diagnostic, { failureClass: "HTTP_ERROR", endpoint: "/api/v5/account/max-avail-size", durationMs: 0, attempts: 1, httpStatus: 403, okxCode: "50100", responseClass: undefined });
+    assert.deepEqual(error.diagnostic, { failureClass: "HTTP_ERROR", endpoint: "/api/v5/account/max-avail-size", durationMs: 0, attempts: 1, httpStatus: 403, okxCode: "50100", okxMessageClass: "UNCLASSIFIED", responseClass: undefined });
     return true;
   });
   const malformed = new OkxRestClient({ credentials, clock: { nowMs: () => 0 }, fetcher: async () => ok([]) });
   await assert.rejects(malformed.maxAvailSize("BTC-USDT"), (error) => {
-    assert.deepEqual(error.diagnostic, { failureClass: "RESPONSE_INVALID", endpoint: "/api/v5/account/max-avail-size", durationMs: 0, attempts: 1, httpStatus: undefined, okxCode: undefined, responseClass: "EMPTY_DATA" });
+    assert.deepEqual(error.diagnostic, { failureClass: "RESPONSE_INVALID", endpoint: "/api/v5/account/max-avail-size", durationMs: 0, attempts: 1, httpStatus: undefined, okxCode: undefined, okxMessageClass: undefined, responseClass: "EMPTY_DATA" });
     return true;
   });
-  assert.deepEqual(safeOkxFailure(new DOMException("request timed out", "TimeoutError"), { endpoint: "/api/v5/account/max-avail-size", durationMs: 12, attempts: 1 }), { failureClass: "TIMEOUT", endpoint: "/api/v5/account/max-avail-size", durationMs: 12, attempts: 1, httpStatus: undefined, okxCode: undefined, responseClass: undefined });
+  assert.deepEqual(safeOkxFailure(new DOMException("request timed out", "TimeoutError"), { endpoint: "/api/v5/account/max-avail-size", durationMs: 12, attempts: 1 }), { failureClass: "TIMEOUT", endpoint: "/api/v5/account/max-avail-size", durationMs: 12, attempts: 1, httpStatus: undefined, okxCode: undefined, okxMessageClass: undefined, responseClass: undefined });
+  const bareCode = new OkxRestClient({ credentials, clock: { nowMs: () => 0 }, fetcher: async () => new Response(JSON.stringify({ code: "3", msg: "", data: [] })) });
+  await assert.rejects(bareCode.maxAvailSize("BTC-USDT"), (error) => { assert.equal(error.diagnostic.okxMessageClass, "EMPTY"); return true; });
 });
 
 test("P1 REST transport signs, syncs server time, uses expTime, retries only GET, and respects Retry-After", async () => {

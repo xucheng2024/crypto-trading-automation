@@ -32,6 +32,7 @@ export function assertOkxResponse(result, { requireData = false } = {}) {
     const code = result?.code ?? "empty";
     const error = new Error(result?.msg ? `OKX code ${code}: ${result.msg}` : `OKX code ${code}`);
     error.okxCode = String(code);
+    error.okxMessageClass = classifyOkxMessage(result?.msg);
     throw error;
   }
   if (requireData && (!Array.isArray(result.data) || result.data.length === 0)) {
@@ -42,11 +43,25 @@ export function assertOkxResponse(result, { requireData = false } = {}) {
   return result.data || [];
 }
 
+function classifyOkxMessage(message) {
+  const text = String(message ?? "").trim().toLowerCase();
+  if (!text) return "EMPTY";
+  if (/rate.?limit|too many requests/.test(text)) return "RATE_LIMITED";
+  if (/ip|whitelist/.test(text)) return "IP_RESTRICTED";
+  if (/api.?key|passphrase|sign|auth/.test(text)) return "AUTHENTICATION";
+  if (/permission|not allowed|forbidden/.test(text)) return "PERMISSION";
+  if (/region|domain|jurisdiction/.test(text)) return "REGION_DOMAIN";
+  if (/account mode|unsupported.*account/.test(text)) return "ACCOUNT_MODE";
+  if (/parameter|invalid arg/.test(text)) return "PARAMETER";
+  return "UNCLASSIFIED";
+}
+
 export function safeOkxFailure(error, { endpoint, durationMs, attempts } = {}) {
   const name = String(error?.name ?? "");
   const message = String(error?.message ?? "");
   const httpStatus = Number.isInteger(error?.httpStatus) ? error.httpStatus : undefined;
   const okxCode = error?.okxCode === undefined ? undefined : String(error.okxCode);
+  const okxMessageClass = error?.okxMessageClass;
   const responseClass = error?.responseClass ?? (/non-JSON/i.test(message) ? "NON_JSON" : undefined);
   const timeout = /timeout|timed out|abort/i.test(`${name} ${message}`);
   const network = /network|connect|connection|fetch|socket|econn|enotfound|eai_again/i.test(`${name} ${message}`);
@@ -57,6 +72,7 @@ export function safeOkxFailure(error, { endpoint, durationMs, attempts } = {}) {
     attempts,
     httpStatus,
     okxCode,
+    okxMessageClass,
     responseClass,
   };
 }
@@ -201,7 +217,7 @@ export class OkxRestClient {
         if (!response.ok || response.status === 429 || response.status >= 500 || result.code === "50011") {
           const error = new Error(`OKX HTTP ${response.status}: ${result.msg || raw.slice(0, 200)}`);
           error.httpStatus = response.status;
-          if (result?.code !== undefined) error.okxCode = String(result.code);
+          if (result?.code !== undefined) { error.okxCode = String(result.code); error.okxMessageClass = classifyOkxMessage(result.msg); }
           error.retryable = response.status === 429 || response.status >= 500 || result.code === "50011";
           error.delay = retryAfter(response, this.clock.nowMs()) ?? Math.min(15_000, 1_000 * 2 ** attempt);
           throw error;

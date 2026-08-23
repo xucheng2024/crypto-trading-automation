@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { assessRuntime, classifyBlock, classifyDecision, classifySevereTraces, countCsvInstruments, formatDecisionTelemetryLine, formatInstrumentTimelineSummary, formatPipelineCoverageLine, formatPositionsSummary, instrumentTimelineReadJobName, parseArgs, parseInstrumentTimelineLog, parseManagedPositionsLog, parsePipelineCoverageRow, parseStrategyBaseline, positionsReadJobName, queryRows, redactOperationalError, redactPositionsArtifact, runInstrumentTimelineCommand, runPositionsCommand, strategyBaselineQuery, summarizeDecisions, summarizeDeployment, summarizeRunner, summarizeTrading, traceEvents } from "../scripts/azure-ops-summary.mjs";
+import { assessRuntime, classifyBlock, classifyDecision, classifySevereTraces, countCsvInstruments, formatDecisionTelemetryLine, formatInstrumentTimelineSummary, formatPipelineCoverageLine, formatPositionsSummary, formatSevereDiagnostic, instrumentTimelineReadJobName, parseArgs, parseInstrumentTimelineLog, parseManagedPositionsLog, parsePipelineCoverageRow, parseStrategyBaseline, positionsReadJobName, queryRows, redactOperationalError, redactPositionsArtifact, runInstrumentTimelineCommand, runPositionsCommand, strategyBaselineQuery, summarizeDecisions, summarizeDeployment, summarizeRunner, summarizeTrading, traceEvents } from "../scripts/azure-ops-summary.mjs";
 
 test("Azure ops summary converts query tables and aggregates decisions", () => {
   assert.deepEqual(queryRows({ tables: [{ columns: [{ name: "reason" }, { name: "decisions" }], rows: [["WAIT", 2]] }] }), [{ reason: "WAIT", decisions: 2 }]);
@@ -100,6 +100,10 @@ test("Azure ops summary exposes only redacted operational error classes", () => 
   assert.equal(redactOperationalError("NETWORK_ERROR"), "NETWORK_ERROR");
   assert.equal(redactOperationalError("credential=secret"), "REDACTED_ERROR");
   assert.equal(redactOperationalError(), undefined);
+});
+
+test("Azure ops summary prints structured max-avail diagnostics without raw exchange text", () => {
+  assert.equal(formatSevereDiagnostic({ timestamp: "t", classification: "CURRENT_OR_UNATTRIBUTED", message: "exit_deferred MAX_AVAIL_FAILED", error: "OKX_ERROR", failureClass: "OKX_ERROR", endpoint: "/api/v5/account/max-avail-size", httpStatus: "400", okxCode: "51000", okxMessageClass: "PARAMETER", responseClass: "", durationMs: 123, attempts: 4 }), "  t CURRENT_OR_UNATTRIBUTED exit_deferred MAX_AVAIL_FAILED error=OKX_ERROR class=OKX_ERROR endpoint=/api/v5/account/max-avail-size http_status=400 okx_code=51000 okx_message=PARAMETER duration_ms=123 attempts=4");
 });
 
 test("Azure ops summary compacts workflow failures, approvals, and runner readiness", () => {
