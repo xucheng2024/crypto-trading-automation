@@ -108,7 +108,7 @@ tag=<固定 STRATEGY_TAG>
 
 market sell 不发送 `posSide`、Futures-mode-only `ccy`、`tgtCcy` 或 `slippagePct`。`sz` 始终是 base 数量。REST `expTime` 只放 HTTP header。外部 isolated MARGIN BUY 不纳入首版管理，避免引入独立保证金分支。
 
-正常 attempt 使用内存 instrument/account projection，不逐 fill 请求 balance 或 rules。只读准备阶段对最多 5 个不同 instId 的 SELL/DELIST 只调用一次 `GET /api/v5/account/max-avail-size?instId=<逗号分隔instId>&tdMode=cross&reduceOnly=true`，不占 mutation submit slot，并逐项以 base 单位 `availSell` 封顶。OKX 的 `reduceOnly` 只防止建立反向保证金仓位；官方语义允许债务还清后的剩余数量继续作为 SPOT 成交，因此它不是共享账户资产隔离手段。系统必须始终以 managed remaining、确认可售量和原子 base reservation 限量。查询失败或快照过期时对应项 fail closed 并重试；价格不再参与是否继续卖出的判断。随后按 DELIST>SELL 优先级取得 submit slot、重验 version/remaining 并创建 PREPARED，最多 5 项通过 `POST /api/v5/trade/batch-orders` 一次提交。响应按 clOrdId 逐项转换；单项拒绝或缺失不影响已确认的兄弟项。
+正常 attempt 使用内存 instrument/account projection，不逐 fill 请求 balance 或 rules。只读准备阶段对最多 5 个不同 instId 的 SELL/DELIST 只调用一次 `GET /api/v5/account/max-avail-size?instId=<逗号分隔instId>&tdMode=cross`，不占 mutation submit slot，并逐项以 base 单位 `availSell` 封顶；该读取不传 `reduceOnly`，因为部分 cross-margin 账户会返回 code 3 `Operation not supported`。实际 margin SELL 仍传 `reduceOnly=true`，它只防止建立反向保证金仓位；官方语义允许债务还清后的剩余数量继续作为 SPOT 成交，因此它不是共享账户资产隔离手段。系统必须始终以 managed remaining、确认可售量和原子 base reservation 限量。查询失败或快照过期时对应项 fail closed 并重试；价格不再参与是否继续卖出的判断。随后按 DELIST>SELL 优先级取得 submit slot、重验 version/remaining 并创建 PREPARED，最多 5 项通过 `POST /api/v5/trade/batch-orders` 一次提交。响应按 clOrdId 逐项转换；单项拒绝或缺失不影响已确认的兄弟项。
 
 ## 共享账户外部交易
 

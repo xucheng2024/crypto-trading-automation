@@ -110,7 +110,7 @@ REST 仅用于：
 - 启动/重连 baseline；
 - 数据过期或矛盾恢复；
 - 本次 BUY 专用 max-avail-size；
-- SELL/DELIST 下单前读取当前实际可售量，并请求 `tdMode=cross,reduceOnly=true` 的 max-avail `availSell`；它只作为 managed remaining 的上限，reduceOnly 不是共享现货隔离；
+- SELL/DELIST 下单前以 durable `tdMode` 读取 max-avail `availSell`，不向该只读接口传 `reduceOnly`（部分 cross-margin 账户会返回 code 3 `Operation not supported`）；它只作为 managed remaining 的上限，实际 margin 卖单仍为 reduce-only；
 - mutation 和未知结果查询；
 - fills/history 重叠回看；
 - account config、leverage-info、server time 和公告等无合适 WS 的低频数据。

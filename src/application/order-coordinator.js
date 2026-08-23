@@ -236,7 +236,11 @@ export class OrderCoordinator {
     try {
       const routed = eligible.map((intent) => ({ intent, executionRoute: this._executionRoute(intent), executionMode: this._executionMode(intent) })).filter((row) => row.executionRoute && row.executionMode);
       const groups = Map.groupBy(routed, (row) => `${row.executionMode}:${row.executionRoute}`);
-      available = (await Promise.all([...groups].map(([, rows]) => { const { executionMode: tdMode, executionRoute } = rows[0]; return this.transport.maxAvailSize(rows.map(({ intent }) => intent.instId).join(","), tdMode === "cross" && executionRoute === "margin" ? { tdMode, reduceOnly: true } : { tdMode }); }))).flat();
+      // Some cross-margin accounts reject reduceOnly on this read-only endpoint
+      // with OKX code 3 ("Operation not supported"). The submitted exit order
+      // remains reduce-only and sizing is still capped by managed remaining and
+      // the account-wide base reservation below.
+      available = (await Promise.all([...groups].map(([, rows]) => { const { executionMode: tdMode } = rows[0]; return this.transport.maxAvailSize(rows.map(({ intent }) => intent.instId).join(","), { tdMode }); }))).flat();
     }
     catch (error) {
       // Availability is an account-wide read.  Leaving these intents immediately

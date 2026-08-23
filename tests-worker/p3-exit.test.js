@@ -21,7 +21,7 @@ test("P3 exits submit immediate five-base batches with DELIST priority and no sh
       markSubmitted: async (_tx, id) => { attempts.get(id).state = "SUBMITTED"; }, markUnknown: async (_tx, id) => { attempts.get(id).state = "UNKNOWN"; }, markNotCreated: async (_tx, id) => { attempts.get(id).state = "NOT_CREATED"; },
     },
     transport: {
-      maxAvailSize: async (ids, options) => { assert.equal(options.tdMode, "cross"); return ids.split(",").map((instId) => ({ instId, availSell: "2" })); },
+      maxAvailSize: async (ids, options) => { assert.deepEqual(options, { tdMode: "cross" }); return ids.split(",").map((instId) => ({ instId, availSell: "2" })); },
       submitBatchOrders: async (rows) => { payloads.push(rows); return rows.map((row, index) => ({ clOrdId: row.clOrdId, status: index === 0 ? "UNKNOWN" : "SUBMITTED", ordId: String(index) })); },
     },
   });
