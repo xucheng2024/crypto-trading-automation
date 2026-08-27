@@ -19,6 +19,7 @@ import { EngineWorkLoop } from "../src/application/engine-work-loop.js";
 import { ReadyGate } from "../src/application/trading-engine.js";
 import { EventEmitter } from "node:events";
 import { PostgresOwnerGuard } from "../src/infrastructure/postgres/owner-guard.js";
+import { handoffRevision, parseHandoffArgs } from "../scripts/production-revision-handoff.mjs";
 
 test("P4 runtime validates safety timing and defaults OFF", () => {
   const config = loadAzureRuntimeConfig({});
@@ -85,7 +86,10 @@ test("P4 production roots and container have no legacy D1 runtime", async () => 
 });
 
 test("P4 production deployment builds before reserving the migration runner without weakening safety gates", async () => {
-  const workflow = await readFile(".github/workflows/production-deploy.yml", "utf8");
+  const [workflow, promotion] = await Promise.all([
+    readFile(".github/workflows/production-deploy.yml", "utf8"),
+    readFile(".github/workflows/production-promote-full.yml", "utf8"),
+  ]);
   assert.match(workflow, /  migrate:\n    needs: build\n/);
   assert.match(workflow, /runs-on: \[self-hosted, linux, x64, crypto-remote-migration\]/);
   assert.ok(workflow.indexOf("uses: actions/setup-node@v4", workflow.indexOf("  migrate:")) < workflow.indexOf("- id: plan", workflow.indexOf("  migrate:")));
@@ -93,7 +97,76 @@ test("P4 production deployment builds before reserving the migration runner with
   assert.doesNotMatch(workflow, /Require this run's image build before applying SQL|select\(\.name == "build"\) \| \.conclusion/);
   assert.doesNotMatch(workflow, /api\.ipify|firewall-rule (create|delete)|github-migration-/);
   assert.match(workflow, /  promote_full:\n    needs: \[build, deploy_off\]\n[\s\S]+environment: production\n/);
-  assert.match(workflow, /\[ "\$state" = "RunningAtMaxScale Healthy" \]/);
+  assert.equal([...workflow.matchAll(/node scripts\/production-revision-handoff\.mjs/g)].length, 2);
+  assert.match(workflow, /--expect-mode OFF --execute/); assert.match(workflow, /--expect-mode FULL --execute/);
+  assert.match(promotion, /node scripts\/production-revision-handoff\.mjs[\s\S]*--expect-mode FULL --execute/);
+  assert.doesNotMatch(`${workflow}\n${promotion}`, /for old in \$\(az containerapp revision list/);
+});
+
+function handoffFixture({ targetFailure = false, revisionMode = "Single", sourceHealthy = true } = {}) {
+  const revisions = new Map([
+    ["old", { name: "old", active: true, healthState: sourceHealthy ? "Healthy" : "Unhealthy", runningState: sourceHealthy ? "RunningAtMaxScale" : "Activating", image: "registry/engine@sha256:old", mode: "OFF" }],
+    ["next", { name: "next", active: true, healthState: "Unhealthy", runningState: "Activating", image: "registry/engine@sha256:new", mode: "FULL" }],
+  ]);
+  const replicas = new Map([
+    ["old", [{ containers: [{ ready: true, restartCount: 0, runningState: "Running" }] }]],
+    ["next", [{ containers: [{ ready: false, restartCount: 2, runningState: "Waiting" }] }]],
+  ]);
+  const calls = []; let trafficRevision = "next";
+  const client = {
+    app: async () => ({ provisioningState: "Succeeded", runningStatus: "Running", revisionMode }),
+    revision: async (name) => ({ ...revisions.get(name) }),
+    activeRevisions: async () => [...revisions.values()].filter((row) => row.active).map((row) => ({ ...row })),
+    replicas: async (name) => structuredClone(replicas.get(name) ?? []),
+    traffic: async () => [{ revisionName: trafficRevision, weight: 100 }],
+    setTraffic: async (name) => { calls.push(`traffic:${name}`); trafficRevision = name; },
+    deactivate: async (name) => { calls.push(`deactivate:${name}`); revisions.get(name).active = false; replicas.set(name, []); },
+    activate: async (name) => {
+      calls.push(`activate:${name}`); const row = revisions.get(name); row.active = true;
+      if (name === "next" && targetFailure) { row.healthState = "Unhealthy"; row.runningState = "ActivationFailed"; replicas.set(name, []); }
+      else { row.healthState = "Healthy"; row.runningState = "RunningAtMaxScale"; replicas.set(name, [{ containers: [{ ready: true, restartCount: 0, runningState: "Running" }] }]); }
+    },
+  };
+  return { client, calls };
+}
+
+test("P4 revision handoff requires explicit execution and validates immutable mode", async () => {
+  const options = parseHandoffArgs(["--resource-group", "rg", "--app", "app", "--target-revision", "next", "--expect-mode", "FULL"]);
+  const fixture = handoffFixture();
+  assert.equal((await handoffRevision(options, { client: fixture.client })).status, "DRY_RUN");
+  assert.deepEqual(fixture.calls, []);
+  await assert.rejects(handoffRevision({ ...options, expectedMode: "OFF" }, { client: fixture.client }), /TARGET_MODE_MISMATCH/);
+});
+
+test("P4 revision handoff stops lock contenders before starting one healthy target", async () => {
+  const fixture = handoffFixture();
+  const result = await handoffRevision({ targetRevision: "next", expectedMode: "FULL", execute: true, timeoutMs: 10, pollMs: 1 }, { client: fixture.client, sleep: async () => {} });
+  assert.equal(result.status, "COMPLETE");
+  assert.deepEqual(fixture.calls, ["deactivate:next", "deactivate:old", "activate:next"]);
+  assert.deepEqual(result.checks, { appHealthy: true, singleActiveTarget: true, targetReady: true, expectedMode: true, targetTraffic: true });
+});
+
+test("P4 revision handoff restores the prior healthy revision when the target fails", async () => {
+  const fixture = handoffFixture({ targetFailure: true });
+  await assert.rejects(
+    handoffRevision({ targetRevision: "next", expectedMode: "FULL", execute: true, timeoutMs: 10, pollMs: 1 }, { client: fixture.client, sleep: async () => {} }),
+    /HANDOFF_FAILED[\s\S]*rollback=COMPLETE/,
+  );
+  assert.deepEqual(fixture.calls, ["deactivate:next", "deactivate:old", "activate:next", "deactivate:next", "activate:old"]);
+});
+
+test("P4 revision handoff uses explicit traffic only in Multiple revision mode", async () => {
+  const fixture = handoffFixture({ revisionMode: "Multiple" });
+  await handoffRevision({ targetRevision: "next", expectedMode: "FULL", execute: true, timeoutMs: 10, pollMs: 1 }, { client: fixture.client, sleep: async () => {} });
+  assert.deepEqual(fixture.calls, ["traffic:old", "deactivate:next", "deactivate:old", "activate:next", "traffic:next"]);
+});
+
+test("P4 revision handoff requires an explicit emergency flag for an unhealthy source", async () => {
+  const fixture = handoffFixture({ sourceHealthy: false });
+  const options = { targetRevision: "next", expectedMode: "FULL", execute: true, timeoutMs: 10, pollMs: 1 };
+  await assert.rejects(handoffRevision(options, { client: fixture.client, sleep: async () => {} }), /SOURCE_NOT_HEALTHY/);
+  assert.deepEqual(fixture.calls, []);
+  assert.equal((await handoffRevision({ ...options, emergency: true }, { client: fixture.client, sleep: async () => {} })).status, "COMPLETE");
 });
 
 test("P4 timeline-read job is manual, image-backed, and SELECT-only", async () => {

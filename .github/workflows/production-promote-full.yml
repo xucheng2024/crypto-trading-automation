@@ -20,6 +20,10 @@ jobs:
     runs-on: ubuntu-latest
     environment: production
     steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
       - uses: azure/login@v2
         with:
           client-id: ${{ secrets.AZURE_DEPLOY_CLIENT_ID }}
@@ -42,15 +46,4 @@ jobs:
           digest="${image##*@sha256:}"
           suffix="full-${digest:0:7}-${GITHUB_RUN_NUMBER}"
           promoted="$(az containerapp update --name "$CONTAINER_APP_NAME" --resource-group "$RESOURCE_GROUP" --image "$image" --set-env-vars TRADING_MODE=FULL --revision-suffix "$suffix" --query properties.latestRevisionName --output tsv)"
-          for old in $(az containerapp revision list --name "$CONTAINER_APP_NAME" --resource-group "$RESOURCE_GROUP" --query "[?properties.active].name" --output tsv); do
-            [ "$old" = "$promoted" ] || az containerapp revision deactivate --name "$CONTAINER_APP_NAME" --resource-group "$RESOURCE_GROUP" --revision "$old" --output none
-          done
-          for attempt in {1..36}; do
-            state="$(az containerapp revision show --name "$CONTAINER_APP_NAME" --resource-group "$RESOURCE_GROUP" --revision "$promoted" --query "[properties.runningState, properties.healthState]" --output tsv | paste -sd ' ' -)"
-            echo "Revision $promoted: $state (attempt $attempt/36)"
-            [ "$state" = "RunningAtMaxScale Healthy" ] && break
-            [[ "$state" == Failed* || "$state" == Degraded* ]] && exit 1
-            sleep 5
-          done
-          [ "$state" = "RunningAtMaxScale Healthy" ]
-          [ "$(az containerapp revision list --name "$CONTAINER_APP_NAME" --resource-group "$RESOURCE_GROUP" --query "[?properties.active].name | length(@)" --output tsv)" = "1" ]
+          node scripts/production-revision-handoff.mjs --resource-group "$RESOURCE_GROUP" --app "$CONTAINER_APP_NAME" --target-revision "$promoted" --expect-mode FULL --execute

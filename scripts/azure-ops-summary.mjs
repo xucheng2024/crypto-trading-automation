@@ -1,4 +1,4 @@
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -6,17 +6,60 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { addDecimal, compareDecimal, subtractDecimal } from "../src/decimal.js";
 
-function run(command, args) {
-  const result = spawnSync(command, args, { encoding: "utf8", maxBuffer: 4 * 1024 * 1024 });
+function run(command, args, { timeoutMs } = {}) {
+  const result = spawnSync(command, args, { encoding: "utf8", maxBuffer: 4 * 1024 * 1024, timeout: timeoutMs });
   if (result.status !== 0) {
-    const detail = (result.stderr || result.stdout || `${command} exited ${result.status}`).trim().split("\n").slice(-3).join("\n");
+    const detail = (result.stderr || result.stdout || result.error?.message || `${command} exited ${result.status}`).trim().split("\n").slice(-3).join("\n");
     throw new Error(detail);
   }
   return result.stdout.trim();
 }
 
-function runJson(command, args) {
-  const output = run(command, args);
+function runAsync(command, args) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, { stdio: ["ignore", "pipe", "pipe"] });
+    let stdout = "";
+    let stderr = "";
+    let outputBytes = 0;
+    let settled = false;
+    const finish = (callback) => (value) => {
+      if (settled) return;
+      settled = true;
+      callback(value);
+    };
+    const fail = finish(reject);
+    const append = (target) => (chunk) => {
+      if (settled) return;
+      outputBytes += chunk.length;
+      if (outputBytes > 4 * 1024 * 1024) {
+        child.kill();
+        fail(new Error(`${command} output exceeded 4 MiB`));
+        return;
+      }
+      if (target === "stdout") stdout += chunk;
+      else stderr += chunk;
+    };
+    child.stdout.on("data", append("stdout"));
+    child.stderr.on("data", append("stderr"));
+    child.on("error", fail);
+    child.on("close", finish((status) => {
+      if (status !== 0) {
+        const detail = (stderr || stdout || `${command} exited ${status}`).trim().split("\n").slice(-3).join("\n");
+        reject(new Error(detail));
+        return;
+      }
+      resolve(stdout.trim());
+    }));
+  });
+}
+
+function runJson(command, args, options) {
+  const output = run(command, args, options);
+  return output ? JSON.parse(output) : null;
+}
+
+async function runJsonAsync(command, args) {
+  const output = await runAsync(command, args);
   return output ? JSON.parse(output) : null;
 }
 
@@ -572,13 +615,19 @@ export async function runPositionsCommand(options, deps) {
   const resourceGroup = options.resourceGroup ?? (deps?.command ?? run)("gh", ["variable", "get", "AZURE_RESOURCE_GROUP"]);
   const appName = options.app ?? (deps?.command ?? run)("gh", ["variable", "get", "CONTAINER_APP_NAME"]);
   const job = positionsReadJobName(appName);
+  const command = options.commandTimeoutMs
+    ? (bin, args) => run(bin, args, { timeoutMs: options.commandTimeoutMs })
+    : (deps?.command ?? run);
+  const json = options.commandTimeoutMs
+    ? (bin, args) => runJson(bin, args, { timeoutMs: options.commandTimeoutMs })
+    : (deps?.json ?? runJson);
   const result = await runReadJob({
     resourceGroup, job,
     command: ["node", "scripts/query-managed-positions.mjs"],
     failedLabel: "Managed-positions job",
     containerHint: "positions-read",
     parseLogs: (logs) => redactPositionsArtifact(parseManagedPositionsLog(logs)),
-  }, deps);
+  }, { ...deps, command, json, timeoutMs: options.timeoutMs ?? deps?.timeoutMs ?? 60_000 });
   return { command: "positions", requested: false, ...result };
 }
 
@@ -598,8 +647,8 @@ function sleepMs(ms) {
 
 function azJson(args) { return runJson("az", [...args, "--only-show-errors", "--output", "json"]); }
 
-function appInsightsQuery(resourceGroup, appInsights, query) {
-  return queryRows(azJson(["monitor", "app-insights", "query", "--resource-group", resourceGroup, "--app", appInsights, "--analytics-query", query]));
+async function appInsightsQuery(resourceGroup, appInsights, query) {
+  return queryRows(await runJsonAsync("az", ["monitor", "app-insights", "query", "--resource-group", resourceGroup, "--app", appInsights, "--analytics-query", query, "--only-show-errors", "--output", "json"]));
 }
 
 function compactDigest(image = "") { return image.includes("@sha256:") ? `sha256:${image.split("@sha256:")[1].slice(0, 12)}` : image; }
@@ -712,7 +761,7 @@ export async function main(argv = process.argv.slice(2)) {
   // query alongside telemetry collection so it includes durable open-BUY state
   // (and each fill's next SELL/force-SELL boundary) without delaying it twice.
   const positionsRead = options.command === "report"
-    ? runPositionsCommand({ resourceGroup, app: appName }).then((result) => ({ result })).catch(() => ({ unavailable: true }))
+    ? runPositionsCommand({ resourceGroup, app: appName }).then((result) => ({ result })).catch((error) => ({ unavailable: true, error: redactOperationalError(error.message) }))
     : null;
   let checkpointFallback = false;
   if (options.sinceLast) {
@@ -741,25 +790,36 @@ export async function main(argv = process.argv.slice(2)) {
   const errorQuery = `traces | where ${timeFilter} | where severityLevel >= 3 | project timestamp, message, cloudRoleInstance=cloud_RoleInstance, tradingMode=tostring(customDimensions.tradingMode), error=tostring(customDimensions.error), failureClass=tostring(customDimensions.failureClass), endpoint=tostring(customDimensions.endpoint), httpStatus=tostring(customDimensions.httpStatus), okxCode=tostring(customDimensions.okxCode), okxMessageClass=tostring(customDimensions.okxMessageClass), okxSummary=tostring(customDimensions.okxSummary), responseClass=tostring(customDimensions.responseClass), durationMs=toint(customDimensions.durationMs), attempts=toint(customDimensions.attempts) | order by timestamp desc | take 10`;
   const baselineQuery = strategyBaselineQuery(revision?.name);
   const pipelineQuery = "traces | where timestamp > ago(24h) | where message startswith 'instrument_pipeline_coverage ' | top 1 by timestamp desc | project timestamp, runtime=toint(customDimensions.runtime), quote_ready=toint(customDimensions.quote_ready), candle_ready=toint(customDimensions.candle_ready), strategy_row=toint(customDimensions.strategy_row), daily_state=toint(customDimensions.daily_state), evaluator_seen=toint(customDimensions.evaluator_seen), decision_emit=toint(customDimensions.decision_emit), no_market_data=toint(customDimensions.no_market_data), candle_not_initialized=toint(customDimensions.candle_not_initialized), no_strategy_row=toint(customDimensions.no_strategy_row), strategy_state_never_created=toint(customDimensions.strategy_state_never_created), filtered_before_evaluator=toint(customDimensions.filtered_before_evaluator), unknown=toint(customDimensions.unknown)";
-  const metric = appInsightsQuery(resourceGroup, appInsights, metricQuery)[0] ?? null;
   const needDecisions = options.command !== "snapshot";
   const needCurrentDecisions = options.command === "report" || options.command === "blocks";
   const needLifecycle = options.command === "report" || options.command === "activity";
   const needErrors = options.command === "report" || options.command === "snapshot";
-  const decisionEvents = needDecisions ? traceEvents(appInsightsQuery(resourceGroup, appInsights, decisionQuery)) : [];
-  const currentDecisionEvents = needCurrentDecisions ? traceEvents(appInsightsQuery(resourceGroup, appInsights, currentDecisionQuery)) : [];
-  const lifecycleEvents = needLifecycle ? traceEvents(appInsightsQuery(resourceGroup, appInsights, lifecycleQuery)) : [];
-  const observabilityEvents = needLifecycle ? traceEvents(appInsightsQuery(resourceGroup, appInsights, observabilityQuery)) : [];
-  const blockEvents = needDecisions ? traceEvents(appInsightsQuery(resourceGroup, appInsights, blockQuery)) : [];
+  const [metricRows, decisionRows, currentDecisionRows, lifecycleRows, observabilityRows, blockRows, errorRows, baselineRows, pipelineRows] = await Promise.all([
+    appInsightsQuery(resourceGroup, appInsights, metricQuery),
+    needDecisions ? appInsightsQuery(resourceGroup, appInsights, decisionQuery) : Promise.resolve([]),
+    needCurrentDecisions ? appInsightsQuery(resourceGroup, appInsights, currentDecisionQuery) : Promise.resolve([]),
+    needLifecycle ? appInsightsQuery(resourceGroup, appInsights, lifecycleQuery) : Promise.resolve([]),
+    needLifecycle ? appInsightsQuery(resourceGroup, appInsights, observabilityQuery) : Promise.resolve([]),
+    needDecisions ? appInsightsQuery(resourceGroup, appInsights, blockQuery) : Promise.resolve([]),
+    needErrors ? appInsightsQuery(resourceGroup, appInsights, errorQuery) : Promise.resolve([]),
+    needDecisions && baselineQuery ? appInsightsQuery(resourceGroup, appInsights, baselineQuery) : Promise.resolve([]),
+    needDecisions ? appInsightsQuery(resourceGroup, appInsights, pipelineQuery) : Promise.resolve([]),
+  ]);
+  const metric = metricRows[0] ?? null;
+  const decisionEvents = traceEvents(decisionRows);
+  const currentDecisionEvents = traceEvents(currentDecisionRows);
+  const lifecycleEvents = traceEvents(lifecycleRows);
+  const observabilityEvents = traceEvents(observabilityRows);
+  const blockEvents = traceEvents(blockRows);
   const groupedDecisions = new Map();
   for (const event of decisionEvents) {
     const key = `${event.reason}:${event.instId}`; const current = groupedDecisions.get(key) ?? { reason: event.reason, instId: event.instId, decisions: 0, latest: event.timestamp };
     current.decisions += 1; if (event.timestamp > current.latest) current.latest = event.timestamp; groupedDecisions.set(key, current);
   }
   const decisions = summarizeDecisions([...groupedDecisions.values()]);
-  const errors = needErrors ? appInsightsQuery(resourceGroup, appInsights, errorQuery) : [];
-  const baseline = needDecisions && baselineQuery ? parseStrategyBaseline(appInsightsQuery(resourceGroup, appInsights, baselineQuery)[0] ?? null) : { status: "UNAVAILABLE" };
-  const pipelineCoverage = needDecisions ? parsePipelineCoverageRow(appInsightsQuery(resourceGroup, appInsights, pipelineQuery)[0] ?? null) : null;
+  const errors = errorRows;
+  const baseline = needDecisions && baselineQuery ? parseStrategyBaseline(baselineRows[0] ?? null) : { status: "UNAVAILABLE" };
+  const pipelineCoverage = needDecisions ? parsePipelineCoverageRow(pipelineRows[0] ?? null) : null;
   const artifact = JSON.parse(await readFile(new URL("../infrastructure/config/p5-enabled-instruments.json", import.meta.url), "utf8"));
   const routeByInst = new Map([...(artifact.routes?.margin ?? []).map((instId) => [instId, "margin"]), ...(artifact.routes?.spot ?? []).map((instId) => [instId, "spot"])]);
   const trading = summarizeTrading(decisionEvents, lifecycleEvents, routeByInst, currentDecisionEvents, blockEvents, observabilityEvents);
@@ -787,6 +847,7 @@ export async function main(argv = process.argv.slice(2)) {
     trading,
     managedPositions: managedPositions?.result ?? null,
     managedPositionsCoverage: managedPositions?.unavailable ? "UNAVAILABLE" : positionsRead ? "DURABLE_CURRENT_STATE" : "NOT_REQUESTED",
+    managedPositionsError: managedPositions?.error,
     severeTraces: severe.traces, currentSevereTraces: severe.current, inactiveSevereTraces: severe.inactive, transitionTraces: severe.transitions,
     riskSignals: [...severe.current, ...severe.inactive].filter((row) => /HALT|READY_FALSE|WATCHDOG|UNKNOWN|OWNER_LOST|STALE/i.test(row.message ?? "")),
     checks: assessment.checks,
@@ -812,7 +873,7 @@ export async function main(argv = process.argv.slice(2)) {
       console.log(`Account SELL reconciliation: events=${trading.observability.accountSell.events} reasons=${Object.entries(trading.observability.accountSell.reasons).map(([reason, count]) => `${reason}=${count}`).join(", ") || "none"}`);
       console.log(`Current states: waiting=${trading.currentStates.waiting} policy=${trading.currentStates.policy} blocked=${trading.currentStates.blocked} opportunity=${trading.currentStates.opportunity}`);
       if (summary.managedPositions) console.log(formatPositionsSummary(summary.managedPositions));
-      else console.log("Managed positions: unavailable (read-only VNet query did not return a valid result)");
+      else console.log(`Managed positions: unavailable (read-only VNet query ${summary.managedPositionsError ? `error=${summary.managedPositionsError}` : "did not return a valid result"})`);
       console.log(`Severe traces: current=${severe.current.length} inactive=${severe.inactive.length} expected_transition=${severe.transitions.length}${severe.current.length || severe.inactive.length ? ` | ${[...severe.current, ...severe.inactive].slice(0, 3).map((row) => row.message).join("; ")}` : ""}`);
     } else if (options.command === "snapshot") {
       console.log(`Azure production: ${summary.healthy ? "HEALTHY" : "UNHEALTHY"}`);
