@@ -72,7 +72,7 @@ export function normalizeConfirmed3mCandleAt(instId, rows, expectedTs) {
 export class BuySignalPlanner {
   constructor({ accountId, instIds, strategyConfig, market, account, coordinator, state, orders, transaction, rest, readyGate, clock, quoteFreshMs = 1_500, telemetry = () => {}, slo = null }) {
     Object.assign(this, { accountId, instIds, strategyConfig, market, account, coordinator, state, orders, transaction, rest, readyGate, clock, quoteFreshMs, telemetry, slo });
-    this.daily = new Map(); this.protected = new Set(); this.ledger = []; this.decisions = new Map(); this.evaluatorSeen = new Set(); this.currentDay = null; this.primePromise = null;
+    this.daily = new Map(); this.protected = new Set(); this.ledger = []; this.decisions = new Map(); this.evaluatorSeen = new Set(); this.lastEvaluationAt = new Map(); this.currentDay = null; this.primePromise = null;
   }
   exchangeNowMs() { return this.clock.nowMs() + Number(this.rest.clockSkewMs ?? 0); }
   _emit(event) { try { Promise.resolve(this.telemetry(event)).catch(() => {}); } catch { /* observability only */ } }
@@ -135,7 +135,7 @@ export class BuySignalPlanner {
   }
   async _observe(event) {
     const instId = event?.instId; if (!instId || !this.instIds.includes(instId)) return { queued: false, reason: "IGNORED" };
-    this.evaluatorSeen.add(instId);
+    this.evaluatorSeen.add(instId); this.lastEvaluationAt.set(instId, this.clock.nowMs());
     const exchangeNowMs = this.exchangeNowMs(); const day = strategyDay(exchangeNowMs);
     if (this.currentDay !== day) { this.readyGate.set("strategy", false); void this.prime().catch(() => {}); return { queued: false, reason: "STRATEGY_DAY_REFRESH" }; }
     if (event.type === "market-recheck" && this.hasOpenManagedBuy(instId)) {
@@ -182,5 +182,9 @@ export class BuySignalPlanner {
       instIds: this.instIds, market: this.market, strategyConfig: this.strategyConfig, daily: this.daily,
       currentDay: this.currentDay, evaluatorSeen: this.evaluatorSeen, decisions: this.decisions,
     });
+  }
+  health() {
+    const now = this.clock.nowMs(); const ages = this.instIds.map((instId) => this.lastEvaluationAt.get(instId)).filter((observedAt) => Number.isFinite(observedAt)).map((observedAt) => Math.max(0, now - observedAt));
+    return { decision_missing_instruments: this.instIds.length - ages.length, decision_oldest_age_ms: ages.length ? Math.max(...ages) : 0 };
   }
 }

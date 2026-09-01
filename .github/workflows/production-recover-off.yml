@@ -1,0 +1,46 @@
+name: Production recover OFF
+
+on:
+  workflow_dispatch:
+    inputs:
+      image:
+        description: Known-good immutable engine image (registry/name@sha256:...)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: production-deploy
+  cancel-in-progress: false
+
+env:
+  RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP }}
+  CONTAINER_APP_NAME: ${{ vars.CONTAINER_APP_NAME }}
+
+jobs:
+  recover_off:
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_DEPLOY_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      - name: Recover the known-good digest to a healthy OFF revision
+        shell: bash
+        env:
+          IMAGE: ${{ inputs.image }}
+        run: |
+          set -euo pipefail
+          [[ "$IMAGE" =~ @sha256:[a-f0-9]{64}$ ]] || { echo "image must be an immutable sha256 digest" >&2; exit 1; }
+          suffix="recovery-off-${GITHUB_RUN_NUMBER}"
+          revision="$(az containerapp update --name "$CONTAINER_APP_NAME" --resource-group "$RESOURCE_GROUP" --image "$IMAGE" --set-env-vars TRADING_MODE=OFF --revision-suffix "$suffix" --query properties.latestRevisionName --output tsv)"
+          node scripts/production-revision-handoff.mjs --resource-group "$RESOURCE_GROUP" --app "$CONTAINER_APP_NAME" --target-revision "$revision" --expect-mode OFF --execute

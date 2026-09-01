@@ -200,7 +200,7 @@ export async function composeProductionRuntime(env, injected = {}) {
       const exitBacklog = coordinator.stuckExitCount(5 * 60_000);
       const verdict = evaluateWatchdog({ ready: snapshot.ready.ready, ws: { public: ws.public, private: ws.private, business: ws.business }, owner: ws.owner, exitBacklog });
       if (!verdict.healthy) telemetry({ type: "watchdog", reason: "WATCHDOG_UNHEALTHY", reasons: verdict.reasons, exitBacklog });
-      telemetry({ type: "metric_snapshot", reason: "RUNTIME_METRICS", ...slo.snapshot({ reset: true }), ready: snapshot.ready.ready ? 1 : 0, queue_depth_current: snapshot.queue, pending_buy_current: coordinator.pending?.BUY?.size ?? 0, exit_backlog_current: exitBacklog });
+      telemetry({ type: "metric_snapshot", reason: "RUNTIME_METRICS", ...slo.snapshot({ reset: true }), ...market.health(instIds), ...buyPlanner.health(), ...sellService.protectionHealth(), ready: snapshot.ready.ready ? 1 : 0, strategy_ready: ws.strategy ? 1 : 0, queue_depth_current: snapshot.queue, pending_buy_current: coordinator.pending?.BUY?.size ?? 0, exit_backlog_current: exitBacklog });
       try { telemetry(buyPlanner.pipelineCoverage()); } catch { /* pipeline coverage is diagnostic only */ }
     },
   });

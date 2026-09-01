@@ -25,6 +25,10 @@ export class MarketProjection {
   candle(instId) { return this.candles.get(instId)?.value; }
   instrument(instId) { return this.instruments.get(instId)?.value; }
   freshQuote(instId, maxAgeMs) { const entry = this.tickers.get(instId); return Boolean(entry && this.clock.nowMs() - entry.receivedAt <= maxAgeMs) ? entry.value : null; }
+  health(instIds = []) {
+    const now = this.clock.nowMs(); const ages = instIds.map((instId) => this.tickers.get(instId)?.receivedAt).filter((receivedAt) => Number.isFinite(receivedAt)).map((receivedAt) => Math.max(0, now - receivedAt));
+    return { market_missing_instruments: instIds.length - ages.length, market_oldest_age_ms: ages.length ? Math.max(...ages) : 0 };
+  }
   marketKey(instId) { const ticker = this.ticker(instId); const candle = this.candle(instId); return ticker && candle ? stable({ quote: ticker, candle }) : null; }
   #update(map, id, value, kind) {
     if (!id) return { accepted: false, reason: "MISSING_INST" };

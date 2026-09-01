@@ -2,6 +2,8 @@ import { execFileSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
 
 const TERMINAL_FAILURES = new Set(["ActivationFailed", "Degraded", "Failed"]);
+const TRANSIENT_AZURE_FAILURE = /(?:429|5\d\d|TooManyRequests|temporar(?:y|ily)|timed? ?out|ECONNRESET|ECONNREFUSED|ENOTFOUND|EAI_AGAIN)/i;
+const ALREADY_REQUESTED = /RevisionAlreadyInRequestedState/;
 
 function required(value, name) {
   if (!value) throw new Error(`${name} is required`);
@@ -44,18 +46,30 @@ export function parseHandoffArgs(argv) {
   return options;
 }
 
-function createAzureClient({ resourceGroup, app }, exec = execFileSync) {
+export function createAzureClient({ resourceGroup, app }, exec = execFileSync, sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))) {
   const common = ["--resource-group", resourceGroup, "--name", app, "--only-show-errors", "--output", "json"];
-  const az = (args) => {
-    const output = exec("az", [...args, ...common], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+  const az = async (args) => {
+    const output = await exec("az", [...args, ...common], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
     return output.trim() ? JSON.parse(output) : null;
   };
+  const read = async (args) => {
+    let failure;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      try { return await az(args); }
+      catch (error) {
+        failure = error;
+        if (attempt === 2 || !TRANSIENT_AZURE_FAILURE.test(`${error?.message ?? ""}\n${error?.stderr ?? ""}`)) throw error;
+        await sleep(250 * (2 ** attempt));
+      }
+    }
+    throw failure;
+  };
   return {
-    app: () => az(["containerapp", "show", "--query", "{provisioningState:properties.provisioningState,runningStatus:properties.runningStatus,revisionMode:properties.configuration.activeRevisionsMode}"]),
-    revision: (revision) => az(["containerapp", "revision", "show", "--revision", revision, "--query", "{name:name,active:properties.active,healthState:properties.healthState,runningState:properties.runningState,image:properties.template.containers[0].image,mode:properties.template.containers[0].env[?name=='TRADING_MODE'].value|[0]}"]),
-    activeRevisions: () => az(["containerapp", "revision", "list", "--query", "[?properties.active].{name:name,healthState:properties.healthState,runningState:properties.runningState}"]),
-    replicas: (revision) => az(["containerapp", "replica", "list", "--revision", revision, "--query", "[].{containers:properties.containers[].{ready:ready,restartCount:restartCount,runningState:runningState}}"]) ?? [],
-    traffic: () => az(["containerapp", "ingress", "traffic", "show"]),
+    app: () => read(["containerapp", "show", "--query", "{provisioningState:properties.provisioningState,runningStatus:properties.runningStatus,revisionMode:properties.configuration.activeRevisionsMode}"]),
+    revision: (revision) => read(["containerapp", "revision", "show", "--revision", revision, "--query", "{name:name,active:properties.active,healthState:properties.healthState,runningState:properties.runningState,image:properties.template.containers[0].image,mode:properties.template.containers[0].env[?name=='TRADING_MODE'].value|[0]}"]),
+    activeRevisions: () => read(["containerapp", "revision", "list", "--query", "[?properties.active].{name:name,healthState:properties.healthState,runningState:properties.runningState}"]),
+    replicas: async (revision) => await read(["containerapp", "replica", "list", "--revision", revision, "--query", "[].{containers:properties.containers[].{ready:ready,restartCount:restartCount,runningState:runningState}}"]) ?? [],
+    traffic: () => read(["containerapp", "ingress", "traffic", "show"]),
     setTraffic: (revision) => az(["containerapp", "ingress", "traffic", "set", "--revision-weight", `${revision}=100`]),
     activate: (revision) => az(["containerapp", "revision", "activate", "--revision", revision]),
     deactivate: (revision) => az(["containerapp", "revision", "deactivate", "--revision", revision]),
@@ -117,9 +131,43 @@ async function verifyFinal(client, targetRevision, expectedMode, revisionMode) {
   return checks;
 }
 
+async function snapshot(client, targetRevision, stage) {
+  const [app, active, target, replicas, traffic] = await Promise.all([
+    client.app(), client.activeRevisions(), client.revision(targetRevision), client.replicas(targetRevision), client.traffic(),
+  ]);
+  const containers = replicas.flatMap((replica) => replica.containers ?? []);
+  return {
+    stage,
+    revisionMode: app.revisionMode,
+    activeRevisions: active.length,
+    sourceRevisions: active.filter((revision) => revision.name !== targetRevision).length,
+    target: { active: target.active === true, mode: target.mode ?? null, runningState: target.runningState ?? null, healthState: target.healthState ?? null, replicas: replicas.length, readyReplicas: containers.some((container) => container.ready === true) ? replicas.length : 0 },
+    traffic: { totalWeight: traffic.reduce((sum, row) => sum + Number(row?.weight ?? 0), 0), targetWeight: traffic.filter((row) => row?.revisionName === targetRevision).reduce((sum, row) => sum + Number(row?.weight ?? 0), 0) },
+  };
+}
+
+async function idempotentWrite(label, operation, log) {
+  try { return await operation(); }
+  catch (error) {
+    if (!ALREADY_REQUESTED.test(`${error?.message ?? ""}\n${error?.stderr ?? ""}`)) throw error;
+    log(`${label}: RevisionAlreadyInRequestedState`);
+    return null;
+  }
+}
+
+async function deactivateAndWait(client, revision, wait, log) {
+  await idempotentWrite(`deactivate ${revision}`, () => client.deactivate(revision), log);
+  await waitStopped(client, revision, wait);
+}
+
+async function activateAndWait(client, revision, wait, log) {
+  await idempotentWrite(`activate ${revision}`, () => client.activate(revision), log);
+  await waitReady(client, revision, wait);
+}
+
 export async function handoffRevision(options, dependencies = {}) {
-  const client = dependencies.client ?? createAzureClient(options, dependencies.exec);
   const sleep = dependencies.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+  const client = dependencies.client ?? createAzureClient(options, dependencies.exec, sleep);
   const now = dependencies.now ?? Date.now;
   const log = dependencies.log ?? ((message) => console.error(message));
   const wait = { timeoutMs: options.timeoutMs ?? 240_000, pollMs: options.pollMs ?? 5_000, sleep, now, log };
@@ -140,34 +188,45 @@ export async function handoffRevision(options, dependencies = {}) {
   }
 
   const plan = { targetRevision: options.targetRevision, sourceRevision: source?.name ?? null, sourceRevisions: sources.map((revision) => revision.name), expectedMode: options.expectedMode, revisionMode: app.revisionMode, emergency: options.emergency === true };
-  if (!options.execute) return { status: "DRY_RUN", plan };
+  const snapshots = [];
+  const recordSnapshot = async (stage) => {
+    const value = await snapshot(client, options.targetRevision, stage);
+    snapshots.push(value); log(`handoff_snapshot ${JSON.stringify(value)}`);
+    return value;
+  };
+  await recordSnapshot("PRECHECK");
+  if (!options.execute) return { status: "DRY_RUN", plan, snapshots };
 
   let mutated = false;
   try {
     const targetReplicas = await client.replicas(options.targetRevision);
     if (revisionReady(target, targetReplicas)) {
+      await recordSnapshot("TARGET_READY");
       if (app.revisionMode === "Multiple") { mutated = true; await client.setTraffic(options.targetRevision); }
-      for (const sourceRevision of sources) { mutated = true; await client.deactivate(sourceRevision.name); await waitStopped(client, sourceRevision.name, wait); }
+      for (const sourceRevision of sources) { mutated = true; await deactivateAndWait(client, sourceRevision.name, wait, log); }
     } else {
       if (app.revisionMode === "Multiple" && source && source.healthState === "Healthy" && source.runningState === "RunningAtMaxScale") { mutated = true; await client.setTraffic(source.name); }
-      if (target.active) { mutated = true; await client.deactivate(options.targetRevision); await waitStopped(client, options.targetRevision, wait); }
-      for (const sourceRevision of sources) { mutated = true; await client.deactivate(sourceRevision.name); await waitStopped(client, sourceRevision.name, wait); }
-      mutated = true; await client.activate(options.targetRevision);
-      await waitReady(client, options.targetRevision, wait);
+      if (target.active) { mutated = true; await deactivateAndWait(client, options.targetRevision, wait, log); }
+      for (const sourceRevision of sources) { mutated = true; await deactivateAndWait(client, sourceRevision.name, wait, log); }
+      await recordSnapshot("SOURCES_STOPPED");
+      mutated = true; await activateAndWait(client, options.targetRevision, wait, log);
+      await recordSnapshot("TARGET_READY_AFTER_START");
       if (app.revisionMode === "Multiple") await client.setTraffic(options.targetRevision);
     }
     const checks = await verifyFinal(client, options.targetRevision, options.expectedMode, app.revisionMode);
-    return { status: "COMPLETE", plan, checks };
+    await recordSnapshot("FINAL");
+    return { status: "COMPLETE", plan, checks, snapshots };
   } catch (error) {
+    try { await recordSnapshot("FAILURE"); } catch (snapshotError) { log(`handoff_snapshot_unavailable ${snapshotError.message}`); }
     if (!mutated || !source) throw error;
     let rollback = "FAILED";
     try {
       const currentTarget = await client.revision(options.targetRevision);
-      if (currentTarget.active) { await client.deactivate(options.targetRevision); await waitStopped(client, options.targetRevision, wait); }
-      await client.activate(source.name);
-      await waitReady(client, source.name, wait);
+      if (currentTarget.active) await deactivateAndWait(client, options.targetRevision, wait, log);
+      await activateAndWait(client, source.name, wait, log);
       if (app.revisionMode === "Multiple") await client.setTraffic(source.name);
       rollback = "COMPLETE";
+      await recordSnapshot("ROLLBACK_COMPLETE");
     } catch (rollbackError) {
       rollback = `FAILED:${rollbackError.message}`;
     }

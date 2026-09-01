@@ -102,9 +102,9 @@ export function classifyBatchResponse(result, clOrdIds) {
   const byId = new Map((result?.data || []).filter((item) => item?.clOrdId).map((item) => [item.clOrdId, item]));
   return clOrdIds.map((clOrdId) => {
     const item = byId.get(clOrdId);
-    if (!result || result.code !== "0" || !item) return { clOrdId, status: "UNKNOWN", reason: result?.msg || "MISSING_BATCH_ITEM" };
+    if (!result || !item) return { clOrdId, status: "UNKNOWN", reason: result?.msg || "MISSING_BATCH_ITEM" };
     if (item.sCode === "0") return { clOrdId, status: "SUBMITTED", ordId: item.ordId };
-    if (typeof item.sCode === "string" && item.sCode) return { clOrdId, status: "NOT_CREATED", sCode: item.sCode, reason: item.sMsg || item.sCode };
+    if (typeof item.sCode === "string" && item.sCode) return { clOrdId, status: "NOT_CREATED", sCode: item.sCode, ...(item.subCode ? { subCode: item.subCode } : {}), reason: item.sMsg || item.sCode };
     return { clOrdId, status: "UNKNOWN", reason: "INVALID_BATCH_ITEM" };
   });
 }

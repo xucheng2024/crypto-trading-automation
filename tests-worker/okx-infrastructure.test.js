@@ -62,6 +62,9 @@ test("P1 mutation transport makes one send attempt then returns UNKNOWN, while b
   assert.deepEqual(classifyBatchResponse({ code: "0", data: [{ clOrdId: "A", sCode: "0", ordId: "1" }, { clOrdId: "B", sCode: "51000", sMsg: "bad" }, { clOrdId: "C", ordId: "3" }] }, ["A", "B", "C"]), [
     { clOrdId: "A", status: "SUBMITTED", ordId: "1" }, { clOrdId: "B", status: "NOT_CREATED", sCode: "51000", reason: "bad" }, { clOrdId: "C", status: "UNKNOWN", reason: "INVALID_BATCH_ITEM" },
   ]);
+  assert.deepEqual(classifyBatchResponse({ code: "1", msg: "All operations failed", data: [{ clOrdId: "A", ordId: "", sCode: "51008", sMsg: "insufficient", subCode: "1000" }] }, ["A"]), [
+    { clOrdId: "A", status: "NOT_CREATED", sCode: "51008", subCode: "1000", reason: "insufficient" },
+  ]);
 });
 
 test("P5 account profile classifies borrow-capable and owned-funds routes while all new orders remain cross", () => {

@@ -19,7 +19,7 @@ import { EngineWorkLoop } from "../src/application/engine-work-loop.js";
 import { ReadyGate } from "../src/application/trading-engine.js";
 import { EventEmitter } from "node:events";
 import { PostgresOwnerGuard } from "../src/infrastructure/postgres/owner-guard.js";
-import { handoffRevision, parseHandoffArgs } from "../scripts/production-revision-handoff.mjs";
+import { createAzureClient, handoffRevision, parseHandoffArgs } from "../scripts/production-revision-handoff.mjs";
 
 test("P4 runtime validates safety timing and defaults OFF", () => {
   const config = loadAzureRuntimeConfig({});
@@ -85,10 +85,11 @@ test("P4 production roots and container have no legacy D1 runtime", async () => 
   assert.match(files[2], /TRADING_MODE=OFF/);
 });
 
-test("P4 production deployment builds before reserving the migration runner without weakening safety gates", async () => {
-  const [workflow, promotion] = await Promise.all([
+test("P4 production deployment ends at OFF while FULL promotion and OFF recovery stay explicit", async () => {
+  const [workflow, promotion, recovery] = await Promise.all([
     readFile(".github/workflows/production-deploy.yml", "utf8"),
     readFile(".github/workflows/production-promote-full.yml", "utf8"),
+    readFile(".github/workflows/production-recover-off.yml", "utf8"),
   ]);
   assert.match(workflow, /  migrate:\n    needs: build\n/);
   assert.match(workflow, /runs-on: \[self-hosted, linux, x64, crypto-remote-migration\]/);
@@ -98,13 +99,20 @@ test("P4 production deployment builds before reserving the migration runner with
   assert.match(workflow, /if \[ "\$\{\{ inputs\.emergency_handoff \}\}" = "true" \]; then handoff_args\+=\(--emergency\); fi/);
   assert.doesNotMatch(workflow, /Require this run's image build before applying SQL|select\(\.name == "build"\) \| \.conclusion/);
   assert.doesNotMatch(workflow, /api\.ipify|firewall-rule (create|delete)|github-migration-/);
-  assert.match(workflow, /  promote_full:\n    needs: \[build, deploy_off\]\n[\s\S]+environment: production\n/);
-  assert.match(workflow, /  diagnose_failure:\n    needs: \[validate, build, migrate, deploy_off, promote_full\]\n    if: \$\{\{ always\(\) && failure\(\) \}\}/);
+  assert.match(workflow, /name: Create OFF revision/);
+  assert.match(workflow, /name: Safely hand off and verify the OFF revision/);
+  assert.match(workflow, /name: Update read-only jobs/);
+  assert.doesNotMatch(workflow, /  promote_full:/);
+  assert.match(workflow, /  diagnose_failure:\n    needs: \[validate, build, migrate, deploy_off\]\n    if: \$\{\{ always\(\) && failure\(\) \}\}/);
   assert.match(workflow, /Publish redacted failed-job and step summary/);
-  assert.equal([...workflow.matchAll(/node scripts\/production-revision-handoff\.mjs/g)].length, 2);
-  assert.match(workflow, /--expect-mode OFF --execute/); assert.match(workflow, /--expect-mode FULL --execute/);
+  assert.equal([...workflow.matchAll(/node scripts\/production-revision-handoff\.mjs/g)].length, 1);
+  assert.match(workflow, /--expect-mode OFF --execute/);
   assert.match(promotion, /node scripts\/production-revision-handoff\.mjs[\s\S]*--expect-mode FULL --execute/);
-  assert.doesNotMatch(`${workflow}\n${promotion}`, /for old in \$\(az containerapp revision list/);
+  assert.match(recovery, /name: Production recover OFF/);
+  assert.match(recovery, /Known-good immutable engine image/);
+  assert.match(recovery, /@sha256:\[a-f0-9\]\{64\}/);
+  assert.match(recovery, /--expect-mode OFF --execute/);
+  assert.doesNotMatch(`${workflow}\n${promotion}\n${recovery}`, /for old in \$\(az containerapp revision list/);
 });
 
 function handoffFixture({ targetFailure = false, revisionMode = "Single", sourceHealthy = true, extraSource = false } = {}) {
@@ -146,10 +154,35 @@ test("P4 revision handoff requires explicit execution and validates immutable mo
 
 test("P4 revision handoff stops lock contenders before starting one healthy target", async () => {
   const fixture = handoffFixture();
-  const result = await handoffRevision({ targetRevision: "next", expectedMode: "FULL", execute: true, timeoutMs: 10, pollMs: 1 }, { client: fixture.client, sleep: async () => {} });
+  const logs = [];
+  const result = await handoffRevision({ targetRevision: "next", expectedMode: "FULL", execute: true, timeoutMs: 10, pollMs: 1 }, { client: fixture.client, sleep: async () => {}, log: (line) => logs.push(line) });
   assert.equal(result.status, "COMPLETE");
   assert.deepEqual(fixture.calls, ["deactivate:next", "deactivate:old", "activate:next"]);
   assert.deepEqual(result.checks, { appHealthy: true, singleActiveTarget: true, targetReady: true, expectedMode: true, targetTraffic: true });
+  assert.deepEqual(result.snapshots.map((row) => row.stage), ["PRECHECK", "SOURCES_STOPPED", "TARGET_READY_AFTER_START", "FINAL"]);
+  assert.ok(logs.every((line) => line.startsWith("handoff_snapshot ")));
+});
+
+test("P4 handoff retries transient Azure reads only and accepts confirmed idempotent deactivation", async () => {
+  const delays = []; let reads = 0;
+  const client = createAzureClient({ resourceGroup: "rg", app: "app" }, () => {
+    reads += 1;
+    if (reads < 3) throw new Error("429 TooManyRequests");
+    return '{"provisioningState":"Succeeded","runningStatus":"Running","revisionMode":"Single"}';
+  }, async (delay) => delays.push(delay));
+  assert.deepEqual(await client.app(), { provisioningState: "Succeeded", runningStatus: "Running", revisionMode: "Single" });
+  assert.deepEqual(delays, [250, 500]);
+
+  const fixture = handoffFixture(); const deactivate = fixture.client.deactivate;
+  fixture.client.deactivate = async (name) => {
+    if (name !== "next") return deactivate(name);
+    await deactivate(name);
+    throw new Error("RevisionAlreadyInRequestedState");
+  };
+  const logs = [];
+  await handoffRevision({ targetRevision: "next", expectedMode: "FULL", execute: true, timeoutMs: 10, pollMs: 1 }, { client: fixture.client, sleep: async () => {}, log: (line) => logs.push(line) });
+  assert.ok(logs.includes("deactivate next: RevisionAlreadyInRequestedState"));
+  assert.deepEqual(fixture.calls, ["deactivate:next", "deactivate:old", "activate:next"]);
 });
 
 test("P4 revision handoff restores the prior healthy revision when the target fails", async () => {
@@ -230,7 +263,7 @@ test("P4 positions-read job is manual, image-backed, and SELECT-only", async () 
   assert.match(dockerfile, /scripts\/query-managed-positions\.mjs/);
   assert.match(deploy, /containerapp job update/);
   assert.match(deploy, /positions-read/);
-  assert.match(deploy, /  deploy_off:[\s\S]*az containerapp job update[\s\S]*promote_full:/);
+  assert.match(deploy, /  deploy_off:[\s\S]*az containerapp job update[\s\S]*diagnose_failure:/);
   assert.equal([...deploy.matchAll(/containerapp job update/g)].length, 2);
   const sql = await readFile("docs/runbooks/P4_POSTGRES_ENTRA_BOOTSTRAP.sql", "utf8");
   assert.match(sql, /GRANT SELECT ON TABLE filled_orders TO "<POSITIONS_READ_MI_NAME>"/);

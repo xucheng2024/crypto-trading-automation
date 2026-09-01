@@ -283,9 +283,81 @@ resource appInsightsCap90 'Microsoft.Insights/scheduledQueryRules@2023-12-01' = 
   }
   tags: union(tags, { verification: 'PENDING_AZURE_COMPILE_VALIDATE' })
 }
-// Separate application signals: each has its own name, severity, query and action group.
-resource readyFalse 'Microsoft.Insights/scheduledQueryRules@2023-12-01' = {
-  name: '${prefix}-ready-false'
+// Application health derives from the one-minute runtime snapshot, not a one-off trace.
+resource readyFalseSustained 'Microsoft.Insights/scheduledQueryRules@2023-12-01' = {
+  name: '${prefix}-ready-false-sustained'
+  location: location
+  properties: {
+    enabled: true
+    evaluationFrequency: 'PT1M'
+    windowSize: 'PT3M'
+    scopes: [workspaceId]
+    criteria: {
+      allOf: [
+        {
+          query: 'AppTraces | where Message == "metric_snapshot RUNTIME_METRICS" | extend ready=toint(tostring(Properties.ready)) | summarize samples=count(), unready=countif(ready == 0) | where samples >= 2 and unready >= 2'
+          timeAggregation: 'Count'
+          operator: 'GreaterThan'
+          threshold: 0
+          failingPeriods: { numberOfEvaluationPeriods: 1, minFailingPeriodsToAlert: 1 }
+        }
+      ]
+    }
+    actions: { actionGroups: [actionGroup.id] }
+    severity: 1
+  }
+  tags: tags
+}
+resource telemetryHeartbeatMissing 'Microsoft.Insights/scheduledQueryRules@2023-12-01' = {
+  name: '${prefix}-telemetry-heartbeat-missing'
+  location: location
+  properties: {
+    enabled: true
+    evaluationFrequency: 'PT1M'
+    windowSize: 'PT3M'
+    scopes: [workspaceId]
+    criteria: {
+      allOf: [
+        {
+          query: 'AppTraces | where Message == "metric_snapshot RUNTIME_METRICS" | summarize samples=count() | where samples == 0'
+          timeAggregation: 'Count'
+          operator: 'GreaterThan'
+          threshold: 0
+          failingPeriods: { numberOfEvaluationPeriods: 1, minFailingPeriodsToAlert: 1 }
+        }
+      ]
+    }
+    actions: { actionGroups: [actionGroup.id] }
+    severity: 1
+  }
+  tags: tags
+}
+resource marketDecisionTelemetryStalled 'Microsoft.Insights/scheduledQueryRules@2023-12-01' = {
+  name: '${prefix}-market-decision-telemetry-stalled'
+  location: location
+  properties: {
+    enabled: true
+    evaluationFrequency: 'PT1M'
+    windowSize: 'PT3M'
+    scopes: [workspaceId]
+    criteria: {
+      allOf: [
+        {
+          query: 'AppTraces | where Message == "metric_snapshot RUNTIME_METRICS" | extend marketMissing=toint(tostring(Properties.market_missing_instruments)), decisionMissing=toint(tostring(Properties.decision_missing_instruments)), marketAge=tolong(tostring(Properties.market_oldest_age_ms)), decisionAge=tolong(tostring(Properties.decision_oldest_age_ms)) | summarize samples=countif(marketMissing > 0 or decisionMissing > 0 or marketAge > 120000 or decisionAge > 120000) | where samples >= 2'
+          timeAggregation: 'Count'
+          operator: 'GreaterThan'
+          threshold: 0
+          failingPeriods: { numberOfEvaluationPeriods: 1, minFailingPeriodsToAlert: 1 }
+        }
+      ]
+    }
+    actions: { actionGroups: [actionGroup.id] }
+    severity: 1
+  }
+  tags: tags
+}
+resource strategyReadyMissing 'Microsoft.Insights/scheduledQueryRules@2023-12-01' = {
+  name: '${prefix}-strategy-ready-missing'
   location: location
   properties: {
     enabled: true
@@ -295,7 +367,7 @@ resource readyFalse 'Microsoft.Insights/scheduledQueryRules@2023-12-01' = {
     criteria: {
       allOf: [
         {
-          query: 'AppTraces | where Message has "READY_FALSE"'
+          query: 'AppTraces | where Message == "metric_snapshot RUNTIME_METRICS" | extend strategyReady=toint(tostring(Properties.strategy_ready)) | summarize samples=count(), unready=countif(strategyReady == 0) | where samples >= 3 and unready >= 3'
           timeAggregation: 'Count'
           operator: 'GreaterThan'
           threshold: 0
@@ -305,6 +377,30 @@ resource readyFalse 'Microsoft.Insights/scheduledQueryRules@2023-12-01' = {
     }
     actions: { actionGroups: [actionGroup.id] }
     severity: 2
+  }
+  tags: tags
+}
+resource sellProtectionMissing 'Microsoft.Insights/scheduledQueryRules@2023-12-01' = {
+  name: '${prefix}-sell-protection-missing'
+  location: location
+  properties: {
+    enabled: true
+    evaluationFrequency: 'PT1M'
+    windowSize: 'PT2M'
+    scopes: [workspaceId]
+    criteria: {
+      allOf: [
+        {
+          query: 'AppTraces | where Message == "metric_snapshot RUNTIME_METRICS" | extend anchorDue=toint(tostring(Properties.anchor_due_unprotected_current)) | summarize samples=countif(anchorDue > 0) | where samples >= 1'
+          timeAggregation: 'Count'
+          operator: 'GreaterThan'
+          threshold: 0
+          failingPeriods: { numberOfEvaluationPeriods: 1, minFailingPeriodsToAlert: 1 }
+        }
+      ]
+    }
+    actions: { actionGroups: [actionGroup.id] }
+    severity: 1
   }
   tags: tags
 }

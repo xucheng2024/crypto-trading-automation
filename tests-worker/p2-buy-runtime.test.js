@@ -279,6 +279,28 @@ test("P2 recovery paginates fills/history, deduplicates tradeId, persists waterm
   assert.equal(outcome.outcome, "RETAIN_UNKNOWN");
 });
 
+test("P2 recent UNKNOWN with OKX 51603 settles only after every consistency source confirms absence", async () => {
+  const missing = new Error("OKX code 51603"); missing.okxCode = "51603";
+  const calls = []; let settled;
+  const empty = (name) => async (instType) => { calls.push(`${name}:${instType}`); return []; };
+  const service = new ReconciliationService({ ownerGuard: { isHeld: () => true }, readyGate: new ReadyGate(), safetyWaitMs: 0,
+    clock: { nowMs: () => Date.parse("2026-09-01T15:00:00Z") }, transaction: async (fn) => fn({}), state: {},
+    orders: { markSettled: async (_tx, clOrdId, exchangeState, reservationState) => { settled = { clOrdId, exchangeState, reservationState }; return { rowCount: 1 }; } },
+    transport: { order: async () => { throw missing; }, ordersPending: empty("pending"), ordersHistory: empty("history"), ordersHistoryArchive: empty("archive"), fills: empty("fills"), fillsHistory: empty("fillsHistory") },
+  });
+  const outcome = await service.reconcileAttempt({ state: "UNKNOWN", inst_id: "BTC-USDT", cl_ord_id: "unknown", created_at: new Date("2026-09-01T14:52:00Z") });
+  assert.equal(outcome.outcome, "TERMINAL_SETTLED");
+  assert.deepEqual(settled, { clOrdId: "unknown", exchangeState: "NOT_FOUND", reservationState: "RELEASED" });
+  assert.equal(calls.length, 10);
+  settled = undefined;
+  const incomplete = new ReconciliationService({ ownerGuard: { isHeld: () => true }, readyGate: new ReadyGate(), safetyWaitMs: 0,
+    clock: { nowMs: () => Date.parse("2026-09-01T15:00:00Z") }, transaction: async (fn) => fn({}), state: {}, orders: service.orders,
+    transport: { order: async () => { throw missing; }, ordersPending: empty("pending"), ordersHistory: empty("history"), ordersHistoryArchive: empty("archive"), fills: empty("fills") },
+  });
+  assert.equal((await incomplete.reconcileAttempt({ state: "UNKNOWN", inst_id: "BTC-USDT", cl_ord_id: "unknown", created_at: new Date("2026-09-01T14:52:00Z") })).outcome, "RETAIN_UNKNOWN");
+  assert.equal(settled, undefined);
+});
+
 test("P3 fill recovery advances an empty instType only to a lagged successful-read fence", async () => {
   const watermarks = [];
   const service = new ReconciliationService({ ownerGuard: { isHeld: () => true }, readyGate: new ReadyGate(), safetyWaitMs: 0, clock: { nowMs: () => 600_000 },

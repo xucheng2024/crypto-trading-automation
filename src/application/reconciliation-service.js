@@ -2,6 +2,7 @@ import { classifyManagedFill } from "../infrastructure/okx/rest-client.js";
 import { addDecimal, compareDecimal, divideDecimal, multiplyDecimal } from "../decimal.js";
 
 export const FILL_WATERMARK_SETTLEMENT_LAG_MS = 5 * 60_000;
+export const ORDER_ABSENCE_CONFIRMATION_MAX_AGE_MS = 7 * 24 * 60 * 60_000;
 
 // Observability must never become part of the reconciliation correctness path.
 // Ports are intentionally fire-and-forget: both a synchronous throw and a
@@ -131,12 +132,15 @@ export class ReconciliationService {
   }
   async reconcileAttempt(attempt) {
     const instId = attempt.inst_id ?? attempt.instId; const clOrdId = attempt.cl_ord_id ?? attempt.clOrdId;
-    let direct;
+    let direct; let explicitNotFound = false;
     try { direct = await this.transport.order({ instId, clOrdId }); }
     catch (error) {
-      // A failed lookup says nothing about whether the exchange accepted it.
-      emit(this.telemetry, { type: "reconcile_attempt", clOrdId, outcome: "RETAIN_UNKNOWN", reason: "ORDER_LOOKUP_FAILED", error: error?.message });
-      return { clOrdId, outcome: "RETAIN_UNKNOWN" };
+      if (String(error?.okxCode ?? "") === "51603") { direct = { state: "NOT_FOUND" }; explicitNotFound = true; }
+      else {
+        // A failed lookup says nothing about whether the exchange accepted it.
+        emit(this.telemetry, { type: "reconcile_attempt", clOrdId, outcome: "RETAIN_UNKNOWN", reason: "ORDER_LOOKUP_FAILED", error: error?.message });
+        return { clOrdId, outcome: "RETAIN_UNKNOWN" };
+      }
     }
     if (direct?.state && direct.state !== "NOT_FOUND") {
       const terminal = ["filled", "canceled", "mmp_canceled"].includes(String(direct.state).toLowerCase());
@@ -155,8 +159,21 @@ export class ReconciliationService {
     }
     const reads = await Promise.all(tasks);
     const found = reads.flat().some((row) => row?.clOrdId === clOrdId || row?.ordId === attempt.ord_id);
-    emit(this.telemetry, { type: "reconcile_attempt", clOrdId, outcome: found ? "FOUND_BY_CONSISTENCY" : "RETAIN_UNKNOWN" });
-    return { clOrdId, outcome: found ? "FOUND_BY_CONSISTENCY" : "RETAIN_UNKNOWN" };
+    if (found) {
+      emit(this.telemetry, { type: "reconcile_attempt", clOrdId, outcome: "FOUND_BY_CONSISTENCY" });
+      return { clOrdId, outcome: "FOUND_BY_CONSISTENCY" };
+    }
+    const state = attempt.state; const createdAt = new Date(attempt.created_at ?? attempt.createdAt ?? NaN).getTime(); const ageMs = this.clock.nowMs() - createdAt;
+    const recentUnknown = state === "UNKNOWN" && Number.isFinite(ageMs) && ageMs >= -60_000 && ageMs <= ORDER_ABSENCE_CONFIRMATION_MAX_AGE_MS;
+    if (explicitNotFound && recentUnknown && tasks.length === 10 && typeof this.orders.markSettled === "function") {
+      const settled = await this.transaction((tx) => this.orders.markSettled(tx, clOrdId, "NOT_FOUND", "RELEASED"));
+      if (settled?.rowCount) {
+        emit(this.telemetry, { type: "reconcile_attempt", clOrdId, outcome: "TERMINAL_SETTLED", reason: "ORDER_ABSENT_ALL_SOURCES", state: "NOT_FOUND" });
+        return { clOrdId, outcome: "TERMINAL_SETTLED", direct };
+      }
+    }
+    emit(this.telemetry, { type: "reconcile_attempt", clOrdId, outcome: "RETAIN_UNKNOWN" });
+    return { clOrdId, outcome: "RETAIN_UNKNOWN" };
   }
   async fillsForOrder(attempt, order) {
     const ordId = order.ordId ?? attempt.ord_id ?? attempt.ordId; const clOrdId = order.clOrdId ?? attempt.cl_ord_id ?? attempt.clOrdId;

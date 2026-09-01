@@ -85,6 +85,22 @@ test("P3 final exit guard bumps generation instead of permanently colliding with
   ready.set("database", true); assert.equal((await coordinator.drainOnce()).submitted, true); assert.deepEqual(attempts.map((row) => row.generation), [0, 1]);
 });
 
+test("P3 deterministic exchange rejection refreshes availability and retries exactly once with a new generation", async () => {
+  let current = 1_000; const now = { nowMs: () => current }; const market = new MarketProjection({ clock: now }); const account = new AccountCapitalSnapshot({ clock: now }); account.update({ ts: 1, totalEq: "100", adjEq: "100" });
+  market.updateInstrument({ instId: "BTC-USDT", ts: 1, state: "live", tickSz: "0.1", lotSz: "0.1", minSz: "0.1", base: "BTC" }); market.updateTicker({ instId: "BTC-USDT", ts: 1, last: "10", bidPx: "10" });
+  const attempts = []; let submissions = 0; let availabilityReads = 0;
+  const coordinator = new OrderCoordinator({ transaction: async (fn) => fn({}), market, account, readyGate: gate(), ownerGuard: { isHeld: () => true }, mode: () => "FULL", clock: now, config,
+    orders: { reserveExit: async (_tx, row) => { attempts.push(row); return { authorized: true }; }, markNotCreated: async () => {}, markSubmitted: async () => {}, markUnknown: async () => {} },
+    transport: { maxAvailSize: async () => { availabilityReads += 1; return [{ instId: "BTC-USDT", availSell: "1" }]; }, submitBatchOrders: async (rows) => { submissions += 1; return rows.map((row) => submissions === 1 ? { clOrdId: row.clOrdId, status: "NOT_CREATED", sCode: "51008", reason: "rejected" } : { clOrdId: row.clOrdId, status: "SUBMITTED", ordId: "one" }); } },
+  });
+  coordinator.enqueue({ intent: "SELL", instId: "BTC-USDT", baseCcy: "BTC", sourceBuyTradeId: "rejected-retry", remainingSize: "1", fillVersion: 1, sellTime: 1 });
+  assert.equal((await coordinator.drainOnce()).response[0].status, "NOT_CREATED");
+  assert.equal(coordinator.pending.SELL.get("BTC:rejected-retry").notBefore, 2_000);
+  assert.equal((await coordinator.drainOnce()).reason, "NO_ELIGIBLE");
+  current = 2_000; assert.equal((await coordinator.drainOnce()).response[0].status, "SUBMITTED");
+  assert.deepEqual(attempts.map((row) => row.generation), [0, 1]); assert.equal(availabilityReads, 2); assert.equal(coordinator.pending.SELL.size, 0);
+});
+
 test("P3 exit availability failures defer retries instead of retrying on every work loop", async () => {
   let current = 1_000; const now = { nowMs: () => current }; const market = new MarketProjection({ clock: now }); const account = new AccountCapitalSnapshot({ clock: now }); account.update({ ts: 1, totalEq: "100", adjEq: "100" });
   market.updateInstrument({ instId: "BTC-USDT", ts: 1, state: "live", tickSz: "0.1", lotSz: "0.1", minSz: "0.1", base: "BTC" });
@@ -516,6 +532,7 @@ test("P3 slow or rejected telemetry cannot delay Coordinator persistence or reco
   coordinator.enqueue({ intent: "SELL", instId: "SLOW-USDT", baseCcy: "SLOW", sourceBuyTradeId: "slow-buy", remainingSize: "1", availableBase: "1", bidPx: "10", fillVersion: 1, sellTime: 1 });
   const result = await coordinator.drainOnce(); assert.equal(result.submitted, true); assert.equal([...attempts.values()][0].state, "UNKNOWN");
   assert.equal(events.some((event) => event.reason === "EXIT_UNKNOWN"), true);
+  assert.equal(events.some((event) => event.type === "exit_batch" && event.reason === "ORDER_UNCONFIRMED"), true);
 
   const ready = gate(); let lost;
   const owner = { isHeld: () => true, onLost: (handler) => { lost = handler; } };

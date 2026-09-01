@@ -34,6 +34,8 @@ test("P5 daily selection and production planner create a BUY only above the stri
   assert.equal(intents[0].dailyLimitPrice, "95"); assert.equal(intents[0].breakoutPrice, "94.7835"); assert.equal(intents[0].holdHours, "6");
   assert.match(intents[0].decisionId, /^D[A-Z2-7]{26}$/); assert.equal(events.find((event) => event.reason === "BUY_QUEUED").decisionId, intents[0].decisionId);
   assert.ok(metricNames.includes("buy_cycle_tx"));
+  assert.deepEqual(market.health(["BTC-USDT", "MISSING-USDT"]), { market_missing_instruments: 1, market_oldest_age_ms: 0 });
+  assert.deepEqual(planner.health(), { decision_missing_instruments: 0, decision_oldest_age_ms: 0 });
   market.updateTicker({ instId: "BTC-USDT", ts: current + 1, last: "94.7835", askPx: "94.7835", bidPx: "94.7" });
   assert.equal((await planner.observe({ type: "ticker", instId: "BTC-USDT" })).reason, "BREAKOUT_NOT_CONFIRMED");
   assert.ok(events.some((event) => event.reason === "BUY_QUEUED")); assert.ok(events.some((event) => event.reason === "BREAKOUT_NOT_CONFIRMED"));

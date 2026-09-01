@@ -212,7 +212,7 @@ export class OrderCoordinator {
       }
     });
     const safeByClOrdId = new Map(safe.map((row) => [row.attempt.clOrdId, row]));
-    for (const item of response) { const row = safeByClOrdId.get(item.clOrdId); this._emit({ type: "order_lifecycle", reason: `BUY_${item.status}`, intent: "BUY", decisionId: row?.intent.decisionId, instId: row?.intent.instId, executionMode: row?.attempt.executionMode, executionRoute: row?.attempt.executionRoute, clOrdId: item.clOrdId, ordId: item.ordId, exchangeReason: item.reason }); }
+    for (const item of response) { const row = safeByClOrdId.get(item.clOrdId); this._emit({ type: "order_lifecycle", reason: `BUY_${item.status}`, intent: "BUY", decisionId: row?.intent.decisionId, instId: row?.intent.instId, executionMode: row?.attempt.executionMode, executionRoute: row?.attempt.executionRoute, clOrdId: item.clOrdId, ordId: item.ordId, exchangeReason: item.reason, okxCode: item.sCode, okxSubCode: item.subCode }); }
     for (const row of safe) this.pending.BUY.delete(row.intent.instId);
     const unknown = response.filter((item) => item.status === "UNKNOWN").length; this.slo?.observe("unknown_count", unknown); this.slo?.increment?.("unknown_count", unknown); this.slo?.observe("batch_size", safe.length); this.slo?.observe("mutation_concurrency", 1); this._emit({ type: "buy_batch", count: safe.length, results: response.map((item) => ({ clOrdId: item.clOrdId, status: item.status })) });
     return { submitted: true, count: safe.length, response };
@@ -397,16 +397,23 @@ export class OrderCoordinator {
       for (const item of response) await (item.status === "SUBMITTED" ? this.orders.markSubmitted(tx, item.clOrdId, item.ordId) : item.status === "NOT_CREATED" ? this.orders.markNotCreated(tx, item.clOrdId, item.reason) : this.orders.markUnknown(tx, item.clOrdId, item.reason));
     });
     const safeByClOrdId = new Map(safe.map((row) => [row.attempt.clOrdId, row]));
+    for (const row of safe) this.pending[kind].delete(`${row.intent.baseCcy}:${row.intent.sourceBuyTradeId}`);
     for (const item of response) {
-      this._emit({ type: "order_lifecycle", reason: `${kind}_${item.status}`, intent: kind, clOrdId: item.clOrdId, ordId: item.ordId, exchangeReason: item.reason });
+      this._emit({ type: "order_lifecycle", reason: `${kind}_${item.status}`, intent: kind, clOrdId: item.clOrdId, ordId: item.ordId, exchangeReason: item.reason, okxCode: item.sCode, okxSubCode: item.subCode });
       if (item.status === "SUBMITTED" && this.onExitSubmitted) {
         try { this.onExitSubmitted({ ...safeByClOrdId.get(item.clOrdId).attempt, ordId: item.ordId }); }
         catch (error) { this._emit({ type: "exit_confirmation", reason: "SCHEDULE_FAILED", clOrdId: item.clOrdId, error: error?.message }); }
       }
+      if (item.status === "NOT_CREATED") {
+        const row = safeByClOrdId.get(item.clOrdId); const retries = Number(row?.intent.rejectionRetryCount ?? 0);
+        if (row && retries < 1) this._deferExit({ ...row.intent, generation: (row.intent.generation ?? 0) + 1, rejectionRetryCount: retries + 1 }, kind, "EXCHANGE_REJECTED_RETRY", 1_000);
+        else this._emit({ type: "exit_result", intent: kind, reason: "EXIT_RETRY_EXHAUSTED", okxCode: item.sCode, okxSubCode: item.subCode, clOrdId: item.clOrdId });
+      }
     }
-    for (const item of response) if (item.status !== "SUBMITTED") this._emit({ type: "exit_result", intent: kind, reason: item.status === "UNKNOWN" ? "EXIT_UNKNOWN" : "EXIT_NOT_CREATED", exchangeReason: item.reason, clOrdId: item.clOrdId });
-    for (const row of safe) this.pending[kind].delete(`${row.intent.baseCcy}:${row.intent.sourceBuyTradeId}`);
-    this._emit({ type: "exit_batch", intent: kind, count: safe.length, reason: "ORDER_SUBMITTED" });
+    for (const item of response) if (item.status !== "SUBMITTED") this._emit({ type: "exit_result", intent: kind, reason: item.status === "UNKNOWN" ? "EXIT_UNKNOWN" : "EXIT_NOT_CREATED", exchangeReason: item.reason, okxCode: item.sCode, okxSubCode: item.subCode, clOrdId: item.clOrdId });
+    const submittedCount = response.filter((item) => item.status === "SUBMITTED").length;
+    const batchReason = submittedCount === response.length ? "ORDER_SUBMITTED" : submittedCount > 0 ? "ORDER_PARTIAL" : response.some((item) => item.status === "UNKNOWN") ? "ORDER_UNCONFIRMED" : "ORDER_REJECTED";
+    this._emit({ type: "exit_batch", intent: kind, count: safe.length, submittedCount, reason: batchReason });
     return { submitted: true, count: safe.length, response };
   }
   async settleExit({ attempt, fills, exchangeState, accFillSz }) {

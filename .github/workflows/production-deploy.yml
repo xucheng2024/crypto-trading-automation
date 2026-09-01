@@ -123,7 +123,7 @@ jobs:
     runs-on: ubuntu-latest
     environment: production
     outputs:
-      revision: ${{ steps.deploy.outputs.revision }}
+      revision: ${{ steps.create_revision.outputs.revision }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -134,7 +134,8 @@ jobs:
           client-id: ${{ secrets.AZURE_DEPLOY_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-      - id: deploy
+      - id: create_revision
+        name: Create OFF revision
         shell: bash
         env:
           IMAGE: ${{ needs.build.outputs.image }}
@@ -142,41 +143,29 @@ jobs:
           set -euo pipefail
           suffix="off-${GITHUB_SHA:0:7}-${GITHUB_RUN_NUMBER}"
           revision="$(az containerapp update --name "$CONTAINER_APP_NAME" --resource-group "$RESOURCE_GROUP" --image "$IMAGE" --set-env-vars TRADING_MODE=OFF --revision-suffix "$suffix" --query properties.latestRevisionName --output tsv)"
-          handoff_args=(--resource-group "$RESOURCE_GROUP" --app "$CONTAINER_APP_NAME" --target-revision "$revision" --expect-mode OFF --execute)
+          echo "revision=$revision" >> "$GITHUB_OUTPUT"
+      - name: Safely hand off and verify the OFF revision
+        shell: bash
+        env:
+          REVISION: ${{ steps.create_revision.outputs.revision }}
+        run: |
+          set -euo pipefail
+          handoff_args=(--resource-group "$RESOURCE_GROUP" --app "$CONTAINER_APP_NAME" --target-revision "$REVISION" --expect-mode OFF --execute)
           if [ "${{ inputs.emergency_handoff }}" = "true" ]; then handoff_args+=(--emergency); fi
           node scripts/production-revision-handoff.mjs "${handoff_args[@]}"
-          positions_job="${CONTAINER_APP_NAME%-engine}-positions-read"
-          az containerapp job update --name "$positions_job" --resource-group "$RESOURCE_GROUP" --image "$IMAGE" --output none
-          timeline_job="${CONTAINER_APP_NAME%-engine}-timeline-read"
-          az containerapp job update --name "$timeline_job" --resource-group "$RESOURCE_GROUP" --image "$IMAGE" --output none
-          echo "revision=$revision" >> "$GITHUB_OUTPUT"
-
-  promote_full:
-    needs: [build, deploy_off]
-    runs-on: ubuntu-latest
-    environment: production
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-      - uses: azure/login@v2
-        with:
-          client-id: ${{ secrets.AZURE_DEPLOY_CLIENT_ID }}
-          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-      - name: Promote the verified OFF digest and verify the singleton revision
+      - name: Update read-only jobs
         shell: bash
         env:
           IMAGE: ${{ needs.build.outputs.image }}
         run: |
           set -euo pipefail
-          suffix="full-${GITHUB_SHA:0:7}-${GITHUB_RUN_NUMBER}"
-          revision="$(az containerapp update --name "$CONTAINER_APP_NAME" --resource-group "$RESOURCE_GROUP" --image "$IMAGE" --set-env-vars TRADING_MODE=FULL --revision-suffix "$suffix" --query properties.latestRevisionName --output tsv)"
-          node scripts/production-revision-handoff.mjs --resource-group "$RESOURCE_GROUP" --app "$CONTAINER_APP_NAME" --target-revision "$revision" --expect-mode FULL --execute
+          positions_job="${CONTAINER_APP_NAME%-engine}-positions-read"
+          az containerapp job update --name "$positions_job" --resource-group "$RESOURCE_GROUP" --image "$IMAGE" --output none
+          timeline_job="${CONTAINER_APP_NAME%-engine}-timeline-read"
+          az containerapp job update --name "$timeline_job" --resource-group "$RESOURCE_GROUP" --image "$IMAGE" --output none
 
   diagnose_failure:
-    needs: [validate, build, migrate, deploy_off, promote_full]
+    needs: [validate, build, migrate, deploy_off]
     if: ${{ always() && failure() }}
     runs-on: ubuntu-latest
     steps:

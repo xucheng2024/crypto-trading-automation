@@ -151,6 +151,15 @@ export class SellService {
     for (const instId of this.byInst.keys()) events.push(...this.observeTicker(instId));
     return events;
   }
+  protectionHealth() {
+    const now = this.clock.nowMs(); let anchorDueUnprotected = 0;
+    for (const fill of this.fills.values()) {
+      const sellTime = Number(field(fill, "sell_time", "sellTime"));
+      if (field(fill, "sell_state", "sellState") !== "WAITING" || fill.protection_price || !Number.isFinite(sellTime) || sellTime > now) continue;
+      if (this.exchangeNowMs() >= sellProtectionAnchorClose(sellTime)) anchorDueUnprotected += 1;
+    }
+    return { anchor_due_unprotected_current: anchorDueUnprotected };
+  }
   async recoverDueAnchors() {
     const events = [];
     for (const key of [...this.anchorRecoveries]) {
