@@ -107,14 +107,16 @@ test("P4 production deployment builds before reserving the migration runner with
   assert.doesNotMatch(`${workflow}\n${promotion}`, /for old in \$\(az containerapp revision list/);
 });
 
-function handoffFixture({ targetFailure = false, revisionMode = "Single", sourceHealthy = true } = {}) {
+function handoffFixture({ targetFailure = false, revisionMode = "Single", sourceHealthy = true, extraSource = false } = {}) {
   const revisions = new Map([
     ["old", { name: "old", active: true, healthState: sourceHealthy ? "Healthy" : "Unhealthy", runningState: sourceHealthy ? "RunningAtMaxScale" : "Activating", image: "registry/engine@sha256:old", mode: "OFF" }],
     ["next", { name: "next", active: true, healthState: "Unhealthy", runningState: "Activating", image: "registry/engine@sha256:new", mode: "FULL" }],
+    ...(extraSource ? [["older", { name: "older", active: true, healthState: "Unhealthy", runningState: "Activating", image: "registry/engine@sha256:older", mode: "OFF" }]] : []),
   ]);
   const replicas = new Map([
     ["old", [{ containers: [{ ready: true, restartCount: 0, runningState: "Running" }] }]],
     ["next", [{ containers: [{ ready: false, restartCount: 2, runningState: "Waiting" }] }]],
+    ...(extraSource ? [["older", []]] : []),
   ]);
   const calls = []; let trafficRevision = "next";
   const client = {
@@ -171,6 +173,14 @@ test("P4 revision handoff requires an explicit emergency flag for an unhealthy s
   await assert.rejects(handoffRevision(options, { client: fixture.client, sleep: async () => {} }), /SOURCE_NOT_HEALTHY/);
   assert.deepEqual(fixture.calls, []);
   assert.equal((await handoffRevision({ ...options, emergency: true }, { client: fixture.client, sleep: async () => {} })).status, "COMPLETE");
+});
+
+test("P4 emergency handoff clears every legacy source before verifying one target", async () => {
+  const fixture = handoffFixture({ revisionMode: "Multiple", sourceHealthy: false, extraSource: true });
+  const result = await handoffRevision({ targetRevision: "next", expectedMode: "FULL", execute: true, emergency: true, timeoutMs: 10, pollMs: 1 }, { client: fixture.client, sleep: async () => {} });
+  assert.equal(result.status, "COMPLETE");
+  assert.deepEqual(result.plan.sourceRevisions, ["old", "older"]);
+  assert.deepEqual(fixture.calls, ["deactivate:next", "deactivate:old", "deactivate:older", "activate:next", "traffic:next"]);
 });
 
 test("P4 timeline-read job is manual, image-backed, and SELECT-only", async () => {

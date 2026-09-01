@@ -132,14 +132,14 @@ export async function handoffRevision(options, dependencies = {}) {
 
   const active = await client.activeRevisions();
   const sources = active.filter((revision) => revision.name !== options.targetRevision);
-  if (sources.length > 1) throw new Error(`MULTIPLE_SOURCE_REVISIONS ${sources.map((revision) => revision.name).join(",")}`);
+  if (sources.length > 1 && !options.emergency) throw new Error(`MULTIPLE_SOURCE_REVISIONS ${sources.map((revision) => revision.name).join(",")}`);
   const source = sources[0] ?? null;
   if (source && !options.emergency) {
     const sourceReplicas = await client.replicas(source.name);
     if (!revisionReady({ ...source, active: true }, sourceReplicas)) throw new Error(`SOURCE_NOT_HEALTHY ${source.name}`);
   }
 
-  const plan = { targetRevision: options.targetRevision, sourceRevision: source?.name ?? null, expectedMode: options.expectedMode, revisionMode: app.revisionMode, emergency: options.emergency === true };
+  const plan = { targetRevision: options.targetRevision, sourceRevision: source?.name ?? null, sourceRevisions: sources.map((revision) => revision.name), expectedMode: options.expectedMode, revisionMode: app.revisionMode, emergency: options.emergency === true };
   if (!options.execute) return { status: "DRY_RUN", plan };
 
   let mutated = false;
@@ -147,11 +147,11 @@ export async function handoffRevision(options, dependencies = {}) {
     const targetReplicas = await client.replicas(options.targetRevision);
     if (revisionReady(target, targetReplicas)) {
       if (app.revisionMode === "Multiple") { mutated = true; await client.setTraffic(options.targetRevision); }
-      if (source) { mutated = true; await client.deactivate(source.name); await waitStopped(client, source.name, wait); }
+      for (const sourceRevision of sources) { mutated = true; await client.deactivate(sourceRevision.name); await waitStopped(client, sourceRevision.name, wait); }
     } else {
       if (app.revisionMode === "Multiple" && source && source.healthState === "Healthy" && source.runningState === "RunningAtMaxScale") { mutated = true; await client.setTraffic(source.name); }
       if (target.active) { mutated = true; await client.deactivate(options.targetRevision); await waitStopped(client, options.targetRevision, wait); }
-      if (source) { mutated = true; await client.deactivate(source.name); await waitStopped(client, source.name, wait); }
+      for (const sourceRevision of sources) { mutated = true; await client.deactivate(sourceRevision.name); await waitStopped(client, sourceRevision.name, wait); }
       mutated = true; await client.activate(options.targetRevision);
       await waitReady(client, options.targetRevision, wait);
       if (app.revisionMode === "Multiple") await client.setTraffic(options.targetRevision);
