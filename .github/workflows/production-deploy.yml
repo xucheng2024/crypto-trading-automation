@@ -166,3 +166,31 @@ jobs:
           suffix="full-${GITHUB_SHA:0:7}-${GITHUB_RUN_NUMBER}"
           revision="$(az containerapp update --name "$CONTAINER_APP_NAME" --resource-group "$RESOURCE_GROUP" --image "$IMAGE" --set-env-vars TRADING_MODE=FULL --revision-suffix "$suffix" --query properties.latestRevisionName --output tsv)"
           node scripts/production-revision-handoff.mjs --resource-group "$RESOURCE_GROUP" --app "$CONTAINER_APP_NAME" --target-revision "$revision" --expect-mode FULL --execute
+
+  diagnose_failure:
+    needs: [validate, build, migrate, deploy_off, promote_full]
+    if: ${{ always() && failure() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Publish redacted failed-job and step summary
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          summary="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/jobs?per_page=100" --jq '
+            [.jobs[] | select(.conclusion == "failure") | {
+              job: .name,
+              failed_steps: [.steps[]? | select(.conclusion == "failure") | .name]
+            }]
+          ' )"
+          if [ "$summary" = "[]" ]; then
+            summary='[{"job":"NO_FAILED_JOB_RECORDS","failed_steps":[]}]'
+          fi
+          {
+            echo '## Production deployment failure summary'
+            echo
+            echo '```json'
+            echo "$summary"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

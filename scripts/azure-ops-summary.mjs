@@ -329,8 +329,22 @@ export function summarizeDeployment(runInfo, jobs = [], pendingDeployments = [])
     id: runInfo.id, status: runInfo.status, conclusion: runInfo.conclusion, commit: runInfo.head_sha,
     url: runInfo.html_url, createdAt: runInfo.created_at, jobs: normalizedJobs, failedJobs,
     pendingEnvironments: pendingDeployments.map((row) => row.environment?.name).filter(Boolean),
+    failureDetail: state === "FAILED" && !failedJobs.length ? "NO_FAILED_JOB_RECORDS" : null,
     state, healthy: state !== "FAILED",
   };
+}
+
+export function summarizeFailedWorkflowLogs(text) {
+  const categories = new Set();
+  for (const line of String(text ?? "").split(/\r?\n/)) {
+    if (/no successful ci run found/i.test(line)) categories.add("CI_REQUIRED_FOR_COMMIT");
+    else if (/permission|forbidden|unauthori[sz]ed|access denied/i.test(line)) categories.add("AUTHORIZATION");
+    else if (/timeout|timed out/i.test(line)) categories.add("TIMEOUT");
+    else if (/not found/i.test(line)) categories.add("NOT_FOUND");
+    else if (/workflow.*(?:syntax|invalid)|yaml/i.test(line)) categories.add("WORKFLOW_CONFIGURATION");
+    else if (/error|failed|failure|exit code/i.test(line)) categories.add("UNCLASSIFIED_FAILURE");
+  }
+  return [...categories].slice(0, 12);
 }
 
 export function summarizeRunner(app, replicas = [], githubRunners = [], secretNames = []) {
@@ -686,8 +700,7 @@ function collectRunnerSummary(resourceGroup, appName, repository) {
 
 function failedLogExcerpt(repository, runId) {
   const lines = run("gh", ["run", "view", String(runId), "--repo", repository, "--log-failed"]).split("\n").map((line) => line.trim()).filter(Boolean);
-  const diagnostic = lines.filter((line) => /error|failed|failure|exit code|not found|denied|unauthori[sz]ed/i.test(line));
-  return (diagnostic.length ? diagnostic : lines).slice(-12);
+  return summarizeFailedWorkflowLogs(lines.join("\n"));
 }
 
 async function runInfrastructureCommand(options, resourceGroup, appName) {
@@ -722,7 +735,10 @@ async function runInfrastructureCommand(options, resourceGroup, appName) {
   try { runtime = collectProductionRuntime(resourceGroup, appName); }
   catch (error) { runtime = { healthy: false, error: error.message, revision: null, mode: null, image: null, trafficWeight: 0, replicas: 0, readyContainers: 0, restarts: 0 }; }
   const summary = { command: "deploy", healthy: deployment.healthy && runtime.healthy && runner.healthy, target: { resourceGroup, app: appName, repository }, deployment, runtime, runner };
-  if (options.details && deployment.failedJobs.length) summary.failedLogExcerpt = failedLogExcerpt(repository, runInfo.id);
+  if (options.details && deployment.state === "FAILED") {
+    try { summary.failedLogSummary = failedLogExcerpt(repository, runInfo.id); }
+    catch (error) { summary.failedLogSummary = [`LOG_QUERY_${redactOperationalError(error.message) ?? "UNAVAILABLE"}`]; }
+  }
   if (options.json) console.log(JSON.stringify(summary));
   else {
     console.log(`Deployment: run=${deployment.id} result=${deployment.state} commit=${deployment.commit?.slice(0, 7)} overall_healthy=${summary.healthy}`);
@@ -733,7 +749,8 @@ async function runInfrastructureCommand(options, resourceGroup, appName) {
     console.log(`Runner: ${runner.healthy ? "healthy" : "unhealthy"} | github=${runner.github.map((row) => row.status).join(",") || "missing"} busy=${runner.github.some((row) => row.busy)}`);
     if (runner.error) console.log(`Runner error: ${runner.error}`);
     if (deployment.failedJobs.length) console.log(`Failures: ${deployment.failedJobs.map((job) => `${job.name}[${job.failedSteps.join(",") || "unknown step"}]`).join(" ")}`);
-    if (summary.failedLogExcerpt?.length) console.log(`Failed log: ${summary.failedLogExcerpt.join(" | ")}`);
+    else if (deployment.failureDetail) console.log(`Failures: ${deployment.failureDetail}`);
+    if (summary.failedLogSummary?.length) console.log(`Failed diagnostic: ${summary.failedLogSummary.join(",")}`);
     console.log(`URL: ${deployment.url}`);
   }
   if (!summary.healthy) process.exitCode = 2;

@@ -97,6 +97,8 @@ test("P4 production deployment builds before reserving the migration runner with
   assert.doesNotMatch(workflow, /Require this run's image build before applying SQL|select\(\.name == "build"\) \| \.conclusion/);
   assert.doesNotMatch(workflow, /api\.ipify|firewall-rule (create|delete)|github-migration-/);
   assert.match(workflow, /  promote_full:\n    needs: \[build, deploy_off\]\n[\s\S]+environment: production\n/);
+  assert.match(workflow, /  diagnose_failure:\n    needs: \[validate, build, migrate, deploy_off, promote_full\]\n    if: \$\{\{ always\(\) && failure\(\) \}\}/);
+  assert.match(workflow, /Publish redacted failed-job and step summary/);
   assert.equal([...workflow.matchAll(/node scripts\/production-revision-handoff\.mjs/g)].length, 2);
   assert.match(workflow, /--expect-mode OFF --execute/); assert.match(workflow, /--expect-mode FULL --execute/);
   assert.match(promotion, /node scripts\/production-revision-handoff\.mjs[\s\S]*--expect-mode FULL --execute/);

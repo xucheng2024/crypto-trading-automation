@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { assessRuntime, classifyBlock, classifyDecision, classifySevereTraces, countCsvInstruments, formatDecisionTelemetryLine, formatInstrumentTimelineSummary, formatPipelineCoverageLine, formatPositionsSummary, formatSevereDiagnostic, instrumentTimelineReadJobName, parseArgs, parseInstrumentTimelineLog, parseManagedPositionsLog, parsePipelineCoverageRow, parseStrategyBaseline, positionsReadJobName, queryRows, redactOperationalError, redactPositionsArtifact, runInstrumentTimelineCommand, runPositionsCommand, strategyBaselineQuery, summarizeDecisions, summarizeDeployment, summarizeRunner, summarizeTrading, traceEvents } from "../scripts/azure-ops-summary.mjs";
+import { assessRuntime, classifyBlock, classifyDecision, classifySevereTraces, countCsvInstruments, formatDecisionTelemetryLine, formatInstrumentTimelineSummary, formatPipelineCoverageLine, formatPositionsSummary, formatSevereDiagnostic, instrumentTimelineReadJobName, parseArgs, parseInstrumentTimelineLog, parseManagedPositionsLog, parsePipelineCoverageRow, parseStrategyBaseline, positionsReadJobName, queryRows, redactOperationalError, redactPositionsArtifact, runInstrumentTimelineCommand, runPositionsCommand, strategyBaselineQuery, summarizeDecisions, summarizeDeployment, summarizeFailedWorkflowLogs, summarizeRunner, summarizeTrading, traceEvents } from "../scripts/azure-ops-summary.mjs";
 
 test("Azure ops summary converts query tables and aggregates decisions", () => {
   assert.deepEqual(queryRows({ tables: [{ columns: [{ name: "reason" }, { name: "decisions" }], rows: [["WAIT", 2]] }] }), [{ reason: "WAIT", decisions: 2 }]);
@@ -124,6 +124,8 @@ test("Azure ops summary compacts workflow failures, approvals, and runner readin
     [{ environment: { name: "production-full" } }],
   );
   assert.equal(deployment.healthy, false); assert.equal(deployment.state, "FAILED"); assert.deepEqual(deployment.failedJobs[0].failedSteps, ["Plan"]); assert.deepEqual(deployment.pendingEnvironments, ["production-full"]);
+  assert.equal(summarizeDeployment({ id: 8, status: "completed", conclusion: "failure" }, []).failureDetail, "NO_FAILED_JOB_RECORDS");
+  assert.deepEqual(summarizeFailedWorkflowLogs("No successful CI run found\npermission denied\ntoken=secret"), ["CI_REQUIRED_FOR_COMMIT", "AUTHORIZATION"]);
   const runner = summarizeRunner(
     { properties: { provisioningState: "Succeeded", runningStatus: "Running", latestRevisionName: "runner--1" } },
     [{ properties: { containers: [{ ready: true, runningState: "Running", restartCount: 2 }] } }],
