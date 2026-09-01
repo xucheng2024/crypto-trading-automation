@@ -94,6 +94,8 @@ test("P4 production deployment builds before reserving the migration runner with
   assert.match(workflow, /runs-on: \[self-hosted, linux, x64, crypto-remote-migration\]/);
   assert.ok(workflow.indexOf("uses: actions/setup-node@v4", workflow.indexOf("  migrate:")) < workflow.indexOf("- id: plan", workflow.indexOf("  migrate:")));
   assert.match(workflow, /  deploy_off:\n    needs: \[build, migrate\]\n/);
+  assert.match(workflow, /emergency_handoff:[\s\S]+Allow OFF handoff away from an unhealthy active revision/);
+  assert.match(workflow, /if \[ "\$\{\{ inputs\.emergency_handoff \}\}" = "true" \]; then handoff_args\+=\(--emergency\); fi/);
   assert.doesNotMatch(workflow, /Require this run's image build before applying SQL|select\(\.name == "build"\) \| \.conclusion/);
   assert.doesNotMatch(workflow, /api\.ipify|firewall-rule (create|delete)|github-migration-/);
   assert.match(workflow, /  promote_full:\n    needs: \[build, deploy_off\]\n[\s\S]+environment: production\n/);

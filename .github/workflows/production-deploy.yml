@@ -2,6 +2,12 @@ name: Production deploy
 
 on:
   workflow_dispatch:
+    inputs:
+      emergency_handoff:
+        description: Allow OFF handoff away from an unhealthy active revision
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   actions: read
@@ -136,7 +142,9 @@ jobs:
           set -euo pipefail
           suffix="off-${GITHUB_SHA:0:7}-${GITHUB_RUN_NUMBER}"
           revision="$(az containerapp update --name "$CONTAINER_APP_NAME" --resource-group "$RESOURCE_GROUP" --image "$IMAGE" --set-env-vars TRADING_MODE=OFF --revision-suffix "$suffix" --query properties.latestRevisionName --output tsv)"
-          node scripts/production-revision-handoff.mjs --resource-group "$RESOURCE_GROUP" --app "$CONTAINER_APP_NAME" --target-revision "$revision" --expect-mode OFF --execute
+          handoff_args=(--resource-group "$RESOURCE_GROUP" --app "$CONTAINER_APP_NAME" --target-revision "$revision" --expect-mode OFF --execute)
+          if [ "${{ inputs.emergency_handoff }}" = "true" ]; then handoff_args+=(--emergency); fi
+          node scripts/production-revision-handoff.mjs "${handoff_args[@]}"
           positions_job="${CONTAINER_APP_NAME%-engine}-positions-read"
           az containerapp job update --name "$positions_job" --resource-group "$RESOURCE_GROUP" --image "$IMAGE" --output none
           timeline_job="${CONTAINER_APP_NAME%-engine}-timeline-read"
