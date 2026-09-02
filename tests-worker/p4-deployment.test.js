@@ -371,11 +371,15 @@ test("P4 owner session loss shuts down before requesting a container restart", a
 
 test("P4 owner guard signals a held-session loss once and ignores graceful release", async () => {
   const client = new EventEmitter(); client.query = async (sql) => ({ rows: [{ held: sql.includes("pg_try") }] });
-  const owner = new PostgresOwnerGuard(client, "owner-loss-unit"); let losses = 0; owner.onLost(() => { losses += 1; });
-  assert.equal(await owner.acquire(), true); client.emit("error", new Error("connection lost")); client.emit("end");
+  const events = []; let now = 1_000;
+  const owner = new PostgresOwnerGuard(client, "owner-loss-unit", (event) => events.push(event), () => now);
+  let losses = 0; owner.onLost(() => { losses += 1; });
+  assert.equal(await owner.acquire(), true); now = 61_000; client.emit("error", new Error("connection lost")); client.emit("end");
   assert.equal(losses, 1); assert.equal(owner.isHeld(), false);
+  assert.deepEqual(events, [{ type: "owner_lost", reason: "SESSION_ADVISORY_LOCK_LOST", restartClass: "db_connection_reset", sessionHeldMs: 60_000 }]);
   assert.equal(await owner.acquire(), true); await owner.release(); client.emit("end");
   assert.equal(losses, 1, "normal release and close do not request a restart");
+  assert.equal(events.length, 1);
 });
 
 test("P4 maintenance CLI fails closed without an injected credential-free adapter", async () => {
@@ -429,7 +433,7 @@ test("P4 Entra PostgreSQL pool uses official scope, TLS verification and fails r
   assert.throws(() => new EntraPostgresPool({ connectionString: 'postgresql://user:secret@host/db', credential, Pool: FakePool }), /must not contain a password/);
   const adapter = new EntraPostgresPool({ connectionString: 'postgresql://user@host/db', credential, Pool: FakePool, logger: (event) => events.push(event), onUnavailable: (reason) => events.push({ reason }) });
   assert.equal(options.connectionString, undefined); assert.equal(options.host, 'host'); assert.equal(options.port, 5432); assert.equal(options.user, 'user'); assert.equal(options.database, 'db');
-  assert.equal(options.ssl.rejectUnauthorized, true); assert.equal(await options.password(), 'short-token'); await assert.rejects(adapter.connect(), /pool exhausted/);
+  assert.equal(options.ssl.rejectUnauthorized, true); assert.equal(options.keepAlive, true); assert.equal(options.keepAliveInitialDelayMillis, 60_000); assert.equal(await options.password(), 'short-token'); await assert.rejects(adapter.connect(), /pool exhausted/);
   assert.deepEqual(events, [{ reason: 'POSTGRES_POOL_UNAVAILABLE' }, { reason: 'POSTGRES_POOL_UNAVAILABLE' }]);
 });
 

@@ -22,6 +22,33 @@ resource actionGroup 'Microsoft.Insights/actionGroups@2023-01-01' = {
   }
   tags: tags
 }
+resource postgresCpuCredits 'Microsoft.Insights/metricAlerts@2018-03-01' = {
+  name: '${prefix}-postgres-cpu-credits'
+  location: 'global'
+  properties: {
+    severity: 2
+    enabled: true
+    scopes: [postgresId]
+    evaluationFrequency: 'PT5M'
+    windowSize: 'PT15M'
+    criteria: {
+      'odata.type': 'Microsoft.Azure.Monitor.SingleResourceMultipleMetricCriteria'
+      allOf: [
+        {
+          name: 'cpu_credits_remaining'
+          metricName: 'cpu_credits_remaining'
+          metricNamespace: 'Microsoft.DBforPostgreSQL/flexibleServers'
+          operator: 'LessThan'
+          threshold: 10
+          timeAggregation: 'Average'
+          criterionType: 'StaticThresholdCriterion'
+        }
+      ]
+    }
+    actions: [{ actionGroupId: actionGroup.id }]
+  }
+  tags: union(tags, { verification: 'PENDING_AZURE_COMPILE_VALIDATE' })
+}
 resource engineRestart 'Microsoft.Insights/metricAlerts@2018-03-01' = {
   name: '${prefix}-engine-restart'
   location: 'global'

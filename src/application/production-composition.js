@@ -74,7 +74,7 @@ export async function composeProductionRuntime(env, injected = {}) {
   const readyGate = injected.readyGate ?? new ReadyGate();
   const pool = injected.pool ?? new EntraPostgresPool({ connectionString: config.postgresUrl, credential, logger: telemetry, onUnavailable: (reason) => { readyGate.set("database", false); telemetry({ reason }); } });
   const ownerClient = injected.ownerClient ?? await pool.connect();
-  const ownerGuard = injected.ownerGuard ?? new PostgresOwnerGuard(ownerClient);
+  const ownerGuard = injected.ownerGuard ?? new PostgresOwnerGuard(ownerClient, "azure-trading-owner", telemetry);
   const market = injected.market ?? new MarketProjection({ clock: runtime.clock }); market.quoteFreshMs ??= config.quote_max_age_ms; const account = injected.account ?? new AccountCapitalSnapshot({ clock: runtime.clock });
   const orders = injected.orders ?? new OrderRepository(); const state = injected.state ?? new TradingStateRepository();
   const slo = injected.slo ?? new VirtualSloMetrics(runtime.clock);

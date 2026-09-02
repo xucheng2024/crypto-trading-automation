@@ -4,18 +4,27 @@ export class PostgresOwnerGuard extends OwnerGuard {
   #client;
   #held = false;
   #key;
+  #telemetry;
+  #nowMs;
+  #acquiredAtMs = null;
   #lossListeners = new Set();
 
-  constructor(client, key = "azure-trading-owner") {
+  constructor(client, key = "azure-trading-owner", telemetry = () => {}, nowMs = () => Date.now()) {
     super();
     this.#client = client;
     this.#key = key;
-    const lost = () => {
+    this.#telemetry = telemetry;
+    this.#nowMs = nowMs;
+    const lost = (restartClass) => () => {
       if (!this.#held) return;
-      this.#held = false; for (const listener of this.#lossListeners) listener();
+      const sessionHeldMs = this.#acquiredAtMs == null ? 0 : Math.max(0, this.#nowMs() - this.#acquiredAtMs);
+      this.#held = false;
+      this.#acquiredAtMs = null;
+      try { this.#telemetry({ type: "owner_lost", reason: "SESSION_ADVISORY_LOCK_LOST", restartClass, sessionHeldMs }); } catch { /* loss must fail closed even if telemetry throws */ }
+      for (const listener of this.#lossListeners) listener();
     };
-    client.on?.("error", lost);
-    client.on?.("end", lost);
+    client.on?.("error", lost("db_connection_reset"));
+    client.on?.("end", lost("db_lock_lost"));
   }
 
   isHeld() {
@@ -34,6 +43,7 @@ export class PostgresOwnerGuard extends OwnerGuard {
       [this.#key],
     );
     this.#held = result.rows[0].held === true;
+    this.#acquiredAtMs = this.#held ? this.#nowMs() : null;
     return this.#held;
   }
 
@@ -44,6 +54,7 @@ export class PostgresOwnerGuard extends OwnerGuard {
       }
     } finally {
       this.#held = false;
+      this.#acquiredAtMs = null;
     }
   }
 }

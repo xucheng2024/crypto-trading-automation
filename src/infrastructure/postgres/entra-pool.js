@@ -23,6 +23,8 @@ export class EntraPostgresPool {
       user: decodeURIComponent(parsed.username),
       database: decodeURIComponent(parsed.pathname.slice(1)),
       max,
+      keepAlive: true,
+      keepAliveInitialDelayMillis: 60_000,
       ssl,
       password: async () => {
       try { const token = await credential.getToken(AZURE_POSTGRES_SCOPE); if (!token?.token || token.expiresOnTimestamp <= Date.now()) throw new Error("expired"); return token.token; }

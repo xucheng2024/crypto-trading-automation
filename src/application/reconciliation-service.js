@@ -40,7 +40,6 @@ export class ReconciliationService {
     // same turn; reacquisition always goes through recover() and its safety wait.
     this.ownerGuard.onLost?.(() => {
       this.readyGate.set("owner", false);
-      emit(this.telemetry, { type: "owner_lost", reason: "SESSION_ADVISORY_LOCK_LOST" });
     });
   }
   async recover({ accountId, scopes = ["public", "private", "business"], strategyDay } = {}) {
