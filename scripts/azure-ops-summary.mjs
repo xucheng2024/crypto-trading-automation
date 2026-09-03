@@ -259,6 +259,7 @@ export function summarizeTrading(decisionEvents, lifecycleEvents, routeByInst = 
 
 export function assessRuntime({ app, active, replicas, traffic, metric, expectedMode }) {
   const containers = replicas.flatMap((replica) => replica.properties?.containers ?? []);
+  const restartCount = containers.reduce((sum, container) => sum + Number(container.restartCount ?? 0), 0);
   const trafficWeight = traffic.reduce((sum, row) => sum + Number(row.weight ?? 0), 0);
   const checks = {
     provisioned: app.properties?.provisioningState === "Succeeded",
@@ -269,10 +270,12 @@ export function assessRuntime({ app, active, replicas, traffic, metric, expected
     expectedMode: !expectedMode || active[0]?.properties?.template?.containers?.[0]?.env?.find((row) => row.name === "TRADING_MODE")?.value === expectedMode,
     traffic: trafficWeight === 100,
     replicasReady: containers.length > 0 && containers.every((container) => container.ready && container.runningState === "Running"),
-    noRestarts: containers.every((container) => Number(container.restartCount ?? 0) === 0),
     telemetryReady: Number(metric?.ready) === 1,
   };
-  return { healthy: Object.values(checks).every(Boolean), checks };
+  const healthy = Object.values(checks).every(Boolean);
+  const warnings = restartCount === 0 ? [] : ["HISTORICAL_RESTARTS_PRESENT"];
+  const status = healthy ? (warnings.length ? "HEALTHY_WITH_WARNINGS" : "HEALTHY") : "UNHEALTHY";
+  return { healthy, status, warnings, checks };
 }
 
 export function classifySevereTraces(rows, activeRevision) {
@@ -851,6 +854,8 @@ export async function main(argv = process.argv.slice(2)) {
   const summary = {
     command: options.command,
     healthy: assessment.healthy,
+    status: assessment.status,
+    warnings: assessment.warnings,
     window: { from: options.since, to: queryStartedAt, minutes: options.since ? null : options.minutes, checkpointFallback },
     target: { resourceGroup, app: appName, appInsights },
     runtime: {
@@ -876,9 +881,10 @@ export async function main(argv = process.argv.slice(2)) {
     console.log(`Window: ${windowLabel} -> ${queryStartedAt}`);
     if (checkpointFallback) console.log("Checkpoint: missing; used the most recent 60 minutes");
     if (options.command === "report") {
-      console.log(`Azure production: ${summary.healthy ? "HEALTHY" : "UNHEALTHY"}`);
+      console.log(`Azure production: ${summary.status}`);
       console.log(`Revision: ${summary.runtime.revision} | ${summary.runtime.mode} | ${summary.runtime.runningState}/${summary.runtime.healthState}`);
-      console.log(`Runtime: traffic=${summary.runtime.trafficWeight}% replicas=${summary.runtime.replicas} ready=${summary.runtime.readyContainers} restarts=${summary.runtime.restarts} image=${summary.runtime.image}`);
+      console.log(`Runtime: traffic=${summary.runtime.trafficWeight}% replicas=${summary.runtime.replicas} ready=${summary.runtime.readyContainers} restarts_cumulative=${summary.runtime.restarts} image=${summary.runtime.image}`);
+      if (summary.warnings.length) console.log(`Runtime warnings: ${summary.warnings.join(",")}`);
       console.log(`Latest metrics: ready=${metric?.ready ?? "missing"} events=${metric?.eventCount ?? 0} decisions=${metric?.decisionCount ?? decisions.decisions}`);
       console.log(`Health telemetry: strategy_ready=${metric?.strategyReady ?? "?"} market_missing=${metric?.marketMissing ?? "?"} market_oldest_age_ms=${metric?.marketOldestAgeMs ?? "?"} decision_missing=${metric?.decisionMissing ?? "?"} decision_oldest_age_ms=${metric?.decisionOldestAgeMs ?? "?"} anchor_due_unprotected=${metric?.anchorDueUnprotected ?? "?"}`);
       console.log(formatDecisionTelemetryLine({ windowInstruments: decisions.instruments, currentStateCoverage: trading.currentStateCoverage, currentStates: trading.currentStates, runtimeInstruments, repoEnabled: artifact.enabled_count, strategyReadyInstruments, strategyBaseline: baseline }));
@@ -894,9 +900,10 @@ export async function main(argv = process.argv.slice(2)) {
       else console.log(`Managed positions: unavailable (read-only VNet query ${summary.managedPositionsError ? `error=${summary.managedPositionsError}` : "did not return a valid result"})`);
       console.log(`Severe traces: current=${severe.current.length} inactive=${severe.inactive.length} expected_transition=${severe.transitions.length}${severe.current.length || severe.inactive.length ? ` | ${[...severe.current, ...severe.inactive].slice(0, 3).map((row) => row.message).join("; ")}` : ""}`);
     } else if (options.command === "snapshot") {
-      console.log(`Azure production: ${summary.healthy ? "HEALTHY" : "UNHEALTHY"}`);
+      console.log(`Azure production: ${summary.status}`);
       console.log(`Revision: ${summary.runtime.revision} | ${summary.runtime.mode} | ${summary.runtime.runningState}/${summary.runtime.healthState}`);
-      console.log(`Runtime: traffic=${summary.runtime.trafficWeight}% replicas=${summary.runtime.replicas} ready=${summary.runtime.readyContainers} restarts=${summary.runtime.restarts} image=${summary.runtime.image}`);
+      console.log(`Runtime: traffic=${summary.runtime.trafficWeight}% replicas=${summary.runtime.replicas} ready=${summary.runtime.readyContainers} restarts_cumulative=${summary.runtime.restarts} image=${summary.runtime.image}`);
+      if (summary.warnings.length) console.log(`Runtime warnings: ${summary.warnings.join(",")}`);
       console.log(`Signals: ready=${metric?.ready ?? "missing"} source_lag_p99=${metric?.sourceLagP99 ?? "?"}ms severe_current=${severe.current.length} inactive_severe=${severe.inactive.length} expected_transition=${severe.transitions.length} risk_signals=${summary.riskSignals.length} exit_backlog=${metric?.exitBacklog ?? "?"}`);
     } else if (options.command === "activity") {
       console.log(`Activity telemetry: opportunities=${trading.events.queued} prepared=${trading.events.prepared} submitted=${trading.events.submitted} settled=${trading.events.settled} ledger_confirmed=${trading.events.ledgerConfirmed} unknown=${trading.events.unknown} not_created=${trading.events.notCreated}`);

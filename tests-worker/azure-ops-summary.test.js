@@ -252,7 +252,23 @@ test("Azure ops summary fails closed on unsafe runtime state", () => {
     replicas: [{ properties: { containers: [{ ready: true, runningState: "Running", restartCount: 0 }] } }],
     traffic: [{ weight: 100 }], metric: { ready: 1 }, expectedMode: "FULL",
   };
-  assert.equal(assessRuntime(base).healthy, true);
-  assert.equal(assessRuntime({ ...base, metric: { ready: 0 } }).healthy, false);
-  assert.equal(assessRuntime({ ...base, active: [...base.active, base.active[0]] }).healthy, false);
+  assert.deepEqual(assessRuntime(base), {
+    healthy: true,
+    status: "HEALTHY",
+    warnings: [],
+    checks: {
+      provisioned: true, running: true, singleActiveRevision: true, revisionHealthy: true,
+      immutableImage: true, expectedMode: true, traffic: true, replicasReady: true,
+      telemetryReady: true,
+    },
+  });
+  const restarted = assessRuntime({
+    ...base,
+    replicas: [{ properties: { containers: [{ ready: true, runningState: "Running", restartCount: 3 }] } }],
+  });
+  assert.equal(restarted.healthy, true);
+  assert.equal(restarted.status, "HEALTHY_WITH_WARNINGS");
+  assert.deepEqual(restarted.warnings, ["HISTORICAL_RESTARTS_PRESENT"]);
+  assert.equal(assessRuntime({ ...base, metric: { ready: 0 } }).status, "UNHEALTHY");
+  assert.equal(assessRuntime({ ...base, active: [...base.active, base.active[0]] }).status, "UNHEALTHY");
 });
