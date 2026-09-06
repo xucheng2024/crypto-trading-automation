@@ -7,7 +7,7 @@ function redacted(value) { return String(value ?? "").replace(/:\/\/[^@]+@/, ":/
 // Token authentication is requested for every newly-created connection.  No
 // password is kept in config, process environment, telemetry, or database.
 export class EntraPostgresPool {
-  constructor({ connectionString, credential, Pool = pg.Pool, logger = () => {}, onUnavailable = () => {}, max = 10, ssl = { rejectUnauthorized: true } } = {}) {
+  constructor({ connectionString, credential, Pool = pg.Pool, logger = () => {}, onUnavailable = () => {}, max = 10, ssl = { rejectUnauthorized: true }, connectionTimeoutMillis } = {}) {
     if (!connectionString?.startsWith("postgres")) throw new Error("POSTGRES_URL is required");
     const parsed = new URL(connectionString);
     if (parsed.password) throw new Error("POSTGRES_URL must not contain a password; Entra token is the only authentication secret");
@@ -23,6 +23,7 @@ export class EntraPostgresPool {
       user: decodeURIComponent(parsed.username),
       database: decodeURIComponent(parsed.pathname.slice(1)),
       max,
+      ...(connectionTimeoutMillis == null ? {} : { connectionTimeoutMillis }),
       keepAlive: true,
       keepAliveInitialDelayMillis: 60_000,
       ssl,

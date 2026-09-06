@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { assessRuntime, classifyBlock, classifyDecision, classifySevereTraces, countCsvInstruments, formatDecisionTelemetryLine, formatInstrumentTimelineSummary, formatPipelineCoverageLine, formatPositionsSummary, formatSevereDiagnostic, instrumentTimelineReadJobName, parseArgs, parseInstrumentTimelineLog, parseManagedPositionsLog, parsePipelineCoverageRow, parseStrategyBaseline, positionsReadJobName, queryRows, redactOperationalError, redactPositionsArtifact, runInstrumentTimelineCommand, runPositionsCommand, strategyBaselineQuery, summarizeDecisions, summarizeDeployment, summarizeFailedWorkflowLogs, summarizeRunner, summarizeTrading, traceEvents } from "../scripts/azure-ops-summary.mjs";
+import { assessCollection, assessRuntime, classifyBlock, classifyDecision, classifySevereTraces, countCsvInstruments, formatDecisionTelemetryLine, formatInstrumentTimelineSummary, formatPipelineCoverageLine, formatPositionsSummary, formatSevereDiagnostic, instrumentTimelineReadJobName, parseArgs, parseInstrumentTimelineLog, parseManagedPositionsLog, parsePipelineCoverageRow, parseStrategyBaseline, positionsReadJobName, queryRows, redactOperationalError, redactPositionsArtifact, runInstrumentTimelineCommand, runPositionsCommand, settleQueryResults, strategyBaselineQuery, summarizeDecisions, summarizeDeployment, summarizeFailedWorkflowLogs, summarizeRunner, summarizeTrading, traceEvents } from "../scripts/azure-ops-summary.mjs";
 
 test("Azure ops summary converts query tables and aggregates decisions", () => {
   assert.deepEqual(queryRows({ tables: [{ columns: [{ name: "reason" }, { name: "decisions" }], rows: [["WAIT", 2]] }] }), [{ reason: "WAIT", decisions: 2 }]);
@@ -10,6 +10,16 @@ test("Azure ops summary converts query tables and aggregates decisions", () => {
     { reason: "CANDLE_PENDING", instId: "BTC-USDT", decisions: 1, latest: "2026-01-01T00:01:00Z" },
     { reason: "PRICE_OUTSIDE", instId: "ETH-USDT", decisions: 2, latest: "2026-01-01T00:00:30Z" },
   ]), { decisions: 6, instruments: 2, latest: "2026-01-01T00:01:00Z", reasons: { PRICE_OUTSIDE: 5, CANDLE_PENDING: 1 } });
+});
+
+test("Azure ops summary marks failed report collection incomplete without treating it as empty telemetry", async () => {
+  const result = await settleQueryResults([
+    { name: "metric", promise: Promise.resolve([{ ready: 1 }]) },
+    { name: "severe", promise: Promise.reject(new Error("request timed out")) },
+  ]);
+  assert.deepEqual(result.rows, { metric: [{ ready: 1 }], severe: [] });
+  assert.deepEqual(result.unavailable, [{ name: "severe", error: "TIMEOUT" }]);
+  assert.deepEqual(assessCollection(result.unavailable), { complete: false, unavailable: [{ name: "severe", error: "TIMEOUT" }] });
 });
 
 test("Azure ops summary retains only safe ACCOUNT SELL reconciliation evidence", () => {
@@ -31,9 +41,12 @@ test("Azure ops summary accepts trading, deployment, and runner commands", () =>
   assert.deepEqual(parseArgs(["deploy", "--run-id", "123"]).runId, 123);
   assert.deepEqual(parseArgs(["runner", "--json"]).command, "runner");
   assert.deepEqual(parseArgs(["positions", "--request"]).command, "positions");
+  assert.deepEqual(parseArgs(["positions", "--request", "--no-wait"]).noWait, true);
+  assert.equal(parseArgs(["positions", "--execution", "positions-read-abc"]).execution, "positions-read-abc");
   assert.deepEqual(parseArgs(["timeline", "--instrument", "BTC-USDT", "--request"]).command, "timeline");
   assert.deepEqual(parseArgs(["trade", "--instrument", "BTC-USDT", "--request"]).command, "trade");
   assert.throws(() => parseArgs(["positions"]), /requires --request/);
+  assert.throws(() => parseArgs(["positions", "--request", "--execution", "positions-read-abc"]), /does not accept --request/);
   assert.throws(() => parseArgs(["positions", "--run-id", "7"]), /does not accept --run-id/);
   assert.throws(() => parseArgs(["trade", "--instrument", "BTC-USDT"]), /requires --request/);
   assert.throws(() => parseArgs(["trade", "--instrument", "BTC-USDT", "--run-id", "8"]), /does not accept --run-id/);
@@ -87,6 +100,23 @@ test("positions CLI starts the VNet job and redacts log JSON", async () => {
   assert.equal(positionsReadJobName("trading-cae-engine"), "trading-cae-positions-read");
   assert.ok(calls.some((row) => row[0] === "az" && row.includes("start")));
   assert.ok(!calls.some((row) => row[0] === "gh"));
+  const pending = await runPositionsCommand(parseArgs(["positions", "--request", "--no-wait", "--resource-group", "rg", "--app", "trading-cae-engine"]), {
+    command: () => { throw new Error("logs must not be read while pending"); },
+    json: (bin, args) => {
+      if (bin === "az" && args.includes("start")) return { name: "trading-cae-positions-read-pending" };
+      return { properties: { template: { containers: [{ name: "positions-read", image: "img" }] } } };
+    },
+  });
+  assert.deepEqual(pending, { command: "positions", requested: false, job: "trading-cae-positions-read", execution: "trading-cae-positions-read-pending", pending: true });
+  assert.equal(formatPositionsSummary(pending), "Managed positions: PENDING | job=trading-cae-positions-read execution=trading-cae-positions-read-pending");
+  const expired = await runPositionsCommand(parseArgs(["positions", "--execution", "trading-cae-positions-read-expired", "--resource-group", "rg", "--app", "trading-cae-engine"]), {
+    json: (_bin, args) => {
+      if (args.includes("execution")) throw new Error("ERROR: No replicas found for execution");
+      return { properties: { template: { containers: [{ name: "positions-read", image: "img" }] } } };
+    },
+  });
+  assert.deepEqual(expired, { command: "positions", requested: false, job: "trading-cae-positions-read", execution: "trading-cae-positions-read-expired", expired: true });
+  assert.equal(formatPositionsSummary(expired), "Managed positions: EXPIRED | job=trading-cae-positions-read execution=trading-cae-positions-read-expired | start a new read-only request");
   const redacted = redactPositionsArtifact({ summary: { instruments: 1, openFills: 2, forbidden: "no" }, positions: [{ instrument: "BTC-USDT", remainingCostUsd: "100", openFills: 2, accountId: "forbidden" }], realizedSummary: { instruments: 1, complete: 1 }, realized: [{ instrument: "BTC-USDT", netPnlUsd: "2", completeness: "COMPLETE", gapCount: 0, fee: "forbidden" }] });
   assert.deepEqual(redacted.positions[0], { instrument: "BTC-USDT", remainingCostUsd: "100", openFills: 2 }); assert.deepEqual(redacted.realized[0], { instrument: "BTC-USDT", netPnlUsd: "2", completeness: "COMPLETE", gapCount: 0 });
   assert.throws(() => parseManagedPositionsLog("no marker"), /missing the redacted JSON marker/);

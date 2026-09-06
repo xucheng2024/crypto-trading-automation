@@ -85,17 +85,25 @@ export function redactManagedPositions(rows, realizedRows = []) {
   return { summary: { instruments: positions.length, openFills: positions.reduce((total, row) => total + row.openFills, 0) }, positions, realizedSummary: { instruments: realized.length, complete: realized.filter((row) => row.completeness === "COMPLETE").length }, realized };
 }
 
-export async function queryManagedPositions({ connectionString = process.env.POSTGRES_URL, credential = new DefaultAzureCredential(), Pool, logger = () => {} } = {}) {
-  const pool = new EntraPostgresPool({ connectionString, credential, Pool, logger, max: 1 });
+export async function queryManagedPositions({ connectionString = process.env.POSTGRES_URL, credential = new DefaultAzureCredential(), Pool, logger = () => {}, stage = () => {} } = {}) {
+  const startedAt = Date.now();
+  const mark = (name) => stage({ name, durationMs: Date.now() - startedAt });
+  mark("PROCESS_STARTED");
+  const pool = new EntraPostgresPool({ connectionString, credential, Pool, logger, max: 1, connectionTimeoutMillis: 10_000 });
   let client;
   try {
     client = await pool.connect();
+    mark("DB_CONNECTED");
     await client.query("BEGIN READ ONLY");
     await client.query("SET LOCAL statement_timeout = '5000ms'");
     await client.query("SET LOCAL lock_timeout = '1000ms'");
     const positions = await client.query(MANAGED_POSITIONS_SQL);
+    mark("POSITIONS_QUERY_DONE");
     const realized = await client.query(REALIZED_PNL_SQL);
-    return redactManagedPositions(positions.rows, realized.rows);
+    mark("REALIZED_QUERY_DONE");
+    const result = redactManagedPositions(positions.rows, realized.rows);
+    mark("RESULT_EMITTED");
+    return result;
   } finally {
     if (client) {
       try { await client.query("ROLLBACK"); } catch {}
@@ -120,7 +128,7 @@ export function extractManagedPositionsJson(text) {
 }
 
 export async function main(argv = process.argv.slice(2)) {
-  const result = await queryManagedPositions(parseArgs(argv));
+  const result = await queryManagedPositions({ ...parseArgs(argv), stage: ({ name, durationMs }) => console.log(`MANAGED_POSITIONS_STAGE ${name} duration_ms=${durationMs}`) });
   console.log(`${MANAGED_POSITIONS_JSON_PREFIX}${JSON.stringify(result)}`);
   return result;
 }

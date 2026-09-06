@@ -15,19 +15,25 @@ function run(command, args, { timeoutMs } = {}) {
   return result.stdout.trim();
 }
 
-function runAsync(command, args) {
+function runAsync(command, args, { timeoutMs } = {}) {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, { stdio: ["ignore", "pipe", "pipe"] });
     let stdout = "";
     let stderr = "";
     let outputBytes = 0;
     let settled = false;
+    let timer;
     const finish = (callback) => (value) => {
       if (settled) return;
       settled = true;
+      if (timer) clearTimeout(timer);
       callback(value);
     };
     const fail = finish(reject);
+    timer = timeoutMs == null ? null : setTimeout(() => {
+      child.kill();
+      fail(new Error(`${command} timed out`));
+    }, timeoutMs);
     const append = (target) => (chunk) => {
       if (settled) return;
       outputBytes += chunk.length;
@@ -58,8 +64,8 @@ function runJson(command, args, options) {
   return output ? JSON.parse(output) : null;
 }
 
-async function runJsonAsync(command, args) {
-  const output = await runAsync(command, args);
+async function runJsonAsync(command, args, options) {
+  const output = await runAsync(command, args, options);
   return output ? JSON.parse(output) : null;
 }
 
@@ -382,6 +388,8 @@ export function parseArgs(argv) {
       const value = args[++index]; if (!value || Number.isNaN(Date.parse(value))) throw new Error("--since requires an ISO timestamp");
       options.since = new Date(value).toISOString();
     }
+    else if (arg === "--no-wait") options.noWait = true;
+    else if (arg === "--execution") options.execution = args[++index];
     else if (["--minutes", "--resource-group", "--app", "--app-insights", "--expect-mode", "--run-id", "--instrument"].includes(arg)) {
       const value = args[++index]; if (!value) throw new Error(`${arg} requires a value`);
       const key = { "--minutes": "minutes", "--resource-group": "resourceGroup", "--app": "app", "--app-insights": "appInsights", "--expect-mode": "expectedMode", "--run-id": "runId", "--instrument": "instrument" }[arg];
@@ -396,13 +404,16 @@ export function parseArgs(argv) {
     if (options.command === "positions") {
       if (options.instrument) throw new Error("--instrument is only valid with trade or timeline");
       if (options.runId) throw new Error("positions does not accept --run-id");
-      if (!options.request) throw new Error("positions requires --request");
+      if (options.execution && !/^[a-z0-9-]+$/i.test(options.execution)) throw new Error("--execution requires an Azure job execution name");
+      if (options.noWait && options.execution) throw new Error("Use only one of --no-wait or --execution");
+      if (!options.request && !options.execution) throw new Error("positions requires --request or --execution");
+      if (options.execution && options.request) throw new Error("--execution does not accept --request");
       return options;
     }
     if (!options.instrument || !/^[A-Z0-9]+-[A-Z0-9]+(?:-[A-Z0-9]+)?$/.test(options.instrument)) throw new Error(`${options.command} requires --instrument with an exact uppercase OKX instrument`);
     if (options.runId) throw new Error(`${options.command} does not accept --run-id`);
     if (!options.request) throw new Error(`${options.command} requires --request`);
-  } else if (options.instrument || options.request) throw new Error("--instrument and --request are only valid with trade or timeline");
+  } else if (options.instrument || options.request || options.noWait || options.execution) throw new Error("--instrument, --request, --no-wait, and --execution are only valid with trade or timeline");
   return options;
 }
 
@@ -459,6 +470,8 @@ export function redactPositionsArtifact(artifact) {
 }
 
 export function formatPositionsSummary(result) {
+  if (result.pending) return `Managed positions: PENDING | job=${result.job} execution=${result.execution}`;
+  if (result.expired) return `Managed positions: EXPIRED | job=${result.job} execution=${result.execution} | start a new read-only request`;
   const lines = [`Managed positions: instruments=${result.summary.instruments} open_fills=${result.summary.openFills} | job=${result.job} execution=${result.execution}`];
   for (const row of result.positions ?? []) {
     const sell = Array.isArray(row.sellStates) && row.sellStates.length ? row.sellStates.join(",") : "-";
@@ -582,23 +595,36 @@ function startReadJob(json, { job, resourceGroup, container, command, extraEnv =
   } finally { rmSync(directory, { recursive: true, force: true }); }
 }
 
-async function runReadJob({ resourceGroup, job, command, extraEnv, parseLogs, failedLabel, containerHint }, { command: runCommand = run, json = runJson, sleep = sleepMs, now = Date.now, timeoutMs = 60_000, pollMs = 500 } = {}) {
+async function runReadJob({ resourceGroup, job, command, extraEnv, parseLogs, failedLabel, containerHint, execution: requestedExecution, noWait = false }, { command: runCommand = run, json = runJson, sleep = sleepMs, now = Date.now, timeoutMs = 60_000, pollMs = 500 } = {}) {
   const container = jobContainer(json("az", ["containerapp", "job", "show", "--name", job, "--resource-group", resourceGroup, "--only-show-errors", "--output", "json"]));
-  let started;
-  try { started = startReadJob(json, { job, resourceGroup, container, command, extraEnv }); }
-  catch (error) { throw new Error(`${failedLabel} start failed job=${job} container=${container.name}: ${error.message}`); }
-  const execution = jobExecutionName(started);
+  let execution = requestedExecution;
+  if (!execution) {
+    let started;
+    try { started = startReadJob(json, { job, resourceGroup, container, command, extraEnv }); }
+    catch (error) { throw new Error(`${failedLabel} start failed job=${job} container=${container.name}: ${error.message}`); }
+    execution = jobExecutionName(started);
+  }
+  if (noWait) return { job, execution, pending: true };
+  const pollOnce = Boolean(requestedExecution);
   let status = "Running";
   const deadline = now() + timeoutMs;
   let logs = "";
   while (now() < deadline) {
-    const row = json("az", ["containerapp", "job", "execution", "show", "--name", job, "--resource-group", resourceGroup, "--job-execution-name", execution, "--only-show-errors", "--output", "json"]);
-    status = row?.properties?.status ?? row?.status ?? "Unknown";
+    let row;
     try {
+      row = json("az", ["containerapp", "job", "execution", "show", "--name", job, "--resource-group", resourceGroup, "--job-execution-name", execution, "--only-show-errors", "--output", "json"]);
+    } catch (error) {
+      if (requestedExecution && /no replicas found for execution|execution.*not found/i.test(error?.message ?? "")) return { job, execution, expired: true };
+      throw error;
+    }
+    status = row?.properties?.status ?? row?.status ?? "Unknown";
+    if (pollOnce && (status === "Running" || status === "Unknown")) return { job, execution, pending: true };
+    if (status === "Succeeded") try {
       logs = runCommand("az", ["containerapp", "job", "logs", "show", "--name", job, "--resource-group", resourceGroup, "--container", container.name, "--execution", execution, "--only-show-errors"]);
       return { job, execution, ...parseLogs(logs) };
     } catch (error) {
-      const retryable = /missing the redacted JSON marker/.test(error.message) || status === "Running" || status === "Unknown";
+      const retryable = /missing the redacted JSON marker/.test(error.message);
+      if (pollOnce && retryable) return { job, execution, pending: true };
       if (!retryable) throw error;
     }
     if (status === "Failed" || status === "Cancelled") {
@@ -643,6 +669,8 @@ export async function runPositionsCommand(options, deps) {
     command: ["node", "scripts/query-managed-positions.mjs"],
     failedLabel: "Managed-positions job",
     containerHint: "positions-read",
+    execution: options.execution,
+    noWait: options.noWait,
     parseLogs: (logs) => redactPositionsArtifact(parseManagedPositionsLog(logs)),
   }, { ...deps, command, json, timeoutMs: options.timeoutMs ?? deps?.timeoutMs ?? 60_000 });
   return { command: "positions", requested: false, ...result };
@@ -664,8 +692,28 @@ function sleepMs(ms) {
 
 function azJson(args) { return runJson("az", [...args, "--only-show-errors", "--output", "json"]); }
 
-async function appInsightsQuery(resourceGroup, appInsights, query) {
-  return queryRows(await runJsonAsync("az", ["monitor", "app-insights", "query", "--resource-group", resourceGroup, "--app", appInsights, "--analytics-query", query, "--only-show-errors", "--output", "json"]));
+async function appInsightsQuery(resourceGroup, appInsights, query, { timeoutMs } = {}) {
+  return queryRows(await runJsonAsync("az", ["monitor", "app-insights", "query", "--resource-group", resourceGroup, "--app", appInsights, "--analytics-query", query, "--only-show-errors", "--output", "json"], { timeoutMs }));
+}
+
+export async function settleQueryResults(entries) {
+  const settled = await Promise.allSettled(entries.map((entry) => entry.promise));
+  const rows = {};
+  const unavailable = [];
+  for (let index = 0; index < entries.length; index += 1) {
+    const entry = entries[index];
+    const result = settled[index];
+    if (result.status === "fulfilled") rows[entry.name] = result.value;
+    else {
+      rows[entry.name] = [];
+      unavailable.push({ name: entry.name, error: redactOperationalError(result.reason?.message) ?? "REDACTED_ERROR" });
+    }
+  }
+  return { rows, unavailable };
+}
+
+export function assessCollection(unavailable = []) {
+  return { complete: unavailable.length === 0, unavailable };
 }
 
 function compactDigest(image = "") { return image.includes("@sha256:") ? `sha256:${image.split("@sha256:")[1].slice(0, 12)}` : image; }
@@ -781,7 +829,7 @@ export async function main(argv = process.argv.slice(2)) {
   // query alongside telemetry collection so it includes durable open-BUY state
   // (and each fill's next SELL/force-SELL boundary) without delaying it twice.
   const positionsRead = options.command === "report"
-    ? runPositionsCommand({ resourceGroup, app: appName }).then((result) => ({ result })).catch((error) => ({ unavailable: true, error: redactOperationalError(error.message) }))
+    ? runPositionsCommand({ resourceGroup, app: appName, noWait: true, commandTimeoutMs: 5_000 }).then((result) => ({ result })).catch((error) => ({ unavailable: true, error: redactOperationalError(error.message) }))
     : null;
   let checkpointFallback = false;
   if (options.sinceLast) {
@@ -814,17 +862,20 @@ export async function main(argv = process.argv.slice(2)) {
   const needCurrentDecisions = options.command === "report" || options.command === "blocks";
   const needLifecycle = options.command === "report" || options.command === "activity";
   const needErrors = options.command === "report" || options.command === "snapshot";
-  const [metricRows, decisionRows, currentDecisionRows, lifecycleRows, observabilityRows, blockRows, errorRows, baselineRows, pipelineRows] = await Promise.all([
-    appInsightsQuery(resourceGroup, appInsights, metricQuery),
-    needDecisions ? appInsightsQuery(resourceGroup, appInsights, decisionQuery) : Promise.resolve([]),
-    needCurrentDecisions ? appInsightsQuery(resourceGroup, appInsights, currentDecisionQuery) : Promise.resolve([]),
-    needLifecycle ? appInsightsQuery(resourceGroup, appInsights, lifecycleQuery) : Promise.resolve([]),
-    needLifecycle ? appInsightsQuery(resourceGroup, appInsights, observabilityQuery) : Promise.resolve([]),
-    needDecisions ? appInsightsQuery(resourceGroup, appInsights, blockQuery) : Promise.resolve([]),
-    needErrors ? appInsightsQuery(resourceGroup, appInsights, errorQuery) : Promise.resolve([]),
-    needDecisions && baselineQuery ? appInsightsQuery(resourceGroup, appInsights, baselineQuery) : Promise.resolve([]),
-    needDecisions ? appInsightsQuery(resourceGroup, appInsights, pipelineQuery) : Promise.resolve([]),
+  const queryTimeoutMs = options.command === "report" ? 20_000 : undefined;
+  const query = (name, promise) => ({ name, promise });
+  const queryResults = await settleQueryResults([
+    query("metric", appInsightsQuery(resourceGroup, appInsights, metricQuery, { timeoutMs: queryTimeoutMs })),
+    query("decision", needDecisions ? appInsightsQuery(resourceGroup, appInsights, decisionQuery, { timeoutMs: queryTimeoutMs }) : Promise.resolve([])),
+    query("currentDecision", needCurrentDecisions ? appInsightsQuery(resourceGroup, appInsights, currentDecisionQuery, { timeoutMs: queryTimeoutMs }) : Promise.resolve([])),
+    query("lifecycle", needLifecycle ? appInsightsQuery(resourceGroup, appInsights, lifecycleQuery, { timeoutMs: queryTimeoutMs }) : Promise.resolve([])),
+    query("observability", needLifecycle ? appInsightsQuery(resourceGroup, appInsights, observabilityQuery, { timeoutMs: queryTimeoutMs }) : Promise.resolve([])),
+    query("block", needDecisions ? appInsightsQuery(resourceGroup, appInsights, blockQuery, { timeoutMs: queryTimeoutMs }) : Promise.resolve([])),
+    query("error", needErrors ? appInsightsQuery(resourceGroup, appInsights, errorQuery, { timeoutMs: queryTimeoutMs }) : Promise.resolve([])),
+    query("baseline", needDecisions && baselineQuery ? appInsightsQuery(resourceGroup, appInsights, baselineQuery, { timeoutMs: queryTimeoutMs }) : Promise.resolve([])),
+    query("pipeline", needDecisions ? appInsightsQuery(resourceGroup, appInsights, pipelineQuery, { timeoutMs: queryTimeoutMs }) : Promise.resolve([])),
   ]);
+  const { metric: metricRows, decision: decisionRows, currentDecision: currentDecisionRows, lifecycle: lifecycleRows, observability: observabilityRows, block: blockRows, error: errorRows, baseline: baselineRows, pipeline: pipelineRows } = queryResults.rows;
   const metric = metricRows[0] ?? null;
   const decisionEvents = traceEvents(decisionRows);
   const currentDecisionEvents = traceEvents(currentDecisionRows);
@@ -851,10 +902,15 @@ export async function main(argv = process.argv.slice(2)) {
   const severe = classifySevereTraces(errors, revision?.name);
   const replicaContainers = replicas.flatMap((replica) => replica.properties?.containers ?? []);
   const managedPositions = positionsRead ? await positionsRead : null;
+  const collection = assessCollection([
+    ...queryResults.unavailable,
+    ...(managedPositions?.unavailable ? [{ name: "managedPositions", error: managedPositions.error ?? "REDACTED_ERROR" }] : []),
+    ...(managedPositions?.result?.pending ? [{ name: "managedPositions", error: "PENDING" }] : []),
+  ]);
   const summary = {
     command: options.command,
-    healthy: assessment.healthy,
-    status: assessment.status,
+    healthy: assessment.healthy && collection.complete,
+    status: collection.complete ? assessment.status : "INCOMPLETE",
     warnings: assessment.warnings,
     window: { from: options.since, to: queryStartedAt, minutes: options.since ? null : options.minutes, checkpointFallback },
     target: { resourceGroup, app: appName, appInsights },
@@ -868,8 +924,9 @@ export async function main(argv = process.argv.slice(2)) {
     telemetry: { ...metric, configuredInstruments: artifact.enabled_count, repoEnabledInstruments: artifact.enabled_count, runtimeInstruments, strategyReadyInstruments, strategyBaseline: baseline, observedInstruments: decisions.instruments, decisions: decisions.decisions, reasons: decisions.reasons, pipelineCoverage },
     trading,
     managedPositions: managedPositions?.result ?? null,
-    managedPositionsCoverage: managedPositions?.unavailable ? "UNAVAILABLE" : positionsRead ? "DURABLE_CURRENT_STATE" : "NOT_REQUESTED",
+    managedPositionsCoverage: managedPositions?.unavailable ? "UNAVAILABLE" : managedPositions?.result?.pending ? "PENDING" : positionsRead ? "DURABLE_CURRENT_STATE" : "NOT_REQUESTED",
     managedPositionsError: managedPositions?.error,
+    collection,
     severeTraces: severe.traces, currentSevereTraces: severe.current, inactiveSevereTraces: severe.inactive, transitionTraces: severe.transitions,
     riskSignals: [...severe.current, ...severe.inactive].filter((row) => /HALT|READY_FALSE|WATCHDOG|UNKNOWN|OWNER_LOST|STALE/i.test(row.message ?? "")),
     checks: assessment.checks,
@@ -882,6 +939,7 @@ export async function main(argv = process.argv.slice(2)) {
     if (checkpointFallback) console.log("Checkpoint: missing; used the most recent 60 minutes");
     if (options.command === "report") {
       console.log(`Azure production: ${summary.status}`);
+      if (!summary.collection.complete) console.log(`Collection: INCOMPLETE unavailable=${summary.collection.unavailable.map((row) => `${row.name}:${row.error}`).join(",")}`);
       console.log(`Revision: ${summary.runtime.revision} | ${summary.runtime.mode} | ${summary.runtime.runningState}/${summary.runtime.healthState}`);
       console.log(`Runtime: traffic=${summary.runtime.trafficWeight}% replicas=${summary.runtime.replicas} ready=${summary.runtime.readyContainers} restarts_cumulative=${summary.runtime.restarts} image=${summary.runtime.image}`);
       if (summary.warnings.length) console.log(`Runtime warnings: ${summary.warnings.join(",")}`);
@@ -957,7 +1015,7 @@ export async function main(argv = process.argv.slice(2)) {
       for (const row of [...severe.current, ...severe.inactive].slice(0, 10)) console.log(formatSevereDiagnostic(row));
     }
   }
-  if (options.command === "report" && options.since) await writeFile(checkpointPath, `${JSON.stringify({ checkedAt: queryStartedAt })}\n`, "utf8");
+  if (options.command === "report" && options.since && summary.collection.complete) await writeFile(checkpointPath, `${JSON.stringify({ checkedAt: queryStartedAt })}\n`, "utf8");
   if (!summary.healthy) process.exitCode = 2;
   return summary;
 }
