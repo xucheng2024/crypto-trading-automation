@@ -9,8 +9,8 @@ const field = (row, snake, camel) => row[snake] ?? row[camel];
  * consume* runs later and is the only part that reads/writes durable state.
  */
 export class SellService {
-  constructor({ state, transaction = async (fn) => fn(null), coordinator, market, clock = { nowMs: () => Date.now() }, exchangeNowMs = () => clock.nowMs(), clockFresh = () => true, triggerClockSync = () => {}, refreshCandle = async () => {}, recoverAnchorCandle = async () => null, isDelisting = () => false, telemetry = () => {}, loadFill = async (_tx, key) => this.fills.get(key) }) {
-    Object.assign(this, { state, transaction, coordinator, market, clock, exchangeNowMs, clockFresh, triggerClockSync, refreshCandle, recoverAnchorCandle, isDelisting, telemetry, loadFill });
+  constructor({ state, transaction = async (fn) => fn(null), coordinator, market, clock = { nowMs: () => Date.now() }, exchangeNowMs = () => clock.nowMs(), clockFresh = () => true, triggerClockSync = () => {}, refreshCandle = async () => {}, recoverAnchorCandle = async () => null, anchorRecoveryTimeoutMs = 20_000, isDelisting = () => false, telemetry = () => {}, loadFill = async (_tx, key) => this.fills.get(key) }) {
+    Object.assign(this, { state, transaction, coordinator, market, clock, exchangeNowMs, clockFresh, triggerClockSync, refreshCandle, recoverAnchorCandle, anchorRecoveryTimeoutMs, isDelisting, telemetry, loadFill });
     this.fills = new Map(); this.byInst = new Map(); this.latches = new Set(); this.candleRefreshes = new Set(); this.anchorCandles = new Map(); this.anchorRecoveries = new Set(); this.pendingProtections = new Map(); this.clockSyncStale = false;
   }
   key(fill) { return `${field(fill, "account_id", "accountId")}:${field(fill, "inst_id", "instId")}:${field(fill, "trade_id", "tradeId")}`; }
@@ -165,17 +165,30 @@ export class SellService {
     for (const key of [...this.anchorRecoveries]) {
       const [instId, anchorText] = key.split(":"); const anchorTs = Number(anchorText);
       try {
-        const candle = await this.recoverAnchorCandle(instId, anchorTs);
+        this._emit({ type: "sell_protection", reason: "SELL_ANCHOR_RECOVERY_STARTED", instId, anchorTs });
+        const candle = await this._recoverAnchorWithDeadline(instId, anchorTs);
         if (!this._cacheAnchor(instId, anchorTs, candle)) {
           this._emit({ type: "sell_protection", reason: "SELL_PROTECTION_MISSING", instId, anchorTs });
           continue;
         }
+        this._emit({ type: "sell_protection", reason: "SELL_ANCHOR_RECOVERED", instId, anchorTs, candleTs: candle.ts });
         events.push(...this.observeTicker(instId));
       } catch (error) {
         this._emit({ type: "sell_protection", reason: "SELL_ANCHOR_RECOVERY_FAILED", instId, anchorTs, error: error?.message });
       }
     }
     return events;
+  }
+  async _recoverAnchorWithDeadline(instId, anchorTs) {
+    const timeoutMs = Number(this.anchorRecoveryTimeoutMs);
+    if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) return this.recoverAnchorCandle(instId, anchorTs);
+    let timer;
+    try {
+      return await Promise.race([
+        this.recoverAnchorCandle(instId, anchorTs),
+        new Promise((_, reject) => { timer = setTimeout(() => reject(new Error("SELL_ANCHOR_RECOVERY_TIMEOUT")), timeoutMs); }),
+      ]);
+    } finally { clearTimeout(timer); }
   }
   reviewCandleFreshness() {
     for (const instId of this.byInst.keys()) {

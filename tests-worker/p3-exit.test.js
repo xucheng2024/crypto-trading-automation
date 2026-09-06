@@ -468,6 +468,18 @@ test("P3 first protection uses only the exact anchor candle and breaches in the 
   assert.equal(events[0].protection, "99.7");
 });
 
+test("P3 anchor recovery times out and leaves the protection retryable", async () => {
+  const now = { nowMs: () => 541_000 }; const market = new MarketProjection({ clock: now }); const telemetry = [];
+  market.updateInstrument({ instId: "BTC-USDT", ts: 1, state: "live", tickSz: "0.1", lotSz: "0.1", minSz: "0.1", base: "BTC" });
+  market.updateTicker({ instId: "BTC-USDT", ts: 541_000, last: "100", bidPx: "100" });
+  const fill = { account_id: "a", inst_id: "BTC-USDT", base_ccy: "BTC", trade_id: "anchor-timeout", side: "BUY", fill_size: "1", disposed_size: "0", sell_time: 180_001, sell_state: "WAITING", version: 1 };
+  const sell = new SellService({ market, clock: now, coordinator: { enqueue: () => true }, anchorRecoveryTimeoutMs: 1, recoverAnchorCandle: async () => new Promise(() => {}), telemetry: (event) => telemetry.push(event) });
+  sell.rebuild([fill]); sell.observeTicker("BTC-USDT");
+  assert.deepEqual(await sell.recoverDueAnchors(), []);
+  assert.equal(sell.anchorRecoveries.size, 1);
+  assert.ok(telemetry.some((event) => event.reason === "SELL_ANCHOR_RECOVERY_FAILED" && event.error === "SELL_ANCHOR_RECOVERY_TIMEOUT"));
+});
+
 test("P3 deduplicates an unpersisted protection checkpoint per fill and floor", () => {
   const now = { nowMs: () => 181_000 }; const market = new MarketProjection({ clock: now });
   market.updateInstrument({ instId: "BTC-USDT", ts: 1, state: "live", tickSz: "0.1", lotSz: "0.1", minSz: "0.1", base: "BTC" });
