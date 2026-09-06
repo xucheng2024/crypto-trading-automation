@@ -2,6 +2,7 @@ import { compareDecimal, multiplyDecimal, roundToStep, subtractDecimal } from ".
 import { candleFreshness, sellBreakdownPrice, sellProtectionAnchorClose, sellProtectionAnchorTs, takeProfitPrice } from "../domain/rules.js";
 
 const field = (row, snake, camel) => row[snake] ?? row[camel];
+const LOSS_SELL_WINDOW_DELAY_MS = 24 * 60 * 60 * 1_000;
 
 /**
  * SELL watch has a deliberately split boundary. observe* is safe in a WS
@@ -16,6 +17,11 @@ export class SellService {
   key(fill) { return `${field(fill, "account_id", "accountId")}:${field(fill, "inst_id", "instId")}:${field(fill, "trade_id", "tradeId")}`; }
   _emit(event) { try { Promise.resolve(this.telemetry(event)).catch(() => {}); } catch { /* best effort */ } }
   releaseLatch(event, reason) {
+    if (event?.type === "SELL_DEFER_LOSS" && event.key) {
+      const released = this.latches.delete(event.key);
+      if (released) this._emit({ type: "sell_window_deferred", reason, instId: event.instId, key: event.key });
+      return released;
+    }
     if (event?.type === "SELL_PROTECTION" && event.key) {
       if (this.pendingProtections.get(event.key) !== event.protection) return false;
       this.pendingProtections.delete(event.key);
@@ -226,7 +232,17 @@ export class SellService {
         // resumeTriggered() from the durable sell_trigger_reason, never relabeled TAKE_PROFIT
         // just because price happens to be up when it's re-scanned for an unrelated reason.
         if (!fill || state !== "WAITING" || this.latches.has(key)) continue;
+        const sellTime = Number(field(fill, "sell_time", "sellTime"));
         const fillPrice = field(fill, "fill_price", "fillPrice");
+        // When the normal sell window opens below the entry price, postpone the
+        // whole window for 24 hours.  Latching before queueing makes the delay
+        // effective immediately, rather than allowing another event in this
+        // tick burst to submit a sell while the durable CAS update is pending.
+        if (Number.isFinite(sellTime) && sellTime <= this.clock.nowMs() && fillPrice && compareDecimal(quote.bidPx, fillPrice) < 0) {
+          this.latches.add(key);
+          events.push({ type: "SELL_DEFER_LOSS", priority: "critical", key, instId, bidPx: quote.bidPx, nextSellTime: this.clock.nowMs() + LOSS_SELL_WINDOW_DELAY_MS });
+          continue;
+        }
         const takeProfit = fillPrice ? takeProfitPrice(fillPrice) : null;
         if (!takeProfit || compareDecimal(quote.bidPx, takeProfit) < 0) continue;
         this.latches.add(key); // must happen before event enqueue / any await
@@ -262,6 +278,15 @@ export class SellService {
     const fill = await this.transaction((tx) => this.loadFill(tx, event.key));
     if (!fill) { this.releaseLatch(event, "FILL_MISSING"); return { accepted: false, reason: "FILL_MISSING" }; }
     const accountId = field(fill, "account_id", "accountId"); const instId = field(fill, "inst_id", "instId"); const tradeId = field(fill, "trade_id", "tradeId");
+    if (event.type === "SELL_DEFER_LOSS") {
+      const result = await this.transaction((tx) => this.state.deferSellWindow(tx, { accountId, instId, tradeId, version: fill.version, sellTime: event.nextSellTime, bidPx: event.bidPx }));
+      if (result?.rowCount !== 1) return { accepted: false, reason: "CAS_LOST", retryable: true };
+      const current = result.rows?.[0] ?? { ...fill, sell_time: event.nextSellTime, version: BigInt(fill.version) + 1n };
+      this.fills.set(event.key, current);
+      this.latches.delete(event.key);
+      this._emit({ type: "sell_window_deferred", reason: "PRICE_BELOW_ENTRY", instId, sourceBuyTradeId: tradeId, bidPx: event.bidPx, entryPrice: field(fill, "fill_price", "fillPrice"), sellTime: event.nextSellTime });
+      return { accepted: true, reason: "LOSS_SELL_WINDOW_DEFERRED" };
+    }
     if (event.type === "SELL_PROTECTION") {
       if (fill.protection_price && compareDecimal(fill.protection_price, event.protection) >= 0) {
         this.releaseLatch(event, "PROTECTION_ALREADY_APPLIED");

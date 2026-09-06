@@ -137,7 +137,7 @@ export class TradingEngine {
   }
   async dispatch(event) {
     if (!event) return null;
-    if (event.type === "SELL_BREACH" || event.type === "SELL_PROTECTION") {
+    if (event.type === "SELL_BREACH" || event.type === "SELL_PROTECTION" || event.type === "SELL_DEFER_LOSS") {
       try {
         const result = await this.sellService.consume(event);
         if (result?.retryable) this._retrySellEvent(event, result.reason);

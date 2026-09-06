@@ -114,6 +114,12 @@ export class TradingStateRepository {
       AND sell_state IN ('WAITING','SELL_TRIGGERED','DUST_PENDING') RETURNING *`, [accountId, instId, tradeId, version, protectionPrice, sellTriggerReason]);
   }
 
+  async deferSellWindow(tx, { accountId, instId, tradeId, version, sellTime, bidPx }) {
+    return tx.query(`UPDATE filled_orders SET sell_time=$5,version=version+1
+      WHERE account_id=$1 AND inst_id=$2 AND trade_id=$3 AND side='BUY' AND version=$4
+      AND sell_state='WAITING' AND fill_price > $6::numeric RETURNING *`, [accountId, instId, tradeId, version, sellTime, bidPx]);
+  }
+
   async raiseProtection(tx, { accountId, instId, tradeId, version, protectionPrice }) {
     return tx.query(`UPDATE filled_orders SET protection_price=GREATEST(COALESCE(protection_price,$5::numeric),$5::numeric),version=version+1
       WHERE account_id=$1 AND inst_id=$2 AND trade_id=$3 AND side='BUY' AND version=$4

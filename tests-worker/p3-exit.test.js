@@ -450,6 +450,21 @@ test("P3 ticker arms an unarmed fill after sellTime without waiting for another 
   assert.equal(events[0].protection, "99.7");
 });
 
+test("P3 defers a loss-making sell window for 24 hours and suppresses every sell trigger until then", async () => {
+  const now = { value: 181_000, nowMs() { return this.value; } }; const market = new MarketProjection({ clock: now }); const writes = [];
+  market.updateInstrument({ instId: "BTC-USDT", ts: 1, state: "live", tickSz: "0.1", lotSz: "0.1", minSz: "0.1", base: "BTC" });
+  market.updateTicker({ instId: "BTC-USDT", ts: now.value, last: "89", bidPx: "89" }); market.updateCandle({ instId: "BTC-USDT", ts: expectedClosedCandleTs(now.nowMs()), low: "95", confirm: true });
+  const fill = { account_id: "a", inst_id: "BTC-USDT", base_ccy: "BTC", trade_id: "loss-window", side: "BUY", fill_size: "1", disposed_size: "0", fill_price: "100", sell_time: 1_000, sell_state: "WAITING", version: 1, protection_price: "90" };
+  const sell = new SellService({ market, clock: now, coordinator: { enqueue: () => true }, loadFill: async () => fill, state: { deferSellWindow: async (_tx, row) => { writes.push(row); return { rowCount: 1, rows: [{ ...fill, sell_time: row.sellTime, version: 2 }] }; } } });
+  sell.rebuild([fill]); const [event] = sell.observeTicker("BTC-USDT");
+  assert.equal(event.type, "SELL_DEFER_LOSS"); assert.equal(event.nextSellTime, now.value + 86_400_000);
+  assert.equal(sell.observeTicker("BTC-USDT").length, 0, "pending durable deferral suppresses further sell triggers");
+  const engine = new (await import("../src/application/trading-engine.js")).TradingEngine({ projection: market, clock: now, sellService: sell });
+  engine.enqueueSellEvents([event]); assert.equal((await engine.consumeOne()).reason, "LOSS_SELL_WINDOW_DEFERRED"); assert.deepEqual(writes[0], { accountId: "a", instId: "BTC-USDT", tradeId: "loss-window", version: 1, sellTime: now.value + 86_400_000, bidPx: "89" });
+  market.updateTicker({ instId: "BTC-USDT", ts: now.value + 1, last: "89", bidPx: "89" });
+  assert.equal(sell.observeTicker("BTC-USDT").length, 0, "deferred sell_time keeps the fill outside the loss-triggered sell window");
+});
+
 test("P3 first protection uses only the exact anchor candle and breaches in the same evaluation", async () => {
   const now = { nowMs: () => 541_000 }; const market = new MarketProjection({ clock: now }); let recoveries = 0;
   market.updateInstrument({ instId: "BTC-USDT", ts: 1, state: "live", tickSz: "0.1", lotSz: "0.1", minSz: "0.1", base: "BTC" });
