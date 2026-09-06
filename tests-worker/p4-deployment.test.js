@@ -111,7 +111,7 @@ test("P4 production deployment ends at OFF while FULL promotion and OFF recovery
   assert.match(recovery, /name: Production recover OFF/);
   assert.match(recovery, /Known-good immutable engine image/);
   assert.match(recovery, /@sha256:\[a-f0-9\]\{64\}/);
-  assert.match(recovery, /--expect-mode OFF --execute/);
+  assert.match(recovery, /--expect-mode OFF --execute --emergency/);
   assert.doesNotMatch(`${workflow}\n${promotion}\n${recovery}`, /for old in \$\(az containerapp revision list/);
 });
 

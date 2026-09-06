@@ -43,4 +43,4 @@ jobs:
           [[ "$IMAGE" =~ @sha256:[a-f0-9]{64}$ ]] || { echo "image must be an immutable sha256 digest" >&2; exit 1; }
           suffix="recovery-off-${GITHUB_RUN_NUMBER}"
           revision="$(az containerapp update --name "$CONTAINER_APP_NAME" --resource-group "$RESOURCE_GROUP" --image "$IMAGE" --set-env-vars TRADING_MODE=OFF --revision-suffix "$suffix" --query properties.latestRevisionName --output tsv)"
-          node scripts/production-revision-handoff.mjs --resource-group "$RESOURCE_GROUP" --app "$CONTAINER_APP_NAME" --target-revision "$revision" --expect-mode OFF --execute
+          node scripts/production-revision-handoff.mjs --resource-group "$RESOURCE_GROUP" --app "$CONTAINER_APP_NAME" --target-revision "$revision" --expect-mode OFF --execute --emergency
