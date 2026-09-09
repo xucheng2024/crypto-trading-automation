@@ -121,6 +121,16 @@ test("P3 exit availability failures defer retries instead of retrying on every w
   assert.deepEqual(events.at(-1), { type: "exit_deferred", intent: "SELL", reason: "MAX_AVAIL_FAILED", candidateCount: 1, error: "TIMEOUT", failureClass: "TIMEOUT", endpoint: "/api/v5/account/max-avail-size", durationMs: 15, attempts: 4 });
 });
 
+test("P3 stuck exit diagnostics expose only bounded operational evidence", () => {
+  const now = { nowMs: () => 700_000 };
+  const coordinator = new OrderCoordinator({ clock: now, config: {} });
+  coordinator.pending.SELL.set("CATI:one", { instId: "CATI-USDT", firstDeferredAt: 100_000, lastDeferReason: "NOT_READY" });
+  coordinator.pending.DELIST.set("CFG:two", { instId: "CFG-USDT", firstDeferredAt: 200_000, lastDeferReason: "INSTRUMENT_NOT_TRADABLE" });
+  coordinator.pending.SELL.set("NEW:three", { instId: "NEW-USDT", firstDeferredAt: 650_000, lastDeferReason: "NOT_READY" });
+  assert.deepEqual(coordinator.stuckExitSnapshot(300_000), { count: 2, oldestAgeMs: 600_000, reasons: "INSTRUMENT_NOT_TRADABLE:1,NOT_READY:1", instruments: "CATI-USDT,CFG-USDT" });
+  assert.equal(coordinator.stuckExitCount(300_000), 2);
+});
+
 test("P3 market WS storm blocks BUY but never suppresses an already-triggered exit", () => {
   const now = clock(); const market = new MarketProjection({ clock: now }); const account = new AccountCapitalSnapshot({ clock: now }); account.update({ ts: 1, totalEq: "100", adjEq: "100" });
   market.updateInstrument({ instId: "BTC-USDT", ts: 1, state: "live", tickSz: "0.1", lotSz: "0.1", minSz: "0.1", base: "BTC" });

@@ -289,9 +289,24 @@ export class OrderCoordinator {
   // with no delist confirmation ever arriving — is exactly the "never sellable" failure
   // mode this counts, independent of why any single defer happened.
   stuckExitCount(thresholdMs, nowMs = this.clock.nowMs()) {
-    let count = 0;
-    for (const kind of ["SELL", "DELIST"]) for (const intent of this.pending[kind].values()) if (intent.firstDeferredAt && nowMs - intent.firstDeferredAt >= thresholdMs) count += 1;
-    return count;
+    return this.stuckExitSnapshot(thresholdMs, nowMs).count;
+  }
+  stuckExitSnapshot(thresholdMs, nowMs = this.clock.nowMs()) {
+    const stuck = [];
+    for (const kind of ["SELL", "DELIST"]) for (const intent of this.pending[kind].values()) {
+      if (intent.firstDeferredAt && nowMs - intent.firstDeferredAt >= thresholdMs) stuck.push({ kind, intent });
+    }
+    const reasons = new Map();
+    for (const { intent } of stuck) {
+      const reason = intent.lastDeferReason ?? "UNKNOWN";
+      reasons.set(reason, (reasons.get(reason) ?? 0) + 1);
+    }
+    return {
+      count: stuck.length,
+      oldestAgeMs: stuck.length ? Math.max(...stuck.map(({ intent }) => nowMs - intent.firstDeferredAt)) : 0,
+      reasons: [...reasons].sort(([left], [right]) => left.localeCompare(right)).map(([reason, count]) => `${reason}:${count}`).join(","),
+      instruments: [...new Set(stuck.map(({ intent }) => intent.instId).filter(Boolean))].sort().join(","),
+    };
   }
   // A dust-sized remainder must stop being redriven every ~10ms and must be
   // reflected out of the local pending map immediately: nothing else clears

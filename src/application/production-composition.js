@@ -197,10 +197,11 @@ export async function composeProductionRuntime(env, injected = {}) {
     },
     reportMetrics: () => {
       const snapshot = engine.snapshot(); const ws = readyGate.snapshot().dependencies;
-      const exitBacklog = coordinator.stuckExitCount(5 * 60_000);
-      const verdict = evaluateWatchdog({ ready: snapshot.ready.ready, ws: { public: ws.public, private: ws.private, business: ws.business }, owner: ws.owner, exitBacklog });
-      if (!verdict.healthy) telemetry({ type: "watchdog", reason: "WATCHDOG_UNHEALTHY", reasons: verdict.reasons, exitBacklog });
-      telemetry({ type: "metric_snapshot", reason: "RUNTIME_METRICS", ...slo.snapshot({ reset: true }), ...market.health(instIds), ...buyPlanner.health(), ...sellService.protectionHealth(), ready: snapshot.ready.ready ? 1 : 0, strategy_ready: ws.strategy ? 1 : 0, queue_depth_current: snapshot.queue, pending_buy_current: coordinator.pending?.BUY?.size ?? 0, exit_backlog_current: exitBacklog });
+      const backlog = coordinator.stuckExitSnapshot?.(5 * 60_000) ?? { count: coordinator.stuckExitCount(5 * 60_000), oldestAgeMs: 0, reasons: "", instruments: "" };
+      const exitReady = readyGate.exitReady ?? snapshot.ready.ready;
+      const verdict = evaluateWatchdog({ ready: snapshot.ready.ready, ws: { public: ws.public, private: ws.private, business: ws.business }, owner: ws.owner, exitBacklog: backlog.count });
+      if (!verdict.healthy) telemetry({ type: "watchdog", reason: "WATCHDOG_UNHEALTHY", reasons: verdict.reasons, exitBacklog: backlog.count });
+      telemetry({ type: "metric_snapshot", reason: "RUNTIME_METRICS", ...slo.snapshot({ reset: true }), ...market.health(instIds), ...buyPlanner.health(), ...sellService.protectionHealth(), ready: snapshot.ready.ready ? 1 : 0, exit_ready: exitReady ? 1 : 0, ready_owner: ws.owner ? 1 : 0, ready_database: ws.database ? 1 : 0, ready_public: ws.public ? 1 : 0, ready_private: ws.private ? 1 : 0, ready_business: ws.business ? 1 : 0, ready_account: ws.account ? 1 : 0, ready_instruments: ws.instruments ? 1 : 0, strategy_ready: ws.strategy ? 1 : 0, queue_depth_current: snapshot.queue, pending_buy_current: coordinator.pending?.BUY?.size ?? 0, exit_backlog_current: backlog.count, exit_backlog_oldest_age_ms: backlog.oldestAgeMs, exit_backlog_reasons: backlog.reasons, exit_backlog_instruments: backlog.instruments });
       try { telemetry(buyPlanner.pipelineCoverage()); } catch { /* pipeline coverage is diagnostic only */ }
     },
   });
