@@ -246,7 +246,7 @@ test("P3 take-profit outranks force hold with a fresh quote, but force hold stil
   const events = sellWithQuote.observeTicker("BTC-USDT");
   assert.equal(events.length, 1, "force hold must not also fire once take-profit has already latched this fill");
   assert.equal(events[0].reason, "TAKE_PROFIT");
-  const sellNoQuote = new SellService({ market: { freshQuote: () => undefined }, clock: now, coordinator: { enqueue: () => true }, state: {} });
+  const sellNoQuote = new SellService({ market: { quoteStatus: () => ({ quote: null, fresh: false, reason: "MISSING", receiptAgeMs: null, sourceAgeMs: null, sourceTs: null }) }, clock: now, coordinator: { enqueue: () => true }, state: {} });
   sellNoQuote.rebuild([fill]);
   const withoutQuote = sellNoQuote.observeTicker("BTC-USDT");
   assert.equal(withoutQuote.length, 1, "force hold must still fire independently when no fresh quote exists");

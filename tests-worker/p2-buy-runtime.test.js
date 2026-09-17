@@ -4,6 +4,7 @@ import test from "node:test";
 import { AccountCapitalSnapshot, BoundedPriorityQueue, MarketProjection, ReadyGate } from "../src/application/trading-engine.js";
 import { OrderCoordinator } from "../src/application/order-coordinator.js";
 import { ReconciliationService } from "../src/application/reconciliation-service.js";
+import { createCancellableSleep } from "../src/application/production-composition.js";
 import { VirtualSloMetrics } from "../src/application/slo-metrics.js";
 import { payloadHash } from "../src/domain/order.js";
 import { dailyLimit, expectedClosedCandleTs } from "../src/domain/rules.js";
@@ -13,6 +14,7 @@ const config = { accountId: "account", orderVersion: "P2", strategyTag: "STRAT",
 const clockReady = { clockFresh: () => true, clockSkewMs: 0 };
 
 function ready() { const gate = new ReadyGate(); for (const key of gate.required) gate.set(key, true); return gate; }
+function freshStatus(quote) { return { quote, fresh: true, reason: "FRESH", receiptAgeMs: 0, sourceAgeMs: 0, sourceTs: Number(quote.ts) }; }
 function setupMarket(now) {
   const market = new MarketProjection({ clock: now });
   market.updateInstrument({ instId: "BTC-USDT", ts: 1, state: "live", tickSz: "0.1", lotSz: "0.001", minSz: "0.001", base: "BTC", version: 1 });
@@ -31,6 +33,15 @@ test("P2 runtime coalesces ticker pressure and accepts same-ms corrections", () 
   assert.equal(queue.size, 1); assert.equal(queue.take().payload, 2);
 });
 
+test("P2 quote freshness rejects old source time without discarding diagnostic evidence", () => {
+  const now = clock(10_000); const market = new MarketProjection({ clock: now });
+  market.updateTicker({ instId: "BTC-USDT", ts: 8_000, last: "10", askPx: "10", bidPx: "9" });
+  assert.deepEqual(market.quoteStatus("BTC-USDT", 100, 10_000), {
+    quote: { instId: "BTC-USDT", ts: 8_000, last: "10", askPx: "10", bidPx: "9" },
+    fresh: false, reason: "SOURCE_STALE", receiptAgeMs: 0, sourceAgeMs: 2_000, sourceTs: 8_000,
+  });
+});
+
 test("P2 recovery keeps READY false, waits owner safety window, and treats PREPARED as query-only UNKNOWN", async () => {
   let waited = 0; const gate = ready(); const calls = [];
   const service = new ReconciliationService({
@@ -42,6 +53,21 @@ test("P2 recovery keeps READY false, waits owner safety window, and treats PREPA
   const result = await service.recover({ accountId: "account" });
   assert.equal(waited, 50); assert.equal(result.ready, false); assert.deepEqual(calls, [{ instId: undefined, clOrdId: "P" }, { instId: undefined, clOrdId: "U" }]);
   assert.equal(gate.ready, false); service.completeBaseline("public"); service.connectionLost("private"); assert.equal(gate.ready, false);
+});
+
+test("P2 recovery cancel during owner safety wait does not load snapshots", async () => {
+  let listed = 0;
+  const wait = createCancellableSleep();
+  const service = new ReconciliationService({
+    ownerGuard: { isHeld: () => true }, readyGate: ready(), safetyWaitMs: 50, sleep: wait.sleep, aborted: () => wait.cancelled,
+    state: { listProtection: async () => { listed += 1; return []; }, listDaily: async () => [], listManagedFills: async () => [] },
+    orders: { listNonTerminal: async () => [], listTodayBuys: async () => [], listWatermarks: async () => [] },
+    transport: {},
+  });
+  const pending = service.recover({ accountId: "account" });
+  wait.cancel();
+  await assert.rejects(pending, /STARTUP_CANCELLED/);
+  assert.equal(listed, 0);
 });
 
 test("P2 BUY coordinator uses one fake batch, persists item-independent outcomes, and does not resend UNKNOWN", async () => {
@@ -100,15 +126,15 @@ test("P2 BUY final guard releases PREPARED reservation when owner, mode, READY, 
 
 test("P2 BUY attempt uses the exact market snapshot admitted by its construction guard", async () => {
   const now = clock(720_000); const account = new AccountCapitalSnapshot({ clock: now }); account.update({ ts: 1, totalEq: "150", adjEq: "150" });
-  const quoteA = { instId: "BTC-USDT", ts: 1, last: "95", askPx: "95", bidPx: "94" };
-  const quoteB = { instId: "BTC-USDT", ts: 2, last: "96", askPx: "96", bidPx: "95" };
+  const quoteA = { instId: "BTC-USDT", ts: 719_999, last: "95", askPx: "95", bidPx: "94" };
+  const quoteB = { instId: "BTC-USDT", ts: 720_000, last: "96", askPx: "96", bidPx: "95" };
   const candleA = { instId: "BTC-USDT", ts: expectedClosedCandleTs(now.nowMs()), high: "90", low: "89", confirm: true };
   const candleB = { instId: "BTC-USDT", ts: expectedClosedCandleTs(now.nowMs()), high: "91", low: "90", confirm: true };
   const instrumentA = { instId: "BTC-USDT", state: "live", tickSz: "0.3", lotSz: "0.001", minSz: "0.001", base: "BTC", version: "A" };
   const instrumentB = { ...instrumentA, tickSz: "0.2", version: "B" };
   let quoteReads = 0; let candleReads = 0; let instrumentReads = 0; let tickerReads = 0; let attempt;
   const market = {
-    freshQuote: () => quoteReads++ === 0 ? quoteA : quoteB,
+    quoteStatus: () => freshStatus(quoteReads++ === 0 ? quoteA : quoteB),
     ticker: () => { tickerReads += 1; return quoteB; },
     candle: () => candleReads++ === 0 ? candleA : candleB,
     instrument: () => instrumentReads++ === 0 ? instrumentA : instrumentB,
@@ -190,10 +216,10 @@ test("P2 BUY guard evidence does not throw when price is outside the daily limit
 
 test("P2 BUY submit trusts the fresh guard signal over a stale queued DIP trigger", async () => {
   const now = clock(720_000); const account = new AccountCapitalSnapshot({ clock: now }); account.update({ ts: 1, totalEq: "150", adjEq: "150" });
-  const quote = { instId: "BTC-USDT", ts: 1, last: "92", askPx: "92", bidPx: "91" };
+  const quote = { instId: "BTC-USDT", ts: 720_000, last: "92", askPx: "92", bidPx: "91" };
   const candle = { instId: "BTC-USDT", ts: expectedClosedCandleTs(now.nowMs()), high: "90", low: "89", confirm: true };
   const instrument = { instId: "BTC-USDT", state: "live", tickSz: "0.1", lotSz: "0.001", minSz: "0.001", base: "BTC", version: "A" };
-  const market = { freshQuote: () => quote, ticker: () => quote, candle: () => candle, instrument: () => instrument };
+  const market = { quoteStatus: () => freshStatus(quote), ticker: () => quote, candle: () => candle, instrument: () => instrument };
   let attempt;
   const coordinator = new OrderCoordinator({ transaction: async (fn) => fn({}), state: {}, market, account, readyGate: ready(), ownerGuard: { isHeld: () => true }, mode: () => "FULL", executionRoute: () => "margin", tradeQuoteCurrency: () => "USDT", clock: now, config,
     orders: { reserveBuy: async (_tx, row) => { attempt = row; return { authorized: true }; }, markSubmitted: async () => {} },

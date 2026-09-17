@@ -108,11 +108,11 @@ function kustoString(value) {
   return `'${String(value).replaceAll("'", "''")}'`;
 }
 
-export function strategyBaselineQuery(revisionName) {
+export function strategyBaselineQuery(revisionName, timeFilter = "timestamp > ago(7d)") {
   if (!revisionName) return null;
   const revision = kustoString(revisionName);
   const replicaPrefix = kustoString(`${revisionName}-`);
-  return `traces | where timestamp > ago(7d) | where message startswith 'strategy_baseline ' | where cloud_RoleInstance == ${revision} or cloud_RoleInstance startswith ${replicaPrefix} | top 1 by timestamp desc | project timestamp, status=tostring(customDimensions.reason), instruments=toint(customDimensions.instruments), strategyDay=tostring(customDimensions.strategyDay), instance=cloud_RoleInstance`;
+  return `traces | where ${timeFilter} | where message startswith 'strategy_baseline ' | where cloud_RoleInstance == ${revision} or cloud_RoleInstance startswith ${replicaPrefix} | top 1 by timestamp desc | project timestamp, status=tostring(customDimensions.reason), instruments=toint(customDimensions.instruments), strategyDay=tostring(customDimensions.strategyDay), instance=cloud_RoleInstance`;
 }
 
 export function parseStrategyBaseline(row) {
@@ -197,7 +197,7 @@ export function summarizeTrading(decisionEvents, lifecycleEvents, routeByInst = 
       dailyLimitPrice: event.dailyLimitPrice, breakoutPrice: event.breakoutPrice,
       breakoutGap: event.breakoutGap ?? gap(event.last, event.breakoutPrice), priceLimitGap: event.priceLimitGap,
       limitHeadroom: gap(event.dailyLimitPrice, event.last), askLimitGap: gap(event.askPx, event.dailyLimitPrice),
-      quoteAgeMs: event.quoteAgeMs, candleAgeMs: event.candleAgeMs, availBuy: event.availBuy,
+      quoteAgeMs: event.quoteAgeMs, quoteReceiptAgeMs: event.quoteReceiptAgeMs, quoteSourceAgeMs: event.quoteSourceAgeMs, quoteFreshness: event.quoteFreshness, candleAgeMs: event.candleAgeMs, availBuy: event.availBuy,
       remainingCapacity: event.remainingCapacity, plannedSize: event.plannedSize, minSize: event.minSize,
       availableCapacity: event.availableCapacity, minimumCapacity: event.minimumCapacity, capacityGap: event.capacityGap,
       adjustedEquity: event.adjustedEquity, managedExposure: event.managedExposure, leverage: event.leverage, exposureScope: event.exposureScope, equityBasis: event.equityBasis, riskVersion: event.riskVersion,
@@ -692,8 +692,48 @@ function sleepMs(ms) {
 
 function azJson(args) { return runJson("az", [...args, "--only-show-errors", "--output", "json"]); }
 
-async function appInsightsQuery(resourceGroup, appInsights, query, { timeoutMs } = {}) {
-  return queryRows(await runJsonAsync("az", ["monitor", "app-insights", "query", "--resource-group", resourceGroup, "--app", appInsights, "--analytics-query", query, "--only-show-errors", "--output", "json"], { timeoutMs }));
+export function telemetryWindow({ since, minutes }, to) {
+  const end = new Date(to);
+  const from = since ? new Date(since) : new Date(end.getTime() - Number(minutes) * 60_000);
+  if (!Number.isFinite(end.getTime()) || !Number.isFinite(from.getTime())) throw new TypeError("telemetry window requires valid timestamps");
+  return { from: from.toISOString(), to: end.toISOString() };
+}
+
+export function appInsightsQueryArgs(resourceGroup, appInsights, query, window) {
+  return ["monitor", "app-insights", "query", "--resource-group", resourceGroup, "--app", appInsights,
+    "--start-time", window.from, "--end-time", window.to, "--analytics-query", query, "--only-show-errors", "--output", "json"];
+}
+
+export function boundedTelemetryRows(rows, limit) {
+  const truncated = rows.length > limit;
+  const bounded = rows.slice(0, limit);
+  return {
+    rows: bounded,
+    truncated,
+    latest: bounded[0]?.timestamp ?? null,
+    earliest: bounded.at(-1)?.timestamp ?? null,
+    limit,
+  };
+}
+
+export function summarizeBlockAggregates(decisionRows = [], blockRows = []) {
+  const blockedReasons = {};
+  const blockClasses = { LIKELY_RECOVERABLE: 0, MARKET_MOVED: 0, SAFETY_BOUNDARY: 0 };
+  const blockStages = {};
+  const add = (reason, stage, count) => {
+    if (!reason || classifyDecision(reason) === "policy") return;
+    const value = Number(count ?? 0);
+    blockedReasons[reason] = (blockedReasons[reason] ?? 0) + value;
+    blockClasses[classifyBlock(reason)] += value;
+    blockStages[stage] = (blockStages[stage] ?? 0) + value;
+  };
+  for (const row of decisionRows) if (classifyDecision(row.reason) === "blocked") add(row.reason, "PLANNER", row.decisions);
+  for (const row of blockRows) add(row.reason, row.stage || "PLANNER", row.eventCount);
+  return { total: Object.values(blockedReasons).reduce((sum, value) => sum + value, 0), blockedReasons, blockClasses, blockStages };
+}
+
+async function appInsightsQuery(resourceGroup, appInsights, query, { timeoutMs, window } = {}) {
+  return queryRows(await runJsonAsync("az", appInsightsQueryArgs(resourceGroup, appInsights, query, window), { timeoutMs }));
 }
 
 export async function settleQueryResults(entries) {
@@ -837,7 +877,13 @@ export async function main(argv = process.argv.slice(2)) {
     checkpointFallback = !checkpoint?.checkedAt;
     options.since = checkpoint?.checkedAt ?? new Date(Date.now() - 60 * 60 * 1000).toISOString();
   }
-  const timeFilter = options.since ? `timestamp >= datetime(${options.since})` : `timestamp > ago(${options.minutes}m)`;
+  const userWindow = telemetryWindow(options, queryStartedAt);
+  const currentWindow = { from: new Date(Date.parse(queryStartedAt) - 24 * 60 * 60_000).toISOString(), to: queryStartedAt };
+  const baselineWindow = { from: new Date(Date.parse(queryStartedAt) - 7 * 24 * 60 * 60_000).toISOString(), to: queryStartedAt };
+  const filterFor = (window) => `timestamp >= datetime(${window.from}) and timestamp <= datetime(${window.to})`;
+  const timeFilter = filterFor(userWindow);
+  const currentTimeFilter = filterFor(currentWindow);
+  const baselineTimeFilter = filterFor(baselineWindow);
   const windowLabel = options.since ? `since ${options.since}` : `${options.minutes}m`;
   const appInsights = options.appInsights ?? (appName.endsWith("-cae-engine") ? `${appName.slice(0, -"-cae-engine".length)}-ai` : null);
   if (!appInsights) throw new Error("Pass --app-insights when it cannot be derived from the Container App name");
@@ -850,14 +896,16 @@ export async function main(argv = process.argv.slice(2)) {
   const traffic = azJson(["containerapp", "ingress", "traffic", "show", "--resource-group", resourceGroup, "--name", appName]);
 
   const metricQuery = `traces | where ${timeFilter} | where message == 'metric_snapshot RUNTIME_METRICS' | top 1 by timestamp desc | project timestamp, ready=toint(customDimensions.ready), exitReady=toint(customDimensions.exit_ready), readyOwner=toint(customDimensions.ready_owner), readyDatabase=toint(customDimensions.ready_database), readyPublic=toint(customDimensions.ready_public), readyPrivate=toint(customDimensions.ready_private), readyBusiness=toint(customDimensions.ready_business), readyAccount=toint(customDimensions.ready_account), readyInstruments=toint(customDimensions.ready_instruments), strategyReady=toint(customDimensions.strategy_ready), marketMissing=toint(customDimensions.market_missing_instruments), marketOldestAgeMs=tolong(customDimensions.market_oldest_age_ms), decisionMissing=toint(customDimensions.decision_missing_instruments), decisionOldestAgeMs=tolong(customDimensions.decision_oldest_age_ms), anchorDueUnprotected=toint(customDimensions.anchor_due_unprotected_current), eventCount=toint(customDimensions.event_enqueue_count), decisionCount=toint(customDimensions.decision_eval_count), eventP99=toint(customDimensions.event_enqueue_p99_ms), decisionP99=toint(customDimensions.decision_eval_p99_ms), sourceLagP99=toint(customDimensions.market_source_lag_p99_ms), queueDepth=toint(customDimensions.queue_depth_current), pendingBuy=toint(customDimensions.pending_buy_current), exitBacklog=toint(customDimensions.exit_backlog_current), exitBacklogOldestAgeMs=tolong(customDimensions.exit_backlog_oldest_age_ms), exitBacklogReasons=tostring(customDimensions.exit_backlog_reasons), exitBacklogInstruments=tostring(customDimensions.exit_backlog_instruments), tradingMode=tostring(customDimensions.tradingMode)`;
-  const decisionQuery = `traces | where ${timeFilter} | where message startswith 'trading_decision ' | project timestamp, message, customDimensions | order by timestamp desc | take 5000`;
-  const currentDecisionQuery = "traces | where timestamp > ago(24h) | where message startswith 'trading_decision ' | extend instId=tostring(customDimensions.instId) | summarize arg_max(timestamp, customDimensions) by instId";
+  const decisionQuery = `traces | where ${timeFilter} | where message startswith 'trading_decision ' | project timestamp, message, customDimensions | order by timestamp desc | take 5001`;
+  const decisionAggregateQuery = `traces | where ${timeFilter} | where message startswith 'trading_decision ' | summarize decisions=count(), latest=max(timestamp) by reason=tostring(customDimensions.reason), instId=tostring(customDimensions.instId)`;
+  const currentDecisionQuery = `traces | where ${currentTimeFilter} | where message startswith 'trading_decision ' | extend instId=tostring(customDimensions.instId) | summarize arg_max(timestamp, customDimensions) by instId`;
   const lifecycleQuery = `traces | where ${timeFilter} | where message startswith 'order_lifecycle BUY_' or message startswith 'trade_lifecycle BUY_' | project timestamp, message, customDimensions | order by timestamp desc | take 1000`;
   const observabilityQuery = `traces | where ${timeFilter} | where message startswith 'fill_reconciliation FILL_BATCH_COMMITTED' or message startswith 'sell_watch_loaded SELL_WATCH_SNAPSHOT' or message startswith 'account_sell ' | project timestamp, message, customDimensions | order by timestamp desc | take 1000`;
-  const blockQuery = `traces | where ${timeFilter} | where message startswith 'block_evidence ' | project timestamp, message, customDimensions | order by timestamp desc | take 5000`;
+  const blockQuery = `traces | where ${timeFilter} | where message startswith 'block_evidence ' | project timestamp, message, customDimensions | order by timestamp desc | take 5001`;
+  const blockAggregateQuery = `traces | where ${timeFilter} | where message startswith 'block_evidence ' | summarize eventCount=count(), instruments=dcount(tostring(customDimensions.instId)), first=min(timestamp), latest=max(timestamp) by reason=tostring(customDimensions.reason), stage=tostring(customDimensions.stage)`;
   const errorQuery = `traces | where ${timeFilter} | where severityLevel >= 3 | project timestamp, message, cloudRoleInstance=cloud_RoleInstance, tradingMode=tostring(customDimensions.tradingMode), error=tostring(customDimensions.error), failureClass=tostring(customDimensions.failureClass), endpoint=tostring(customDimensions.endpoint), httpStatus=tostring(customDimensions.httpStatus), okxCode=tostring(customDimensions.okxCode), okxMessageClass=tostring(customDimensions.okxMessageClass), okxSummary=tostring(customDimensions.okxSummary), responseClass=tostring(customDimensions.responseClass), durationMs=toint(customDimensions.durationMs), attempts=toint(customDimensions.attempts) | order by timestamp desc | take 10`;
-  const baselineQuery = strategyBaselineQuery(revision?.name);
-  const pipelineQuery = "traces | where timestamp > ago(24h) | where message startswith 'instrument_pipeline_coverage ' | top 1 by timestamp desc | project timestamp, runtime=toint(customDimensions.runtime), quote_ready=toint(customDimensions.quote_ready), candle_ready=toint(customDimensions.candle_ready), strategy_row=toint(customDimensions.strategy_row), daily_state=toint(customDimensions.daily_state), evaluator_seen=toint(customDimensions.evaluator_seen), decision_emit=toint(customDimensions.decision_emit), no_market_data=toint(customDimensions.no_market_data), candle_not_initialized=toint(customDimensions.candle_not_initialized), no_strategy_row=toint(customDimensions.no_strategy_row), strategy_state_never_created=toint(customDimensions.strategy_state_never_created), filtered_before_evaluator=toint(customDimensions.filtered_before_evaluator), unknown=toint(customDimensions.unknown)";
+  const baselineQuery = strategyBaselineQuery(revision?.name, baselineTimeFilter);
+  const pipelineQuery = `traces | where ${currentTimeFilter} | where message startswith 'instrument_pipeline_coverage ' | top 1 by timestamp desc | project timestamp, runtime=toint(customDimensions.runtime), quote_ready=toint(customDimensions.quote_ready), candle_ready=toint(customDimensions.candle_ready), strategy_row=toint(customDimensions.strategy_row), daily_state=toint(customDimensions.daily_state), evaluator_seen=toint(customDimensions.evaluator_seen), decision_emit=toint(customDimensions.decision_emit), no_market_data=toint(customDimensions.no_market_data), candle_not_initialized=toint(customDimensions.candle_not_initialized), no_strategy_row=toint(customDimensions.no_strategy_row), strategy_state_never_created=toint(customDimensions.strategy_state_never_created), filtered_before_evaluator=toint(customDimensions.filtered_before_evaluator), unknown=toint(customDimensions.unknown)`;
   const needDecisions = options.command !== "snapshot";
   const needCurrentDecisions = options.command === "report" || options.command === "blocks";
   const needLifecycle = options.command === "report" || options.command === "activity";
@@ -865,35 +913,43 @@ export async function main(argv = process.argv.slice(2)) {
   const queryTimeoutMs = options.command === "report" ? 20_000 : undefined;
   const query = (name, promise) => ({ name, promise });
   const queryResults = await settleQueryResults([
-    query("metric", appInsightsQuery(resourceGroup, appInsights, metricQuery, { timeoutMs: queryTimeoutMs })),
-    query("decision", needDecisions ? appInsightsQuery(resourceGroup, appInsights, decisionQuery, { timeoutMs: queryTimeoutMs }) : Promise.resolve([])),
-    query("currentDecision", needCurrentDecisions ? appInsightsQuery(resourceGroup, appInsights, currentDecisionQuery, { timeoutMs: queryTimeoutMs }) : Promise.resolve([])),
-    query("lifecycle", needLifecycle ? appInsightsQuery(resourceGroup, appInsights, lifecycleQuery, { timeoutMs: queryTimeoutMs }) : Promise.resolve([])),
-    query("observability", needLifecycle ? appInsightsQuery(resourceGroup, appInsights, observabilityQuery, { timeoutMs: queryTimeoutMs }) : Promise.resolve([])),
-    query("block", needDecisions ? appInsightsQuery(resourceGroup, appInsights, blockQuery, { timeoutMs: queryTimeoutMs }) : Promise.resolve([])),
-    query("error", needErrors ? appInsightsQuery(resourceGroup, appInsights, errorQuery, { timeoutMs: queryTimeoutMs }) : Promise.resolve([])),
-    query("baseline", needDecisions && baselineQuery ? appInsightsQuery(resourceGroup, appInsights, baselineQuery, { timeoutMs: queryTimeoutMs }) : Promise.resolve([])),
-    query("pipeline", needDecisions ? appInsightsQuery(resourceGroup, appInsights, pipelineQuery, { timeoutMs: queryTimeoutMs }) : Promise.resolve([])),
+    query("metric", appInsightsQuery(resourceGroup, appInsights, metricQuery, { timeoutMs: queryTimeoutMs, window: userWindow })),
+    query("decision", needDecisions ? appInsightsQuery(resourceGroup, appInsights, decisionQuery, { timeoutMs: queryTimeoutMs, window: userWindow }) : Promise.resolve([])),
+    query("decisionAggregate", needDecisions ? appInsightsQuery(resourceGroup, appInsights, decisionAggregateQuery, { timeoutMs: queryTimeoutMs, window: userWindow }) : Promise.resolve([])),
+    query("currentDecision", needCurrentDecisions ? appInsightsQuery(resourceGroup, appInsights, currentDecisionQuery, { timeoutMs: queryTimeoutMs, window: currentWindow }) : Promise.resolve([])),
+    query("lifecycle", needLifecycle ? appInsightsQuery(resourceGroup, appInsights, lifecycleQuery, { timeoutMs: queryTimeoutMs, window: userWindow }) : Promise.resolve([])),
+    query("observability", needLifecycle ? appInsightsQuery(resourceGroup, appInsights, observabilityQuery, { timeoutMs: queryTimeoutMs, window: userWindow }) : Promise.resolve([])),
+    query("block", needDecisions ? appInsightsQuery(resourceGroup, appInsights, blockQuery, { timeoutMs: queryTimeoutMs, window: userWindow }) : Promise.resolve([])),
+    query("blockAggregate", needDecisions ? appInsightsQuery(resourceGroup, appInsights, blockAggregateQuery, { timeoutMs: queryTimeoutMs, window: userWindow }) : Promise.resolve([])),
+    query("error", needErrors ? appInsightsQuery(resourceGroup, appInsights, errorQuery, { timeoutMs: queryTimeoutMs, window: userWindow }) : Promise.resolve([])),
+    query("baseline", needDecisions && baselineQuery ? appInsightsQuery(resourceGroup, appInsights, baselineQuery, { timeoutMs: queryTimeoutMs, window: baselineWindow }) : Promise.resolve([])),
+    query("pipeline", needDecisions ? appInsightsQuery(resourceGroup, appInsights, pipelineQuery, { timeoutMs: queryTimeoutMs, window: currentWindow }) : Promise.resolve([])),
   ]);
-  const { metric: metricRows, decision: decisionRows, currentDecision: currentDecisionRows, lifecycle: lifecycleRows, observability: observabilityRows, block: blockRows, error: errorRows, baseline: baselineRows, pipeline: pipelineRows } = queryResults.rows;
+  const { metric: metricRows, decision: rawDecisionRows, decisionAggregate: decisionAggregateRows, currentDecision: currentDecisionRows, lifecycle: lifecycleRows, observability: observabilityRows, block: rawBlockRows, blockAggregate: blockAggregateRows, error: errorRows, baseline: baselineRows, pipeline: pipelineRows } = queryResults.rows;
+  const decisionDetail = boundedTelemetryRows(rawDecisionRows, 5_000);
+  const blockDetail = boundedTelemetryRows(rawBlockRows, 5_000);
+  const decisionRows = decisionDetail.rows;
+  const blockRows = blockDetail.rows;
   const metric = metricRows[0] ?? null;
   const decisionEvents = traceEvents(decisionRows);
   const currentDecisionEvents = traceEvents(currentDecisionRows);
   const lifecycleEvents = traceEvents(lifecycleRows);
   const observabilityEvents = traceEvents(observabilityRows);
   const blockEvents = traceEvents(blockRows);
-  const groupedDecisions = new Map();
-  for (const event of decisionEvents) {
-    const key = `${event.reason}:${event.instId}`; const current = groupedDecisions.get(key) ?? { reason: event.reason, instId: event.instId, decisions: 0, latest: event.timestamp };
-    current.decisions += 1; if (event.timestamp > current.latest) current.latest = event.timestamp; groupedDecisions.set(key, current);
-  }
-  const decisions = summarizeDecisions([...groupedDecisions.values()]);
+  const decisions = summarizeDecisions(decisionAggregateRows);
   const errors = errorRows;
   const baseline = needDecisions && baselineQuery ? parseStrategyBaseline(baselineRows[0] ?? null) : { status: "UNAVAILABLE" };
   const pipelineCoverage = needDecisions ? parsePipelineCoverageRow(pipelineRows[0] ?? null) : null;
   const artifact = JSON.parse(await readFile(new URL("../infrastructure/config/p5-enabled-instruments.json", import.meta.url), "utf8"));
   const routeByInst = new Map([...(artifact.routes?.margin ?? []).map((instId) => [instId, "margin"]), ...(artifact.routes?.spot ?? []).map((instId) => [instId, "spot"])]);
   const trading = summarizeTrading(decisionEvents, lifecycleEvents, routeByInst, currentDecisionEvents, blockEvents, observabilityEvents);
+  const blockTotals = summarizeBlockAggregates(decisionAggregateRows, blockAggregateRows);
+  trading.events.queued = Number(decisions.reasons.BUY_QUEUED ?? 0);
+  trading.totalBlocked = blockTotals.total;
+  trading.blockedReasons = blockTotals.blockedReasons;
+  trading.blockClasses = blockTotals.blockClasses;
+  trading.blockStages = blockTotals.blockStages;
+  trading.detailCoverage = { decisions: decisionDetail, blocks: blockDetail };
   const assessment = assessRuntime({ app, active, replicas, traffic, metric, expectedMode: options.expectedMode });
   const container = revision?.properties?.template?.containers?.[0];
   const okxInstruments = container?.env?.find((row) => row.name === "OKX_INSTRUMENTS")?.value;
@@ -912,7 +968,7 @@ export async function main(argv = process.argv.slice(2)) {
     healthy: assessment.healthy && collection.complete,
     status: collection.complete ? assessment.status : "INCOMPLETE",
     warnings: assessment.warnings,
-    window: { from: options.since, to: queryStartedAt, minutes: options.since ? null : options.minutes, checkpointFallback },
+    window: { from: userWindow.from, to: userWindow.to, minutes: options.since ? null : options.minutes, checkpointFallback },
     target: { resourceGroup, app: appName, appInsights },
     runtime: {
       revision: revision?.name, mode: container?.env?.find((row) => row.name === "TRADING_MODE")?.value,
@@ -937,6 +993,9 @@ export async function main(argv = process.argv.slice(2)) {
     const topReasons = Object.entries(decisions.reasons).slice(0, 4).map(([reason, count]) => `${reason}=${count}`).join(", ") || "none";
     console.log(`Window: ${windowLabel} -> ${queryStartedAt}`);
     if (checkpointFallback) console.log("Checkpoint: missing; used the most recent 60 minutes");
+    if (decisionDetail.truncated || blockDetail.truncated) {
+      console.log(`Detail coverage: decisions_truncated=${decisionDetail.truncated} limit=${decisionDetail.limit} latest=${decisionDetail.latest ?? "-"} earliest=${decisionDetail.earliest ?? "-"} blocks_truncated=${blockDetail.truncated} limit=${blockDetail.limit} latest=${blockDetail.latest ?? "-"} earliest=${blockDetail.earliest ?? "-"}`);
+    }
     if (options.command === "report") {
       console.log(`Azure production: ${summary.status}`);
       if (!summary.collection.complete) console.log(`Collection: INCOMPLETE unavailable=${summary.collection.unavailable.map((row) => `${row.name}:${row.error}`).join(",")}`);
@@ -971,7 +1030,7 @@ export async function main(argv = process.argv.slice(2)) {
       console.log(`${formatDecisionTelemetryLine({ windowInstruments: decisions.instruments, runtimeInstruments, repoEnabled: artifact.enabled_count, strategyReadyInstruments, strategyBaseline: baseline })} | ${topReasons}`);
     } else {
       const blockReasons = Object.entries(trading.blockedReasons).map(([reason, count]) => `${reason}=${count}`).join(", ") || "none";
-      console.log(`Blocks: safety_events=${trading.blocked.length} current_safety=${trading.currentStates.blocked} current_policy=${trading.currentStates.policy}`);
+      console.log(`Blocks: safety_events=${trading.totalBlocked} current_safety=${trading.currentStates.blocked} current_policy=${trading.currentStates.policy}`);
       console.log(`Block reasons: ${blockReasons}`);
       console.log(`Optimization: recoverable=${trading.blockClasses.LIKELY_RECOVERABLE} market_moved=${trading.blockClasses.MARKET_MOVED} safety_boundary=${trading.blockClasses.SAFETY_BOUNDARY}`);
       console.log(`Stage coverage: ${Object.entries(trading.blockStages).map(([stage, count]) => `${stage}=${count}`).join(", ") || "none"}`);
@@ -981,7 +1040,7 @@ export async function main(argv = process.argv.slice(2)) {
       row.decisionId && `decision=${row.decisionId}`, row.clOrdId && `order=${row.clOrdId}`, row.stage && `stage=${row.stage}`,
       row.last && `last=${row.last}`, row.askPx && `ask=${row.askPx}`, row.breakoutPrice && `breakout=${row.breakoutPrice}`, row.dailyLimitPrice && `limit=${row.dailyLimitPrice}`,
       row.breakoutGap !== undefined && `breakout_gap=${row.breakoutGap}`, row.priceLimitGap !== undefined && `price_limit_gap=${row.priceLimitGap}`, row.limitHeadroom !== undefined && `limit_headroom=${row.limitHeadroom}`,
-      row.quoteAgeMs !== undefined && `quote_age_ms=${row.quoteAgeMs}`, row.candleAgeMs !== undefined && `candle_age_ms=${row.candleAgeMs}`,
+      row.quoteAgeMs !== undefined && `quote_age_ms=${row.quoteAgeMs}`, row.quoteReceiptAgeMs !== undefined && `quote_receipt_age_ms=${row.quoteReceiptAgeMs}`, row.quoteSourceAgeMs !== undefined && `quote_source_age_ms=${row.quoteSourceAgeMs}`, row.quoteFreshness && `quote_freshness=${row.quoteFreshness}`, row.candleAgeMs !== undefined && `candle_age_ms=${row.candleAgeMs}`,
       row.availBuy !== undefined && `avail_buy=${row.availBuy}`, row.remainingCapacity !== undefined && `remaining_capacity=${row.remainingCapacity}`,
       row.availableCapacity !== undefined && `available_capacity=${row.availableCapacity}`, row.minimumCapacity !== undefined && `minimum_capacity=${row.minimumCapacity}`, row.capacityGap !== undefined && `capacity_gap=${row.capacityGap}`,
       row.plannedSize !== undefined && `planned_size=${row.plannedSize}`, row.minSize !== undefined && `min_size=${row.minSize}`,

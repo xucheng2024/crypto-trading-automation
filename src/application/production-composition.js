@@ -22,6 +22,27 @@ import { ManagedIdentityCredential } from "@azure/identity";
 const noop = () => {};
 const asTransaction = (pool) => pool.transaction.bind(pool);
 
+export function createCancellableSleep(timers = globalThis) {
+  const pending = new Set();
+  let cancelled = false;
+  const fail = (reason = "STARTUP_CANCELLED") => Object.assign(new Error(reason), { code: reason });
+  const sleep = (ms) => new Promise((resolve, reject) => {
+    if (cancelled) { reject(fail()); return; }
+    const handle = { reject };
+    handle.timer = timers.setTimeout(() => { pending.delete(handle); resolve(); }, ms);
+    pending.add(handle);
+  });
+  const cancel = (reason = "STARTUP_CANCELLED") => {
+    cancelled = true;
+    for (const handle of pending) {
+      timers.clearTimeout?.(handle.timer);
+      handle.reject(fail(reason));
+    }
+    pending.clear();
+  };
+  return { sleep, cancel, get cancelled() { return cancelled; } };
+}
+
 function serviceAvailable(rows, nowMs) {
   return !(rows ?? []).some((row) => String(row.state ?? "").toLowerCase() === "ongoing" || (Number(row.begin) <= nowMs && nowMs <= Number(row.end)));
 }
@@ -110,7 +131,8 @@ export async function composeProductionRuntime(env, injected = {}) {
   const holdHoursByInst = Object.fromEntries(Object.entries(config.strategyConfig.rows).map(([instId, row]) => [instId, row.holdHours]));
   const maxHoldHoursByInst = Object.fromEntries(Object.entries(config.strategyConfig.rows).map(([instId, row]) => [instId, row.maxHoldHours]));
   buyPlanner = injected.buyPlanner ?? new BuySignalPlanner({ accountId: config.accountId, instIds, strategyConfig: config.strategyConfig, market, account, coordinator, state, orders, transaction, rest, readyGate, clock: runtime.clock, quoteFreshMs: config.quote_max_age_ms, telemetry, slo });
-  const reconciliation = injected.reconciliation ?? new ReconciliationService({ orders, state, transport: rest, ownerGuard, readyGate, clock: runtime.clock, safetyWaitMs: config.owner_safety_wait_ms, transaction, telemetry,
+  const startupWait = injected.startupWait ?? createCancellableSleep(injected.timers ?? globalThis);
+  const reconciliation = injected.reconciliation ?? new ReconciliationService({ orders, state, transport: rest, ownerGuard, readyGate, clock: runtime.clock, safetyWaitMs: config.owner_safety_wait_ms, sleep: startupWait.sleep, aborted: () => startupWait.cancelled, transaction, telemetry,
     ownership: { accountId: config.accountId, managedAfter: config.managedFillStartMs, enabledInstIds: instIds, systemClOrdIdPrefix: config.orderVersion, strategyTag: config.strategyTag, holdHoursByInst, maxHoldHoursByInst, configHash: config.strategyConfig.contentHash },
     onAccountBuy: async () => { const ledger = await buyPlanner.reloadLedger(); rebuildSellWatches(ledger); },
     onRecovery: ({ ledger, protection: rows, daily, buyAttempts, attempts }) => { delistingInstIds.clear(); for (const row of rows) if (["EXITING", "DELIST_DUST"].includes(row.state)) delistingInstIds.add(row.inst_id ?? row.instId); rebuildSellWatches(ledger, attempts); buyPlanner.restore?.({ ledger, protection: rows, daily, buyAttempts }); return delist.recover(rows); },
@@ -210,15 +232,18 @@ export async function composeProductionRuntime(env, injected = {}) {
     async start() { // fixed startup order: config -> secrets -> DB -> migration -> owner -> recovery -> REST baseline -> WS -> timers
       readyGate.set("database", false); await migrationCheck(); readyGate.set("database", true); if (!await ownerGuard.acquire()) throw new Error("OWNER_UNAVAILABLE");
       try {
-        const recovered = await reconciliation.recover({ accountId: config.accountId }); exitConfirmation.scheduleAttempts(recovered?.attempts ?? []); await baseline();
+        const recovered = await reconciliation.recover({ accountId: config.accountId });
+        if (startupWait.cancelled) throw Object.assign(new Error("STARTUP_CANCELLED"), { code: "STARTUP_CANCELLED" });
+        exitConfirmation.scheduleAttempts(recovered?.attempts ?? []); await baseline();
         for (const instId of instIds) maybeConfirmExpTime(instId, market.instrument(instId)?.expTime);
         if (injected.baseline && !injected.buyPlanner) readyGate.set("strategy", true); else await buyPlanner.prime();
         for (const instId of instIds) for (const event of sellService.observeCandle?.(instId) ?? []) engine.queue.enqueue({ ...event, enqueuedAt: runtime.clock.nowMs() });
         engine.enqueueSellEvents?.(await sellService.recoverDueAnchors?.() ?? []);
+        if (startupWait.cancelled) throw Object.assign(new Error("STARTUP_CANCELLED"), { code: "STARTUP_CANCELLED" });
         for (const client of Object.values(ws)) client.connect?.(); engine.startWatchdog(); workLoop.start?.(); recurring.start?.();
       }
       catch (error) { readyGate.set("owner", false); for (const client of Object.values(ws)) client.stop?.(); await exitConfirmation.stop?.(); recurring.stop?.(); workLoop.stop?.(); engine.stopWatchdog?.(); await ownerGuard.release(); throw error; }
     },
-    async stopIntake() { coordinator.stopNewMutations(); }, async stopTimers() { await exitConfirmation.stop?.(); recurring.stop?.(); workLoop.stop?.(); engine.stopWatchdog(); }, async stopNewMutations() { coordinator.stopNewMutations(); }, async closeWebSockets() { for (const client of Object.values(ws)) client.stop?.(); }, async finishInFlight() { await coordinator.finishInFlight(); }, async releaseOwner() { await ownerGuard.release(); }, async closeDatabase() { ownerClient.release?.(); ownerClient.end?.(); await pool.end?.(); },
+    async stopIntake() { startupWait.cancel(); coordinator.stopNewMutations(); }, async stopTimers() { await exitConfirmation.stop?.(); recurring.stop?.(); workLoop.stop?.(); engine.stopWatchdog(); }, async stopNewMutations() { coordinator.stopNewMutations(); }, async closeWebSockets() { for (const client of Object.values(ws)) client.stop?.(); }, async finishInFlight() { await coordinator.finishInFlight(); }, async releaseOwner() { await ownerGuard.release(); }, async closeDatabase() { ownerClient.release?.(); ownerClient.end?.(); await pool.end?.(); },
   };
 }

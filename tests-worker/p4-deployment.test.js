@@ -11,7 +11,7 @@ import { promisify } from "node:util";
 import { pathToFileURL } from "node:url";
 import { resolve } from "node:path";
 import { AzureKeyVaultSecretPort } from "../src/infrastructure/azure/keyvault-port.js";
-import { composeProductionRuntime, refreshExecutionRoutes, runRestBaseline } from "../src/application/production-composition.js";
+import { composeProductionRuntime, createCancellableSleep, refreshExecutionRoutes, runRestBaseline } from "../src/application/production-composition.js";
 import { EntraPostgresPool, AZURE_POSTGRES_SCOPE } from "../src/infrastructure/postgres/entra-pool.js";
 import { createApplicationInsightsTelemetry, isImportantTelemetry } from "../src/infrastructure/azure/application-insights-telemetry.js";
 import { EngineRecurringWork } from "../src/application/engine-recurring-work.js";
@@ -412,6 +412,67 @@ test("P4 Key Vault adapter reads a new secret version without persisting it", as
   let version = 0; class RotatingClient { async getSecret() { version += 1; return { value: `v${version}` }; } }
   const port = new AzureKeyVaultSecretPort({ vaultUrl: 'https://vault.example', credential: {}, SecretClient: RotatingClient });
   assert.equal(await port.getSecret('api'), 'v1'); assert.equal(await port.getSecret('api'), 'v2');
+});
+
+test("P4 cancellable sleep rejects the armed wait and later callers", async () => {
+  const wait = createCancellableSleep();
+  const pending = wait.sleep(60_000);
+  wait.cancel();
+  await assert.rejects(pending, /STARTUP_CANCELLED/);
+  await assert.rejects(wait.sleep(1), /STARTUP_CANCELLED/);
+});
+
+test("P4 production recovery waits the owner safety window and SIGTERM cancel never starts WS", async () => {
+  const events = [];
+  let held = false;
+  let fire;
+  const timers = {
+    setTimeout: (fn, ms) => { events.push(`wait:${ms}`); fire = fn; return 1; },
+    clearTimeout: () => { events.push("cleared"); fire = null; },
+  };
+  const stubs = {
+    keyVault: { readOkxCredentials: async () => ({ apiKey: "a", secretKey: "b", passphrase: "c" }) },
+    pool: { query: async () => ({ rows: [{}] }), transaction: async (fn) => fn({}), end: async () => {} },
+    ownerClient: {},
+    ownerGuard: { isHeld: () => held, onLost: () => () => {}, acquire: async () => { held = true; return true; }, release: async () => { held = false; events.push("released"); } },
+    migrationCheck: async () => {},
+    state: { listProtection: async () => { events.push("snapshot"); return []; }, listDaily: async () => [], listManagedFills: async () => [] },
+    orders: { listNonTerminal: async () => [], listTodayBuys: async () => [], listWatermarks: async () => [] },
+    rest: { fills: async () => [], fillsHistory: async () => [], order: async () => null, clockSkewMs: 0, clockFresh: () => true },
+    buyPlanner: { protected: new Set(), restore: () => {}, prime: async () => events.push("prime") },
+    sellService: { rebuild: () => {}, resumeTriggered: () => [], resumeForceHold: () => [], observeCandle: () => [], recoverDueAnchors: async () => [] },
+    delist: { recover: async () => {} },
+    exitConfirmation: { scheduleAttempts: () => {}, stop: async () => {} },
+    baseline: async () => events.push("baseline"),
+    ws: { public: { connect: () => events.push("ws"), stop: () => events.push("ws-stop") } },
+    engine: { startWatchdog: () => events.push("timers"), stopWatchdog: () => {}, enqueueSellEvents: () => {} },
+    workLoop: { start: () => {}, stop: () => {} },
+    recurring: { start: () => {}, stop: () => {} },
+    timers,
+  };
+  const cancelled = await composeProductionRuntime({ TRADING_MODE: "OFF", KEY_VAULT_URI: "https://vault.example", POSTGRES_URL: "postgresql://host/db" }, stubs);
+  const starting = cancelled.start();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(events.includes("wait:6000"), true);
+  assert.equal(events.includes("snapshot"), false);
+  assert.equal(events.includes("ws"), false);
+  await cancelled.stopIntake();
+  await assert.rejects(starting, /STARTUP_CANCELLED/);
+  assert.equal(events.includes("snapshot"), false);
+  assert.equal(events.includes("ws"), false);
+  assert.equal(events.includes("cleared"), true);
+  assert.equal(events.includes("released"), true);
+
+  events.length = 0; held = false; fire = undefined;
+  const continued = await composeProductionRuntime({ TRADING_MODE: "OFF", KEY_VAULT_URI: "https://vault.example", POSTGRES_URL: "postgresql://host/db" }, stubs);
+  const started = continued.start();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(typeof fire, "function");
+  fire();
+  await started;
+  assert.equal(events.includes("snapshot"), true);
+  assert.equal(events.includes("baseline"), true);
+  assert.equal(events.includes("ws"), true);
 });
 
 test("P4 production composition executes migration-owner-recovery order and releases owner before pool", async () => {

@@ -4,6 +4,13 @@ import { CLOCK_SYNC_STALE_AFTER_MS } from "../infrastructure/okx/rest-client.js"
 import { createDecisionId, payloadHash } from "../domain/order.js";
 
 function field(row, snake, camel) { return row?.[snake] ?? row?.[camel]; }
+function watchProjection({ daily, quoteStatus, quote, signalEligible = null }) {
+  if (daily?.status !== "READY" || !quoteStatus?.fresh || quote?.last == null || daily.dailyLimitPrice == null) {
+    return { buyWatch: null, signalEligible: null };
+  }
+  if (compareDecimal(quote.last, daily.dailyLimitPrice) > 0) return { buyWatch: false, signalEligible: false };
+  return { buyWatch: true, signalEligible };
+}
 function normalizeDaily(row) {
   if (!row) return null;
   return {
@@ -25,12 +32,12 @@ export function selectDailyCandles(rows, currentDay) {
   return { todayCandleTs: today.ts, todayOpen: value(today, 1), yesterdayCandleTs: yesterday.ts, yesterdayOpen: value(yesterday, 1), yesterdayClose: value(yesterday, 4) };
 }
 
-export function summarizeInstrumentPipelineCoverage({ instIds = [], market, strategyConfig, daily, currentDay, evaluatorSeen, decisions }) {
+export function summarizeInstrumentPipelineCoverage({ instIds = [], market, strategyConfig, daily, currentDay, evaluatorSeen, decisions, exchangeNowMs = market?.clock?.nowMs?.(), quoteFreshMs = market?.quoteFreshMs ?? 1_500 }) {
   const drops = { no_market_data: 0, candle_not_initialized: 0, no_strategy_row: 0, strategy_state_never_created: 0, filtered_before_evaluator: 0, unknown: 0 };
   let quoteReady = 0, candleReady = 0, strategyRow = 0, dailyState = 0, evaluator = 0, emitted = 0;
   for (const instId of instIds) {
-    const hasQuote = Boolean(market?.ticker?.(instId));
-    const hasCandle = Boolean(market?.candle?.(instId));
+    const hasQuote = market?.quoteStatus?.(instId, quoteFreshMs, exchangeNowMs)?.fresh === true;
+    const hasCandle = candleFreshness({ candle: market?.candle?.(instId), exchangeNowMs }).state === "FRESH";
     const hasStrategy = Boolean(strategyConfig?.rows?.[instId]?.bestLimit);
     const hasDaily = Boolean(currentDay && daily?.get(`${instId}:${currentDay}`));
     const seen = Boolean(evaluatorSeen?.has(instId));
@@ -142,45 +149,49 @@ export class BuySignalPlanner {
       const low = this.market.candle(instId)?.low;
       if (low) await this.transaction((tx) => this.state.recordAdversePrice?.(tx, { accountId: this.accountId, instId, price: low }));
     }
-    const instrument = this.market.instrument(instId); const quote = this.market.freshQuote(instId, this.quoteFreshMs); const candle = this.market.candle(instId); const daily = this.daily.get(`${instId}:${day}`); const candleState = candleFreshness({ candle, exchangeNowMs });
-    const base = { type: "trading_decision", side: "BUY", strategyDay: day, quoteTs: quote?.ts, quoteAgeMs: quote?.ts ? exchangeNowMs - Number(quote.ts) : undefined, last: quote?.last, askPx: quote?.askPx, candleTs: candle?.ts, candleAgeMs: candle?.ts ? exchangeNowMs - Number(candle.ts) : undefined, previousClosedHigh: candle?.high, dailyLimitPrice: daily?.dailyLimitPrice, configHash: this.strategyConfig.contentHash };
+    const instrument = this.market.instrument(instId); const quoteStatus = this.market.quoteStatus(instId, this.quoteFreshMs, exchangeNowMs); const quote = quoteStatus.quote; const candle = this.market.candle(instId); const daily = this.daily.get(`${instId}:${day}`); const candleState = candleFreshness({ candle, exchangeNowMs });
+    const watch = watchProjection({ daily, quoteStatus, quote });
+    const base = { type: "trading_decision", side: "BUY", strategyDay: day, quoteTs: quote?.ts, quoteAgeMs: quoteStatus.sourceAgeMs, quoteReceiptAgeMs: quoteStatus.receiptAgeMs, quoteSourceAgeMs: quoteStatus.sourceAgeMs, quoteFreshness: quoteStatus.reason, last: quote?.last, askPx: quote?.askPx, candleTs: candle?.ts, candleAgeMs: candle?.ts ? exchangeNowMs - Number(candle.ts) : undefined, previousClosedHigh: candle?.high, dailyLimitPrice: daily?.dailyLimitPrice, configHash: this.strategyConfig.contentHash, buyWatch: watch.buyWatch, signalEligible: watch.signalEligible };
     let reason;
     if (!daily) reason = "DAILY_LIMIT_PENDING";
     else if (daily.status !== "READY") reason = daily.status;
     else if (!instrument || instrument.state !== "live") reason = "INSTRUMENT_NOT_TRADABLE";
     else if (this.protected.has(instId)) reason = "INSTRUMENT_PROTECTED";
-    else if (!quote) reason = "QUOTE_STALE";
+    else if (!quoteStatus.fresh) reason = "QUOTE_STALE";
+    else if (compareDecimal(quote.last, daily.dailyLimitPrice) > 0) reason = "PRICE_OUTSIDE";
     else if (!candle?.confirm) reason = "CANDLE_MISSING";
     else if (candleState.state === "PENDING") reason = "CANDLE_PENDING";
     else if (candleState.state !== "FRESH") reason = "CANDLE_STALE";
     else if (!this.rest.clockFresh(CLOCK_SYNC_STALE_AFTER_MS)) reason = "CLOCK_SYNC_STALE";
     if (reason) { this.emitDecision(instId, { ...base, reason }); return { queued: false, reason }; }
     const signal = buySignal({ last: quote.last, askPx: quote.askPx, limitPrice: daily.dailyLimitPrice, previousClosedHigh: candle.high });
-    if (!signal.eligible) { this.emitDecision(instId, { ...base, reason: signal.reason, breakoutPrice: signal.breakoutPrice, dipPrice: signal.dipPrice }); return { queued: false, reason: signal.reason }; }
+    if (!signal.eligible) { this.emitDecision(instId, { ...base, reason: signal.reason, breakoutPrice: signal.breakoutPrice, dipPrice: signal.dipPrice, signalEligible: false }); return { queued: false, reason: signal.reason }; }
     const cycleStarted = this.clock.nowMs();
     let cycle;
     try { cycle = await this.transaction((tx) => this.orders.listBuyCycle(tx, this.accountId, instId, day)); }
     finally { this.slo?.record("buy_cycle_tx", cycleStarted); }
-    if (this.hasOpenManagedBuy(instId) && cycle.attempts.length === 0) { this.emitDecision(instId, { ...base, reason: "STRATEGY_POSITION_EXISTS" }); return { queued: false, reason: "STRATEGY_POSITION_EXISTS" }; }
+    const admitted = { ...base, signalEligible: true };
+    if (this.hasOpenManagedBuy(instId) && cycle.attempts.length === 0) { this.emitDecision(instId, { ...admitted, reason: "STRATEGY_POSITION_EXISTS" }); return { queued: false, reason: "STRATEGY_POSITION_EXISTS" }; }
     const previous = cycle.attempts.at(-1); const active = cycle.attempts.find((row) => ["PREPARED", "SUBMITTED", "UNKNOWN"].includes(row.state));
-    if (active) { this.emitDecision(instId, { ...base, reason: "ACTIVE_BUY_ATTEMPT", clOrdId: active.cl_ord_id }); return { queued: false, reason: "ACTIVE_BUY_ATTEMPT" }; }
+    if (active) { this.emitDecision(instId, { ...admitted, reason: "ACTIVE_BUY_ATTEMPT", clOrdId: active.cl_ord_id }); return { queued: false, reason: "ACTIVE_BUY_ATTEMPT" }; }
     const marketKey = await payloadHash({ quote, candle });
-    if (previous && previous.decision_market_key === marketKey) { this.emitDecision(instId, { ...base, reason: "DUPLICATE_MARKET_SNAPSHOT" }); return { queued: false, reason: "DUPLICATE_MARKET_SNAPSHOT" }; }
+    if (previous && previous.decision_market_key === marketKey) { this.emitDecision(instId, { ...admitted, reason: "DUPLICATE_MARKET_SNAPSHOT" }); return { queued: false, reason: "DUPLICATE_MARKET_SNAPSHOT" }; }
     const generation = previous ? Number(previous.generation) + 1 : 0;
     if (signal.trigger === "DIP" && generation !== 0) {
-      this.emitDecision(instId, { ...base, reason: "DIP_FIRST_ENTRY_ONLY", breakoutPrice: signal.breakoutPrice, dipPrice: signal.dipPrice, trigger: signal.trigger, generation });
+      this.emitDecision(instId, { ...admitted, reason: "DIP_FIRST_ENTRY_ONLY", breakoutPrice: signal.breakoutPrice, dipPrice: signal.dipPrice, trigger: signal.trigger, generation });
       return { queued: false, reason: "DIP_FIRST_ENTRY_ONLY" };
     }
     const decisionId = await createDecisionId({ accountId: this.accountId, instId, strategyDay: day, generation, marketKey });
     const intent = { intent: "BUY", accountId: this.accountId, instId, decisionId, generation, eligibleSince: this.clock.nowMs(), signalAt: this.clock.nowMs(), strategyDay: day, dailyLimitPrice: daily.dailyLimitPrice, breakoutPrice: signal.breakoutPrice, dipPrice: signal.dipPrice, trigger: signal.trigger, holdHours: this.strategyConfig.rows[instId].holdHours, maxHoldHours: this.strategyConfig.rows[instId].maxHoldHours, configHash: this.strategyConfig.contentHash, previousAttempt: previous, nextMarketKey: marketKey };
     const queued = this.coordinator.enqueue(intent);
-    this.emitDecision(instId, { ...base, reason: queued ? "BUY_QUEUED" : "BUY_QUEUE_REJECTED", decisionId, breakoutPrice: signal.breakoutPrice, dipPrice: signal.dipPrice, trigger: signal.trigger, breakoutGap: subtractDecimal(quote.last, signal.breakoutPrice), priceLimitGap: subtractDecimal(daily.dailyLimitPrice, quote.askPx), generation: intent.generation }, true);
+    this.emitDecision(instId, { ...admitted, reason: queued ? "BUY_QUEUED" : "BUY_QUEUE_REJECTED", decisionId, breakoutPrice: signal.breakoutPrice, dipPrice: signal.dipPrice, trigger: signal.trigger, breakoutGap: subtractDecimal(quote.last, signal.breakoutPrice), priceLimitGap: subtractDecimal(daily.dailyLimitPrice, quote.askPx), generation: intent.generation }, true);
     return { queued, reason: queued ? "BUY_QUEUED" : "BUY_QUEUE_REJECTED" };
   }
   pipelineCoverage() {
     return summarizeInstrumentPipelineCoverage({
       instIds: this.instIds, market: this.market, strategyConfig: this.strategyConfig, daily: this.daily,
       currentDay: this.currentDay, evaluatorSeen: this.evaluatorSeen, decisions: this.decisions,
+      exchangeNowMs: this.exchangeNowMs(), quoteFreshMs: this.quoteFreshMs,
     });
   }
   health() {

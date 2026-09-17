@@ -24,7 +24,21 @@ export class MarketProjection {
   ticker(instId) { return this.tickers.get(instId)?.value; }
   candle(instId) { return this.candles.get(instId)?.value; }
   instrument(instId) { return this.instruments.get(instId)?.value; }
-  freshQuote(instId, maxAgeMs) { const entry = this.tickers.get(instId); return Boolean(entry && this.clock.nowMs() - entry.receivedAt <= maxAgeMs) ? entry.value : null; }
+  quoteStatus(instId, maxAgeMs, exchangeNowMs = this.clock.nowMs()) {
+    const entry = this.tickers.get(instId);
+    const quote = entry?.value ?? null;
+    const receiptAgeMs = entry ? this.clock.nowMs() - entry.receivedAt : null;
+    const sourceTs = quote ? Number(quote.ts) : NaN;
+    const sourceAgeMs = Number.isFinite(sourceTs) ? Number(exchangeNowMs) - sourceTs : null;
+    let reason = "FRESH";
+    if (!entry) reason = "MISSING";
+    else if (!Number.isFinite(receiptAgeMs) || receiptAgeMs < 0) reason = "RECEIPT_TIME_INVALID";
+    else if (!Number.isFinite(sourceAgeMs)) reason = "SOURCE_TIME_INVALID";
+    else if (receiptAgeMs > maxAgeMs) reason = "RECEIPT_STALE";
+    else if (sourceAgeMs < 0) reason = "SOURCE_FUTURE";
+    else if (sourceAgeMs > maxAgeMs) reason = "SOURCE_STALE";
+    return { quote, fresh: reason === "FRESH", reason, receiptAgeMs, sourceAgeMs, sourceTs: Number.isFinite(sourceTs) ? sourceTs : null };
+  }
   health(instIds = []) {
     const now = this.clock.nowMs(); const ages = instIds.map((instId) => this.tickers.get(instId)?.receivedAt).filter((receivedAt) => Number.isFinite(receivedAt)).map((receivedAt) => Math.max(0, now - receivedAt));
     return { market_missing_instruments: instIds.length - ages.length, market_oldest_age_ms: ages.length ? Math.max(...ages) : 0 };

@@ -33,8 +33,8 @@ function recordConfirmedBuy(groups, { managed, fill, attempt, sellTime }) {
 
 /** Read-only reconciliation and ACCOUNT fill ingestion; it never invokes mutation transport. */
 export class ReconciliationService {
-  constructor({ orders, state, transport, ownerGuard, readyGate, clock = { nowMs: () => Date.now() }, sleep = async () => {}, safetyWaitMs, telemetry = () => {}, transaction = async (fn) => fn(null), ownership = {}, onAccountBuy = () => {}, onRecovery = async () => {}, onTerminal = async () => {} }) {
-    Object.assign(this, { orders, state, transport, ownerGuard, readyGate, clock, sleep, safetyWaitMs, telemetry, transaction, ownership, onAccountBuy, onRecovery, onTerminal });
+  constructor({ orders, state, transport, ownerGuard, readyGate, clock = { nowMs: () => Date.now() }, sleep = async () => {}, aborted = () => false, safetyWaitMs, telemetry = () => {}, transaction = async (fn) => fn(null), ownership = {}, onAccountBuy = () => {}, onRecovery = async () => {}, onTerminal = async () => {} }) {
+    Object.assign(this, { orders, state, transport, ownerGuard, readyGate, clock, sleep, aborted, safetyWaitMs, telemetry, transaction, ownership, onAccountBuy, onRecovery, onTerminal });
     if (!Number.isFinite(safetyWaitMs) || safetyWaitMs < 0) throw new TypeError("safetyWaitMs is required");
     // Session advisory locks disappear with their connection. READY must disappear in the
     // same turn; reacquisition always goes through recover() and its safety wait.
@@ -45,21 +45,28 @@ export class ReconciliationService {
   async recover({ accountId, scopes = ["public", "private", "business"], strategyDay } = {}) {
     this.readyGate.set("owner", false); for (const scope of scopes) this.readyGate.set(scope, false);
     if (!this.ownerGuard.isHeld()) return { ready: false, reason: "OWNER_NOT_HELD" };
-    this.readyGate.set("owner", true); await this.sleep(this.safetyWaitMs);
-    const [protection, daily, initialLedger, attempts, buyAttempts, watermarks] = await this.transaction((tx) => Promise.all([
-      this.state.listProtection?.(tx, accountId) ?? [], this.state.listDaily?.(tx, accountId) ?? [], this.state.listManagedFills?.(tx, accountId) ?? [],
-      this.orders.listNonTerminal?.(tx, accountId) ?? [], this.orders.listTodayBuys?.(tx, accountId, strategyDay) ?? [], this.orders.listWatermarks?.(tx, accountId) ?? [],
-    ]));
-    const recovered = await this.reconcileAll({ accountId, attempts, watermarks });
-    // reconcileAll may have just discovered ACCOUNT fills.  Re-read after it
-    // commits so the startup risk and sell projections include them on their
-    // first build, rather than only after a later restart or SYSTEM fill.
-    const ledger = await this.transaction((tx) => this.state.listManagedFills?.(tx, accountId) ?? initialLedger);
-    // Consumers rebuild their in-memory watch/index strictly from this
-    // durable snapshot before READY can be restored by baseline completion.
-    await this.onRecovery({ protection, daily, ledger, attempts, buyAttempts, watermarks, recovered });
-    emit(this.telemetry, { type: "recovery_loaded", protection: protection.length, daily: daily.length, fills: ledger.length, attempts: attempts.length, buyAttempts: buyAttempts.length, watermarks: watermarks.length, recovered: recovered.length });
-    return { ready: false, reason: "BASELINES_REQUIRED", attempts, buyAttempts, recovered };
+    try {
+      if (this.aborted()) throw Object.assign(new Error("STARTUP_CANCELLED"), { code: "STARTUP_CANCELLED" });
+      this.readyGate.set("owner", true); await this.sleep(this.safetyWaitMs);
+      if (this.aborted()) throw Object.assign(new Error("STARTUP_CANCELLED"), { code: "STARTUP_CANCELLED" });
+      const [protection, daily, initialLedger, attempts, buyAttempts, watermarks] = await this.transaction((tx) => Promise.all([
+        this.state.listProtection?.(tx, accountId) ?? [], this.state.listDaily?.(tx, accountId) ?? [], this.state.listManagedFills?.(tx, accountId) ?? [],
+        this.orders.listNonTerminal?.(tx, accountId) ?? [], this.orders.listTodayBuys?.(tx, accountId, strategyDay) ?? [], this.orders.listWatermarks?.(tx, accountId) ?? [],
+      ]));
+      const recovered = await this.reconcileAll({ accountId, attempts, watermarks });
+      // reconcileAll may have just discovered ACCOUNT fills.  Re-read after it
+      // commits so the startup risk and sell projections include them on their
+      // first build, rather than only after a later restart or SYSTEM fill.
+      const ledger = await this.transaction((tx) => this.state.listManagedFills?.(tx, accountId) ?? initialLedger);
+      // Consumers rebuild their in-memory watch/index strictly from this
+      // durable snapshot before READY can be restored by baseline completion.
+      await this.onRecovery({ protection, daily, ledger, attempts, buyAttempts, watermarks, recovered });
+      emit(this.telemetry, { type: "recovery_loaded", protection: protection.length, daily: daily.length, fills: ledger.length, attempts: attempts.length, buyAttempts: buyAttempts.length, watermarks: watermarks.length, recovered: recovered.length });
+      return { ready: false, reason: "BASELINES_REQUIRED", attempts, buyAttempts, recovered };
+    } catch (error) {
+      if (error?.code === "STARTUP_CANCELLED") this.readyGate.set("owner", false);
+      throw error;
+    }
   }
   async pages(read, initial = {}) {
     const rows = []; let cursor = initial; let guard = 0;

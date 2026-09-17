@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { assessCollection, assessRuntime, classifyBlock, classifyDecision, classifySevereTraces, countCsvInstruments, formatDecisionTelemetryLine, formatInstrumentTimelineSummary, formatPipelineCoverageLine, formatPositionsSummary, formatSevereDiagnostic, instrumentTimelineReadJobName, parseArgs, parseInstrumentTimelineLog, parseManagedPositionsLog, parsePipelineCoverageRow, parseStrategyBaseline, positionsReadJobName, queryRows, redactOperationalError, redactPositionsArtifact, runInstrumentTimelineCommand, runPositionsCommand, settleQueryResults, strategyBaselineQuery, summarizeDecisions, summarizeDeployment, summarizeFailedWorkflowLogs, summarizeRunner, summarizeTrading, traceEvents } from "../scripts/azure-ops-summary.mjs";
+import { appInsightsQueryArgs, assessCollection, assessRuntime, boundedTelemetryRows, classifyBlock, classifyDecision, classifySevereTraces, countCsvInstruments, formatDecisionTelemetryLine, formatInstrumentTimelineSummary, formatPipelineCoverageLine, formatPositionsSummary, formatSevereDiagnostic, instrumentTimelineReadJobName, parseArgs, parseInstrumentTimelineLog, parseManagedPositionsLog, parsePipelineCoverageRow, parseStrategyBaseline, positionsReadJobName, queryRows, redactOperationalError, redactPositionsArtifact, runInstrumentTimelineCommand, runPositionsCommand, settleQueryResults, strategyBaselineQuery, summarizeBlockAggregates, summarizeDecisions, summarizeDeployment, summarizeFailedWorkflowLogs, summarizeRunner, summarizeTrading, telemetryWindow, traceEvents } from "../scripts/azure-ops-summary.mjs";
 
 test("Azure ops summary converts query tables and aggregates decisions", () => {
   assert.deepEqual(queryRows({ tables: [{ columns: [{ name: "reason" }, { name: "decisions" }], rows: [["WAIT", 2]] }] }), [{ reason: "WAIT", decisions: 2 }]);
@@ -10,6 +10,25 @@ test("Azure ops summary converts query tables and aggregates decisions", () => {
     { reason: "CANDLE_PENDING", instId: "BTC-USDT", decisions: 1, latest: "2026-01-01T00:01:00Z" },
     { reason: "PRICE_OUTSIDE", instId: "ETH-USDT", decisions: 2, latest: "2026-01-01T00:00:30Z" },
   ]), { decisions: 6, instruments: 2, latest: "2026-01-01T00:01:00Z", reasons: { PRICE_OUTSIDE: 5, CANDLE_PENDING: 1 } });
+});
+
+test("Azure ops summary fixes one API window and keeps aggregate totals outside detail limits", () => {
+  const window = telemetryWindow({ minutes: 60 }, "2026-09-17T02:34:19.000Z");
+  assert.deepEqual(window, { from: "2026-09-17T01:34:19.000Z", to: "2026-09-17T02:34:19.000Z" });
+  const args = appInsightsQueryArgs("rg", "ai", "traces | take 1", window);
+  assert.deepEqual(args.slice(args.indexOf("--start-time"), args.indexOf("--analytics-query")), ["--start-time", window.from, "--end-time", window.to]);
+
+  const detail = boundedTelemetryRows([{ timestamp: "3" }, { timestamp: "2" }, { timestamp: "1" }], 2);
+  assert.deepEqual(detail, { rows: [{ timestamp: "3" }, { timestamp: "2" }], truncated: true, latest: "3", earliest: "2", limit: 2 });
+  assert.deepEqual(summarizeBlockAggregates(
+    [{ reason: "QUOTE_STALE", decisions: 7 }, { reason: "STRATEGY_POSITION_EXISTS", decisions: 9 }],
+    [{ reason: "MAX_AVAIL_FAILED", stage: "AVAILABILITY", eventCount: 5 }, { reason: "ACTIVE_BUY_ATTEMPT", stage: "POLICY", eventCount: 3 }],
+  ), {
+    total: 12,
+    blockedReasons: { QUOTE_STALE: 7, MAX_AVAIL_FAILED: 5 },
+    blockClasses: { LIKELY_RECOVERABLE: 12, MARKET_MOVED: 0, SAFETY_BOUNDARY: 0 },
+    blockStages: { PLANNER: 7, AVAILABILITY: 5 },
+  });
 });
 
 test("Azure ops summary marks failed report collection incomplete without treating it as empty telemetry", async () => {

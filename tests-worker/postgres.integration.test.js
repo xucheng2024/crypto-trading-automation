@@ -10,6 +10,7 @@ import { Client } from "pg";
 import { PostgresOwnerGuard } from "../src/infrastructure/postgres/owner-guard.js";
 import { OrderRepository, TradingStateRepository } from "../src/infrastructure/postgres/repositories.js";
 import { ReconciliationService } from "../src/application/reconciliation-service.js";
+import { createCancellableSleep } from "../src/application/production-composition.js";
 import { AccountCapitalSnapshot, MarketProjection, ReadyGate } from "../src/application/trading-engine.js";
 import { OrderCoordinator } from "../src/application/order-coordinator.js";
 import { DelistOrchestrator } from "../src/application/delist-orchestrator.js";
@@ -337,6 +338,22 @@ test("temporary PostgreSQL enforces P1-B invariants", { timeout: 60_000 }, async
       assert.equal((await replacementRecovery.recover({ accountId: "restart" })).reason, "BASELINES_REQUIRED");
       assert.equal(waited, 7); assert.equal(replacementGate.ready, false, "old READY is never reused after restart");
       await replacement.release(); await db.close(replacementClient);
+    });
+
+    await t.test("P2 owner safety wait cancel skips snapshot reads after a held session", async () => {
+      const ownerClient = await db.connect(); const owner = new PostgresOwnerGuard(ownerClient, "p2-wait-cancel-owner");
+      const gate = new ReadyGate(); let listed = 0; const wait = createCancellableSleep();
+      const recovery = new ReconciliationService({
+        ownerGuard: owner, readyGate: gate, safetyWaitMs: 50, sleep: wait.sleep, aborted: () => wait.cancelled, transport: {},
+        state: { listProtection: async () => { listed += 1; return []; }, listDaily: async () => [], listManagedFills: async () => [] },
+        orders: { listNonTerminal: async () => [], listTodayBuys: async () => [], listWatermarks: async () => [] },
+      });
+      assert.equal(await owner.acquire(), true);
+      const pending = recovery.recover({ accountId: "wait-cancel" });
+      wait.cancel();
+      await assert.rejects(pending, /STARTUP_CANCELLED/);
+      assert.equal(listed, 0); assert.equal(gate.snapshot().dependencies.owner, false);
+      await owner.release(); await db.close(ownerClient);
     });
 
     await t.test("P2 real repository pagination commits fills and watermarks only after every SPOT/MARGIN page succeeds", async () => {

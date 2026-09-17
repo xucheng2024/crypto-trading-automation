@@ -219,7 +219,9 @@ export class SellService {
     }
   }
   observeTicker(instId) {
-    const quote = this.market.freshQuote(instId, this.market.quoteFreshMs ?? 30_000);
+    const quoteStatus = this.market.quoteStatus(instId, this.market.quoteFreshMs ?? 30_000, this.exchangeNowMs());
+    const quote = quoteStatus.fresh ? quoteStatus.quote : null;
+    if (!quoteStatus.fresh && quoteStatus.quote) this._emit({ type: "sell_protection", reason: "SELL_QUOTE_STALE", instId, quoteTs: quoteStatus.sourceTs, quoteReceiptAgeMs: quoteStatus.receiptAgeMs, quoteSourceAgeMs: quoteStatus.sourceAgeMs, quoteFreshness: quoteStatus.reason });
     const events = [];
     // Requires a fresh quote *and* an actual bidPx — no `?? last` fallback. A market SELL
     // fills against the bid; falling back to `last` when bidPx is missing would trigger on
@@ -333,7 +335,7 @@ export class SellService {
   async reviewDust() {
     for (const [key, fill] of this.fills) {
       if (field(fill, "sell_state", "sellState") !== "DUST_PENDING") continue;
-      const instId = field(fill, "inst_id", "instId"); const instrument = this.market.instrument(instId); const quote = this.market.freshQuote(instId, this.market.quoteFreshMs ?? 30_000);
+      const instId = field(fill, "inst_id", "instId"); const instrument = this.market.instrument(instId); const quoteStatus = this.market.quoteStatus(instId, this.market.quoteFreshMs ?? 30_000, this.exchangeNowMs()); const quote = quoteStatus.fresh ? quoteStatus.quote : null;
       const remaining = subtractDecimal(field(fill, "fill_size", "fillSize"), field(fill, "disposed_size", "disposedSize") ?? "0");
       if (instrument && quote && compareDecimal(roundToStep(remaining, instrument.lotSz, "down"), instrument.minSz) >= 0 && compareDecimal(multiplyDecimal(remaining, quote.bidPx ?? quote.last), "0.1") >= 0) {
         this.latches.add(key); await this.consume({ type: "SELL_BREACH", key, instId, protection: fill.protection_price });

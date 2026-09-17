@@ -501,10 +501,10 @@ export class OrderCoordinator {
     const accountFresh = this.account.fresh(this.config.accountFreshMs);
     if (!this.readyGate.ready || !accountFresh) return { allowed: false, reason: "NOT_READY", evidence: { ready: this.readyGate.ready, accountFresh } };
     if (!this.transport.clockFresh(CLOCK_SYNC_STALE_AFTER_MS)) return { allowed: false, reason: "CLOCK_SYNC_STALE", evidence: { clockSkewMs: this.transport.clockSkewMs } };
-    const quote = this.market.freshQuote(intent.instId, this.config.quoteFreshMs); const candle = this.market.candle(intent.instId); const instrument = this.market.instrument(intent.instId);
     const exchangeNowMs = this.clock.nowMs() + Number(this.transport.clockSkewMs ?? 0);
-    const marketEvidence = { quoteAgeMs: quote?.ts ? exchangeNowMs - Number(quote.ts) : undefined, candleAgeMs: candle?.ts ? exchangeNowMs - Number(candle.ts) : undefined, instrumentState: instrument?.state, protected: intent.protected, enabled: intent.enabled, dailyReady: intent.dailyReady };
-    if (!quote || !candle || !instrument || instrument.state !== "live" || intent.protected || intent.enabled === false || intent.dailyReady === false || !this.isBuyAllowed(intent.instId)) return { allowed: false, reason: "MARKET", evidence: marketEvidence };
+    const quoteStatus = this.market.quoteStatus(intent.instId, this.config.quoteFreshMs, exchangeNowMs); const quote = quoteStatus.quote; const candle = this.market.candle(intent.instId); const instrument = this.market.instrument(intent.instId);
+    const marketEvidence = { quoteAgeMs: quoteStatus.sourceAgeMs, quoteReceiptAgeMs: quoteStatus.receiptAgeMs, quoteSourceAgeMs: quoteStatus.sourceAgeMs, quoteFreshness: quoteStatus.reason, quoteTs: quoteStatus.sourceTs, candleAgeMs: candle?.ts ? exchangeNowMs - Number(candle.ts) : undefined, instrumentState: instrument?.state, protected: intent.protected, enabled: intent.enabled, dailyReady: intent.dailyReady };
+    if (!quoteStatus.fresh || !candle || !instrument || instrument.state !== "live" || intent.protected || intent.enabled === false || intent.dailyReady === false || !this.isBuyAllowed(intent.instId)) return { allowed: false, reason: "MARKET", evidence: marketEvidence };
     const candleState = candleFreshness({ candle, exchangeNowMs }).state;
     if (candleState !== "FRESH") return { allowed: false, reason: "MARKET", evidence: { ...marketEvidence, candleState } };
     // Signal eligibility (breakout/DIP thresholds, PRICE_OUTSIDE/ASK_ABOVE_LIMIT) is evaluated
