@@ -11,8 +11,8 @@ export async function startTradingEngine(env = process.env, dependencies = {}) {
     environment: env.DEPLOYMENT_ENVIRONMENT ?? "p5",
     tradingMode: String(env.TRADING_MODE ?? "OFF").toUpperCase(),
   });
-  // Bring liveness up before remote baseline work. Readiness remains false
-  // until the fully composed runtime has completed recovery and baselines.
+  // Liveness comes up before remote work. Azure readiness follows owner hold
+  // so a brief trading-READY dip cannot spawn a lock-contending replica.
   let healthDelegate = null; let healthServer = null;
   if (dependencies.health?.enabled) healthServer = createHealthServer({ liveness: () => true, readiness: () => healthDelegate?.readiness?.() ?? false, readinessDetails: () => healthDelegate?.readinessDetails?.() ?? { ready: false, bootstrap: true } }, dependencies.health);
   // `lifecycle` remains a narrow test seam.  The normal command constructs
@@ -58,14 +58,20 @@ export async function startTradingEngine(env = process.env, dependencies = {}) {
     // durable reconciliation plus every market/account baseline before READY.
     void shutdown("OWNER_SESSION_LOST").then(() => exitProcess(1), () => exitProcess(1));
   }) ?? null;
+  const replicaReady = () => Boolean(lifecycle.ownerGuard?.isHeld?.());
+  const replicaDetails = () => {
+    const snapshot = lifecycle.readyGate?.snapshot?.() ?? { ready: false, dependencies: {} };
+    return { ready: replicaReady(), tradingReady: snapshot.ready === true, dependencies: snapshot.dependencies };
+  };
+  healthDelegate = { liveness: () => true, readiness: replicaReady, readinessDetails: replicaDetails };
   await lifecycle.acquireOwnerAndRecover?.(); // legacy injected test seam
   try { await lifecycle.start?.(runtime); }
   catch (error) { if (healthServer) await new Promise((resolve) => healthServer.close(resolve)); throw error; }
   const engine = {
     runtime, composed, shutdown, startupDegraded: null,
     liveness: () => true,
-    readiness: () => composed.readyGate?.ready ?? runtime.recoveryState.isReady(),
-    readinessDetails: () => composed.readyGate?.snapshot?.() ?? { ready: runtime.recoveryState.isReady() },
+    readiness: replicaReady,
+    readinessDetails: replicaDetails,
   };
   healthDelegate = engine;
   return Object.freeze(engine);

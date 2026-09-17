@@ -230,7 +230,12 @@ export async function composeProductionRuntime(env, injected = {}) {
   return { runtime, keyVault, credentials, pool, ownerClient, ownerGuard, orders, state, transaction, market, account, readyGate, coordinator, reconciliation, exitConfirmation, buyPlanner, sellService, protection, delist, rest, ws, engine, workLoop, slo, recurring, executionRoutes, quoteCurrencies, offline: false,
     onOwnerLost(listener) { return ownerGuard.onLost(listener); },
     async start() { // fixed startup order: config -> secrets -> DB -> migration -> owner -> recovery -> REST baseline -> WS -> timers
-      readyGate.set("database", false); await migrationCheck(); readyGate.set("database", true); if (!await ownerGuard.acquire()) throw new Error("OWNER_UNAVAILABLE");
+      readyGate.set("database", false); await migrationCheck(); readyGate.set("database", true);
+      while (!await ownerGuard.acquire()) {
+        try { telemetry({ type: "owner_recovery", reason: "OWNER_UNAVAILABLE" }); } catch { /* lock wait must not depend on telemetry */ }
+        await startupWait.sleep(config.owner_safety_wait_ms);
+      }
+      if (startupWait.cancelled) throw Object.assign(new Error("STARTUP_CANCELLED"), { code: "STARTUP_CANCELLED" });
       try {
         const recovered = await reconciliation.recover({ accountId: config.accountId });
         if (startupWait.cancelled) throw Object.assign(new Error("STARTUP_CANCELLED"), { code: "STARTUP_CANCELLED" });

@@ -98,7 +98,7 @@ The initial template deployment creates the two managed identities. Record its p
 
 Supply converter output verbatim as `strategyConfigJson`, the enabled pairs as `okxInstruments`, and an explicitly reviewed UTC epoch as `managedFillStartMs`. The source user JSON files are never copied into the image. Missing per-pair strategy data fails ACCOUNT BUY ingestion closed.
 
-Verify liveness, global READY and RECOVERING from redacted telemetry. READY must remain false until owner lock, recovery, public/private/business WS baselines, account and instruments are fresh. A temporary WS outage is an alert/reconnect condition, not a liveness-kill loop.
+Verify liveness, owner-held Azure readiness, and trading READY from redacted telemetry. Trading READY must remain false until owner lock, recovery, public/private/business WS baselines, account and instruments are fresh. A temporary WS or strategy-day dip is an alert/reconnect condition, not an Azure readiness replacement or liveness-kill loop. `/health/ready` means this replica holds the owner lock.
 
 The Engine uses a PostgreSQL session advisory lock and must have only one owner.
 For an image-only release, create the new `OFF` revision, deactivate every old
@@ -123,8 +123,7 @@ Every deployment must finish with all of the following evidence:
 - the configured instrument count and strategy hash match the reviewed inputs;
 - exactly one revision is active with one ready replica and Azure health is
   `Healthy`;
-- `/health/live` succeeds and `/health/ready` returns HTTP 200; owner, database,
-  public/private/business WebSockets, account and instruments are all ready;
+- `/health/live` succeeds and `/health/ready` returns HTTP 200 while this replica holds the owner lock; trading READY (owner, database, public/private/business WebSockets, account, instruments, strategy) is reported in telemetry, not by replacing the replica;
 - the real OKX GET-only preflight succeeds without exposing credentials or
   sending a mutation.
 

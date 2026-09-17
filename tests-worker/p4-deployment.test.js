@@ -311,6 +311,21 @@ test("P4 health endpoints distinguish liveness from global readiness", async () 
   } finally { await new Promise((resolve) => server.close(resolve)); }
 });
 
+test("P4 Azure readiness follows owner hold rather than trading READY", async () => {
+  const { startTradingEngine } = await import("../src/entrypoints/azure/trading-engine.js");
+  let held = true;
+  const engine = await startTradingEngine({}, {
+    lifecycle: { ownerGuard: { isHeld: () => held, onLost: () => () => {} }, readyGate: new ReadyGate(), start: async () => {} },
+    health: { enabled: true, port: 0 },
+  });
+  try {
+    assert.equal(engine.readiness(), true);
+    assert.equal(engine.readinessDetails().tradingReady, false);
+    held = false;
+    assert.equal(engine.readiness(), false);
+  } finally { await engine.shutdown(); }
+});
+
 test("P4 production health server is closed by graceful shutdown", async () => {
   const engine = await (await import("../src/entrypoints/azure/trading-engine.js")).startTradingEngine({}, { lifecycle: {}, health: { enabled: true, port: 0 } });
   await engine.shutdown();
@@ -332,7 +347,7 @@ test("P5 telemetry sends only important structured traces and strips secrets", a
   telemetry({ type: "trading_decision", reason: "BREAKOUT_NOT_CONFIRMED", instId: "ETH-USDT", last: "1" });
   telemetry({ type: "fill_reconciliation", reason: "FILL_BATCH_COMMITTED", inserted: 1, linked: 0, systemBuys: 1 });
   telemetry({ type: "metric_snapshot", reason: "RUNTIME_METRICS", queue_wait_p99_ms: 4, ready: 1 });
-  assert.equal(isImportantTelemetry({ type: "ticker" }), false); assert.equal(isImportantTelemetry({ type: "sell_watch_loaded" }), true); assert.equal(isImportantTelemetry({ type: "sell_protection", reason: "SELL_PROTECTION_MISSING" }), true); assert.equal(isImportantTelemetry({ type: "sell_protection", reason: "SELL_PROTECTION_UPDATED" }), false); assert.equal(isImportantTelemetry({ type: "instrument_pipeline_coverage" }), true); assert.equal(traces.length, 4);
+  assert.equal(isImportantTelemetry({ type: "ticker" }), false); assert.equal(isImportantTelemetry({ type: "sell_watch_loaded" }), true); assert.equal(isImportantTelemetry({ type: "sell_protection", reason: "SELL_PROTECTION_MISSING" }), true); assert.equal(isImportantTelemetry({ type: "sell_protection", reason: "SELL_PROTECTION_UPDATED" }), false); assert.equal(isImportantTelemetry({ type: "instrument_pipeline_coverage" }), true); assert.equal(isImportantTelemetry({ type: "owner_recovery", reason: "OWNER_UNAVAILABLE" }), true); assert.equal(traces.length, 4);
   assert.match(traces[0].message, /UNKNOWN_ORDER/); assert.equal(traces[0].properties.instId, "BTC-USDT");
   assert.equal(traces[0].properties.apiKey, undefined); assert.equal(traces[0].properties.token, undefined);
   assert.match(traces[1].message, /BREAKOUT_NOT_CONFIRMED/); assert.deepEqual(metrics, [{ name: "queue_wait_p99_ms", value: 4 }, { name: "ready", value: 1 }]);
@@ -472,6 +487,50 @@ test("P4 production recovery waits the owner safety window and SIGTERM cancel ne
   await started;
   assert.equal(events.includes("snapshot"), true);
   assert.equal(events.includes("baseline"), true);
+  assert.equal(events.includes("ws"), true);
+});
+
+test("P4 owner lock contention waits without WS until the lock is acquired", async () => {
+  const events = [];
+  let held = false;
+  let tries = 0;
+  let fire;
+  const timers = {
+    setTimeout: (fn, ms) => { events.push(`wait:${ms}`); fire = fn; return 1; },
+    clearTimeout: () => { events.push("cleared"); fire = null; },
+  };
+  const runtime = await composeProductionRuntime({ TRADING_MODE: "OFF", KEY_VAULT_URI: "https://vault.example", POSTGRES_URL: "postgresql://host/db" }, {
+    keyVault: { readOkxCredentials: async () => ({ apiKey: "a", secretKey: "b", passphrase: "c" }) },
+    pool: { query: async () => ({ rows: [{}] }), transaction: async (fn) => fn({}), end: async () => {} },
+    ownerClient: {},
+    ownerGuard: { isHeld: () => held, onLost: () => () => {}, acquire: async () => { tries += 1; events.push(`acquire:${tries}`); if (tries === 1) return false; held = true; return true; }, release: async () => { held = false; events.push("released"); } },
+    migrationCheck: async () => {},
+    state: { listProtection: async () => { events.push("snapshot"); return []; }, listDaily: async () => [], listManagedFills: async () => [] },
+    orders: { listNonTerminal: async () => [], listTodayBuys: async () => [], listWatermarks: async () => [] },
+    rest: { fills: async () => [], fillsHistory: async () => [], order: async () => null, clockSkewMs: 0, clockFresh: () => true },
+    buyPlanner: { protected: new Set(), restore: () => {}, prime: async () => {} },
+    sellService: { rebuild: () => {}, resumeTriggered: () => [], resumeForceHold: () => [], observeCandle: () => [], recoverDueAnchors: async () => [] },
+    delist: { recover: async () => {} },
+    exitConfirmation: { scheduleAttempts: () => {}, stop: async () => {} },
+    baseline: async () => events.push("baseline"),
+    ws: { public: { connect: () => events.push("ws"), stop: () => {} } },
+    engine: { startWatchdog: () => {}, stopWatchdog: () => {}, enqueueSellEvents: () => {} },
+    workLoop: { start: () => {}, stop: () => {} },
+    recurring: { start: () => {}, stop: () => {} },
+    telemetry: (event) => { if (event?.reason) events.push(event.reason); },
+    timers,
+  });
+  const starting = runtime.start();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(events.includes("acquire:1"), true);
+  assert.equal(events.includes("OWNER_UNAVAILABLE"), true);
+  assert.equal(events.includes("ws"), false);
+  fire();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(events.includes("acquire:2"), true);
+  assert.equal(events.includes("ws"), false);
+  fire();
+  await starting;
   assert.equal(events.includes("ws"), true);
 });
 

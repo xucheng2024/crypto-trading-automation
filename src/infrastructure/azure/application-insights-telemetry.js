@@ -1,7 +1,7 @@
 import appInsights from "applicationinsights";
 
 const SECRET_KEY = /(secret|password|token|passphrase|api.?key|connection)/i;
-const IMPORTANT = /(FAILED|ERROR|UNKNOWN|LOST|HALT|DEGRADED|SHORTFALL|STALE|BLOCKED|DEFERRED|EXITING|SUBMITTED|RECOVER|READY_FALSE)/;
+const IMPORTANT = /(FAILED|ERROR|UNKNOWN|LOST|HALT|DEGRADED|SHORTFALL|STALE|BLOCKED|DEFERRED|EXITING|SUBMITTED|RECOVER|READY_FALSE|UNAVAILABLE)/;
 
 function safeProperties(event) {
   const properties = {};
