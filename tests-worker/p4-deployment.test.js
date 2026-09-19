@@ -11,7 +11,7 @@ import { promisify } from "node:util";
 import { pathToFileURL } from "node:url";
 import { resolve } from "node:path";
 import { AzureKeyVaultSecretPort } from "../src/infrastructure/azure/keyvault-port.js";
-import { composeProductionRuntime, createCancellableSleep, refreshExecutionRoutes, runRestBaseline } from "../src/application/production-composition.js";
+import { composeProductionRuntime, createCancellableSleep, reconcileAndRestoreDatabase, refreshExecutionRoutes, runRestBaseline } from "../src/application/production-composition.js";
 import { EntraPostgresPool, AZURE_POSTGRES_SCOPE } from "../src/infrastructure/postgres/entra-pool.js";
 import { createApplicationInsightsTelemetry, isImportantTelemetry } from "../src/infrastructure/azure/application-insights-telemetry.js";
 import { EngineRecurringWork } from "../src/application/engine-recurring-work.js";
@@ -108,6 +108,8 @@ test("P4 production deployment ends at OFF while FULL promotion and OFF recovery
   assert.equal([...workflow.matchAll(/node scripts\/production-revision-handoff\.mjs/g)].length, 1);
   assert.match(workflow, /--expect-mode OFF --execute/);
   assert.match(promotion, /node scripts\/production-revision-handoff\.mjs[\s\S]*--expect-mode FULL --execute/);
+  assert.match(workflow, /Verify OFF trading readiness and exit clearance[\s\S]*azure-ops-summary\.mjs snapshot[\s\S]*--expect-mode OFF/);
+  assert.match(promotion, /Verify FULL trading readiness and exit clearance[\s\S]*azure-ops-summary\.mjs snapshot[\s\S]*--expect-mode FULL/);
   assert.match(recovery, /name: Production recover OFF/);
   assert.match(recovery, /Known-good immutable engine image/);
   assert.match(recovery, /@sha256:\[a-f0-9\]\{64\}/);
@@ -555,6 +557,25 @@ test("P4 Entra PostgreSQL pool uses official scope, TLS verification and fails r
   assert.equal(options.connectionString, undefined); assert.equal(options.host, 'host'); assert.equal(options.port, 5432); assert.equal(options.user, 'user'); assert.equal(options.database, 'db');
   assert.equal(options.ssl.rejectUnauthorized, true); assert.equal(options.keepAlive, true); assert.equal(options.keepAliveInitialDelayMillis, 60_000); assert.equal(await options.password(), 'short-token'); await assert.rejects(adapter.connect(), /pool exhausted/);
   assert.deepEqual(events, [{ reason: 'POSTGRES_POOL_UNAVAILABLE' }, { reason: 'POSTGRES_POOL_UNAVAILABLE' }]);
+});
+
+test("P4 successful bounded reconciliation restores database readiness only while owner is held", async () => {
+  const gate = new ReadyGate(); gate.set("database", false); const events = [];
+  const transaction = async (fn) => fn({});
+  const orders = { listNonTerminal: async () => ["attempt"], listWatermarks: async () => ["watermark"] };
+  const reconciliation = { reconcileAll: async (input) => { events.push(input); return ["recovered"]; } };
+  const result = await reconcileAndRestoreDatabase({ transaction, orders, reconciliation, accountId: "a", readyGate: gate, ownerGuard: { isHeld: () => true }, telemetry: (event) => events.push(event) });
+  assert.deepEqual(result, ["recovered"]); assert.equal(gate.snapshot().dependencies.database, true);
+  assert.deepEqual(events, [
+    { accountId: "a", attempts: ["attempt"], watermarks: ["watermark"] },
+    { type: "database_recovery", reason: "DATABASE_READY_RESTORED" },
+  ]);
+
+  gate.set("database", false);
+  await assert.rejects(reconcileAndRestoreDatabase({ transaction, orders, reconciliation, accountId: "a", readyGate: gate, ownerGuard: { isHeld: () => false } }), /DATABASE_RECOVERY_OWNER_LOST/);
+  assert.equal(gate.snapshot().dependencies.database, false);
+  await assert.rejects(reconcileAndRestoreDatabase({ transaction, orders, reconciliation: { reconcileAll: async () => { throw new Error("reconcile failed"); } }, accountId: "a", readyGate: gate, ownerGuard: { isHeld: () => true } }), /reconcile failed/);
+  assert.equal(gate.snapshot().dependencies.database, false);
 });
 
 test("P4 composition fails closed before owner or WS when migration gate fails", async () => {

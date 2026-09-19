@@ -4,6 +4,13 @@ import { candleFreshness, sellBreakdownPrice, sellProtectionAnchorClose, sellPro
 const field = (row, snake, camel) => row[snake] ?? row[camel];
 const LOSS_SELL_WINDOW_DELAY_MS = 24 * 60 * 60 * 1_000;
 
+// The frozen fill time and hold duration define the original window. A later
+// durable sell_time already records a deferral, including across restarts.
+const hasOriginalSellTime = (fill) => {
+  const original = Number(field(fill, "fill_time", "fillTime")) + Number(field(fill, "hold_hours", "holdHours")) * 3_600_000;
+  return Number.isSafeInteger(original) && Number(field(fill, "sell_time", "sellTime")) === original;
+};
+
 /**
  * SELL watch has a deliberately split boundary. observe* is safe in a WS
  * callback: it touches only the projection/index and returns a critical event.
@@ -236,11 +243,11 @@ export class SellService {
         if (!fill || state !== "WAITING" || this.latches.has(key)) continue;
         const sellTime = Number(field(fill, "sell_time", "sellTime"));
         const fillPrice = field(fill, "fill_price", "fillPrice");
-        // When the normal sell window opens below the entry price, postpone the
-        // whole window for 24 hours.  Latching before queueing makes the delay
+        // When the original sell window opens below entry, postpone it once
+        // for 24 hours. Latching before queueing makes the delay
         // effective immediately, rather than allowing another event in this
         // tick burst to submit a sell while the durable CAS update is pending.
-        if (Number.isFinite(sellTime) && sellTime <= this.clock.nowMs() && fillPrice && compareDecimal(quote.bidPx, fillPrice) < 0) {
+        if (hasOriginalSellTime(fill) && sellTime <= this.clock.nowMs() && fillPrice && compareDecimal(quote.bidPx, fillPrice) < 0) {
           this.latches.add(key);
           events.push({ type: "SELL_DEFER_LOSS", priority: "critical", key, instId, bidPx: quote.bidPx, nextSellTime: this.clock.nowMs() + LOSS_SELL_WINDOW_DELAY_MS });
           continue;
@@ -281,6 +288,11 @@ export class SellService {
     if (!fill) { this.releaseLatch(event, "FILL_MISSING"); return { accepted: false, reason: "FILL_MISSING" }; }
     const accountId = field(fill, "account_id", "accountId"); const instId = field(fill, "inst_id", "instId"); const tradeId = field(fill, "trade_id", "tradeId");
     if (event.type === "SELL_DEFER_LOSS") {
+      if (field(fill, "sell_state", "sellState") !== "WAITING" || !hasOriginalSellTime(fill)) {
+        this.fills.set(event.key, fill);
+        this.releaseLatch(event, "LOSS_SELL_WINDOW_NOT_ELIGIBLE");
+        return { accepted: false, reason: "LOSS_SELL_WINDOW_NOT_ELIGIBLE" };
+      }
       const result = await this.transaction((tx) => this.state.deferSellWindow(tx, { accountId, instId, tradeId, version: fill.version, sellTime: event.nextSellTime, bidPx: event.bidPx }));
       if (result?.rowCount !== 1) return { accepted: false, reason: "CAS_LOST", retryable: true };
       const current = result.rows?.[0] ?? { ...fill, sell_time: event.nextSellTime, version: BigInt(fill.version) + 1n };

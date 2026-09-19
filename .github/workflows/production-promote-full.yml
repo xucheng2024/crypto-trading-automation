@@ -47,3 +47,15 @@ jobs:
           suffix="full-${digest:0:7}-${GITHUB_RUN_NUMBER}"
           promoted="$(az containerapp update --name "$CONTAINER_APP_NAME" --resource-group "$RESOURCE_GROUP" --image "$image" --set-env-vars TRADING_MODE=FULL --revision-suffix "$suffix" --query properties.latestRevisionName --output tsv)"
           node scripts/production-revision-handoff.mjs --resource-group "$RESOURCE_GROUP" --app "$CONTAINER_APP_NAME" --target-revision "$promoted" --expect-mode FULL --execute
+      - name: Verify FULL trading readiness and exit clearance
+        shell: bash
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 24); do
+            if node scripts/azure-ops-summary.mjs snapshot --minutes 5 --resource-group "$RESOURCE_GROUP" --app "$CONTAINER_APP_NAME" --expect-mode FULL; then
+              exit 0
+            fi
+            if [ "$attempt" -lt 24 ]; then sleep 10; fi
+          done
+          echo "FULL runtime did not reach trading READY, exit READY, and zero exit backlog." >&2
+          exit 1

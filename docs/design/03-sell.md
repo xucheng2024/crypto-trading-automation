@@ -40,6 +40,8 @@ fill_remaining_value_usdt=remaining_size * fresh_bid_px
 
 ## SELL_WATCH
 
+每条 BUY fill 最多因亏损延期一次：原始 `sell_time = fill_time + hold_hours * 3,600,000` 到期且新鲜 `bidPx < fill_price` 时，将 `sell_time` 顺延到观察时刻的 24 小时后。后续到期即使仍亏损，也按正常保护价规则判断卖出，不再延期；到期本身不表示立即市价卖出。是否已经延期由账本 `sell_time` 与冻结的原始时间比较确定，数据库原子更新也校验原始时间，重启、重复事件或并发不能再次延期。已有延期记录同样受此限制。
+
 每条 fill 到达 `sell_time` 后读取最近一根 `confirm=1` 的 OKX 原生 3m K 线：
 
 ~~~text

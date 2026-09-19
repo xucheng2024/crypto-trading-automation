@@ -82,6 +82,21 @@ export async function runRestBaseline({ rest, instIds, market, account, readyGat
   return { quoteCurrency: profile.quoteCurrency, executionRoutes: profile.executionRoutes, status, leverage };
 }
 
+export async function reconcileAndRestoreDatabase({ transaction, orders, reconciliation, accountId, readyGate, ownerGuard, telemetry = noop }) {
+  const [attempts, watermarks] = await transaction((tx) => Promise.all([orders.listNonTerminal(tx, accountId), orders.listWatermarks(tx, accountId)]));
+  const result = await reconciliation.reconcileAll({ accountId, attempts, watermarks });
+  if (!ownerGuard.isHeld()) {
+    readyGate.set("database", false);
+    throw new Error("DATABASE_RECOVERY_OWNER_LOST");
+  }
+  const wasReady = readyGate.snapshot?.().dependencies?.database === true;
+  readyGate.set("database", true);
+  if (!wasReady) {
+    try { Promise.resolve(telemetry({ type: "database_recovery", reason: "DATABASE_READY_RESTORED" })).catch(() => {}); } catch { /* telemetry cannot block recovery */ }
+  }
+  return result;
+}
+
 // Sole production composition root.  Every external concern is injectable for
 // tests, but no caller needs to pre-assemble a lifecycle in production.
 export async function composeProductionRuntime(env, injected = {}) {
@@ -193,8 +208,7 @@ export async function composeProductionRuntime(env, injected = {}) {
     if (!result.rows?.[0] || Object.values(result.rows[0]).some((value) => value === null || value === false)) throw new Error("POSTGRES_MIGRATIONS_MISSING");
   });
   const reconcile = async () => {
-    const [attempts, watermarks] = await transaction((tx) => Promise.all([orders.listNonTerminal(tx, config.accountId), orders.listWatermarks(tx, config.accountId)]));
-    return reconciliation.reconcileAll({ accountId: config.accountId, attempts, watermarks });
+    return reconcileAndRestoreDatabase({ transaction, orders, reconciliation, accountId: config.accountId, readyGate, ownerGuard, telemetry });
   };
   const baseline = injected.baseline ?? (() => runRestBaseline({ rest, instIds, market, account, readyGate, clock: runtime.clock, executionRoutes, quoteCurrencies }));
   const recurring = injected.recurring ?? new EngineRecurringWork({ timers: injected.timers ?? globalThis, telemetry,

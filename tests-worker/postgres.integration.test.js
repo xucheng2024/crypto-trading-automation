@@ -216,6 +216,16 @@ test("temporary PostgreSQL enforces P1-B invariants", { timeout: 60_000 }, async
       assert.equal(second.rowCount, 1); assert.equal(second.rows[0].protection_price, "94.715"); assert.equal(BigInt(second.rows[0].version), 3n);
     });
 
+    await t.test("loss-making sell window can be deferred only once", async () => {
+      const originalSellTime = 3_601_000;
+      await tx(db.admin, (client) => state.insertFill(client, { accountId: "defer-once", instId: "BTC-USDT", baseCcy: "BTC", tradeId: "defer-once-buy", source: "SYSTEM", side: "BUY", fillSize: "1", fillTime: 1_000, fillPrice: "100", holdHours: "1", strategyConfigHash: "cfg", sellTime: originalSellTime, sellState: "WAITING", protectionPrice: "90" }));
+      const first = await tx(db.admin, (client) => state.deferSellWindow(client, { accountId: "defer-once", instId: "BTC-USDT", tradeId: "defer-once-buy", version: 1, sellTime: originalSellTime + 86_400_000, bidPx: "89" }));
+      assert.equal(first.rowCount, 1);
+      const second = await tx(db.admin, (client) => state.deferSellWindow(client, { accountId: "defer-once", instId: "BTC-USDT", tradeId: "defer-once-buy", version: first.rows[0].version, sellTime: originalSellTime + 2 * 86_400_000, bidPx: "89" }));
+      assert.equal(second.rowCount, 0);
+      assert.equal((await db.admin.query("SELECT sell_time FROM filled_orders WHERE account_id='defer-once'")).rows[0].sell_time, String(originalSellTime + 86_400_000));
+    });
+
     await t.test("take-profit trigger atomically preserves a protection ratchet that advanced after observation", async () => {
       await tx(db.admin, (client) => state.insertFill(client, { accountId: "take-profit", instId: "BTC-USDT", baseCcy: "BTC", tradeId: "take-profit-buy", source: "SYSTEM", side: "BUY", fillSize: "1", fillTime: 1, fillPrice: "100", holdHours: "24", strategyConfigHash: "cfg", sellTime: 2, sellState: "WAITING", protectionPrice: "90" }));
       const ratcheted = await tx(db.admin, (client) => state.raiseProtection(client, { accountId: "take-profit", instId: "BTC-USDT", tradeId: "take-profit-buy", version: 1, protectionPrice: "95" }));

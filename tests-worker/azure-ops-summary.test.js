@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { appInsightsQueryArgs, assessCollection, assessRuntime, boundedTelemetryRows, classifyBlock, classifyDecision, classifySevereTraces, countCsvInstruments, formatDecisionTelemetryLine, formatInstrumentTimelineSummary, formatPipelineCoverageLine, formatPositionsSummary, formatSevereDiagnostic, instrumentTimelineReadJobName, parseArgs, parseInstrumentTimelineLog, parseManagedPositionsLog, parsePipelineCoverageRow, parseStrategyBaseline, positionsReadJobName, queryRows, redactOperationalError, redactPositionsArtifact, runInstrumentTimelineCommand, runPositionsCommand, settleQueryResults, strategyBaselineQuery, summarizeBlockAggregates, summarizeDecisions, summarizeDeployment, summarizeFailedWorkflowLogs, summarizeRunner, summarizeTrading, telemetryWindow, traceEvents } from "../scripts/azure-ops-summary.mjs";
+import { appInsightsQueryArgs, assessCollection, assessRuntime, boundedTelemetryRows, classifyBlock, classifyDecision, classifySevereTraces, countCsvInstruments, formatDecisionTelemetryLine, formatInstrumentTimelineSummary, formatPipelineCoverageLine, formatPositionsSummary, formatSevereDiagnostic, instrumentTimelineReadJobName, parseArgs, parseInstrumentTimelineLog, parseManagedPositionsLog, parsePipelineCoverageRow, parseStrategyBaseline, positionsReadJobName, queryRows, redactOperationalError, redactPositionsArtifact, runInstrumentTimelineCommand, runPositionsCommand, runtimeMetricQuery, settleQueryResults, strategyBaselineQuery, summarizeBlockAggregates, summarizeDecisions, summarizeDeployment, summarizeFailedWorkflowLogs, summarizeRunner, summarizeTrading, telemetryWindow, traceEvents } from "../scripts/azure-ops-summary.mjs";
 
 test("Azure ops summary converts query tables and aggregates decisions", () => {
   assert.deepEqual(queryRows({ tables: [{ columns: [{ name: "reason" }, { name: "decisions" }], rows: [["WAIT", 2]] }] }), [{ reason: "WAIT", decisions: 2 }]);
@@ -293,13 +293,20 @@ test("Azure ops summary attributes strategy baselines to the current revision an
   assert.equal(strategyBaselineQuery("engine--full'o").includes("'engine--full''o'"), true);
 });
 
+test("Azure ops summary attributes runtime readiness to the active revision", () => {
+  const query = runtimeMetricQuery("engine--full-new", "timestamp > ago(5m)");
+  assert.match(query, /message == 'metric_snapshot RUNTIME_METRICS'/);
+  assert.match(query, /cloud_RoleInstance == 'engine--full-new' or cloud_RoleInstance startswith 'engine--full-new-'/);
+  assert.match(query, /exitReady=toint\(customDimensions\.exit_ready\)/);
+});
+
 test("Azure ops summary fails closed on unsafe runtime state", () => {
   const container = { image: "registry/engine@sha256:abc", env: [{ name: "TRADING_MODE", value: "FULL" }] };
   const base = {
     app: { properties: { provisioningState: "Succeeded", runningStatus: "Running" } },
     active: [{ properties: { healthState: "Healthy", runningState: "RunningAtMaxScale", template: { containers: [container] } } }],
     replicas: [{ properties: { containers: [{ ready: true, runningState: "Running", restartCount: 0 }] } }],
-    traffic: [{ weight: 100 }], metric: { ready: 1 }, expectedMode: "FULL",
+    traffic: [{ weight: 100 }], metric: { ready: 1, exitReady: 1, exitBacklog: 0 }, expectedMode: "FULL",
   };
   assert.deepEqual(assessRuntime(base), {
     healthy: true,
@@ -308,7 +315,7 @@ test("Azure ops summary fails closed on unsafe runtime state", () => {
     checks: {
       provisioned: true, running: true, singleActiveRevision: true, revisionHealthy: true,
       immutableImage: true, expectedMode: true, traffic: true, replicasReady: true,
-      telemetryReady: true,
+      telemetryReady: true, exitReady: true, exitBacklogClear: true,
     },
   });
   const restarted = assessRuntime({
@@ -319,5 +326,7 @@ test("Azure ops summary fails closed on unsafe runtime state", () => {
   assert.equal(restarted.status, "HEALTHY_WITH_WARNINGS");
   assert.deepEqual(restarted.warnings, ["HISTORICAL_RESTARTS_PRESENT"]);
   assert.equal(assessRuntime({ ...base, metric: { ready: 0 } }).status, "UNHEALTHY");
+  assert.equal(assessRuntime({ ...base, metric: { ready: 1, exitReady: 0, exitBacklog: 0 } }).status, "UNHEALTHY");
+  assert.equal(assessRuntime({ ...base, metric: { ready: 1, exitReady: 1, exitBacklog: 1 } }).status, "UNHEALTHY");
   assert.equal(assessRuntime({ ...base, active: [...base.active, base.active[0]] }).status, "UNHEALTHY");
 });

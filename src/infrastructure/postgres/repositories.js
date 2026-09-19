@@ -117,7 +117,8 @@ export class TradingStateRepository {
   async deferSellWindow(tx, { accountId, instId, tradeId, version, sellTime, bidPx }) {
     return tx.query(`UPDATE filled_orders SET sell_time=$5,version=version+1
       WHERE account_id=$1 AND inst_id=$2 AND trade_id=$3 AND side='BUY' AND version=$4
-      AND sell_state='WAITING' AND fill_price > $6::numeric RETURNING *`, [accountId, instId, tradeId, version, sellTime, bidPx]);
+      AND sell_state='WAITING' AND fill_price > $6::numeric
+      AND sell_time=fill_time+hold_hours*3600000 AND $5 > sell_time RETURNING *`, [accountId, instId, tradeId, version, sellTime, bidPx]);
   }
 
   async raiseProtection(tx, { accountId, instId, tradeId, version, protectionPrice }) {

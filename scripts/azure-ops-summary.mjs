@@ -115,6 +115,13 @@ export function strategyBaselineQuery(revisionName, timeFilter = "timestamp > ag
   return `traces | where ${timeFilter} | where message startswith 'strategy_baseline ' | where cloud_RoleInstance == ${revision} or cloud_RoleInstance startswith ${replicaPrefix} | top 1 by timestamp desc | project timestamp, status=tostring(customDimensions.reason), instruments=toint(customDimensions.instruments), strategyDay=tostring(customDimensions.strategyDay), instance=cloud_RoleInstance`;
 }
 
+export function runtimeMetricQuery(revisionName, timeFilter = "timestamp > ago(15m)") {
+  if (!revisionName) return null;
+  const revision = kustoString(revisionName);
+  const replicaPrefix = kustoString(`${revisionName}-`);
+  return `traces | where ${timeFilter} | where message == 'metric_snapshot RUNTIME_METRICS' | where cloud_RoleInstance == ${revision} or cloud_RoleInstance startswith ${replicaPrefix} | top 1 by timestamp desc | project timestamp, ready=toint(customDimensions.ready), exitReady=toint(customDimensions.exit_ready), readyOwner=toint(customDimensions.ready_owner), readyDatabase=toint(customDimensions.ready_database), readyPublic=toint(customDimensions.ready_public), readyPrivate=toint(customDimensions.ready_private), readyBusiness=toint(customDimensions.ready_business), readyAccount=toint(customDimensions.ready_account), readyInstruments=toint(customDimensions.ready_instruments), strategyReady=toint(customDimensions.strategy_ready), marketMissing=toint(customDimensions.market_missing_instruments), marketOldestAgeMs=tolong(customDimensions.market_oldest_age_ms), decisionMissing=toint(customDimensions.decision_missing_instruments), decisionOldestAgeMs=tolong(customDimensions.decision_oldest_age_ms), anchorDueUnprotected=toint(customDimensions.anchor_due_unprotected_current), eventCount=toint(customDimensions.event_enqueue_count), decisionCount=toint(customDimensions.decision_eval_count), eventP99=toint(customDimensions.event_enqueue_p99_ms), decisionP99=toint(customDimensions.decision_eval_p99_ms), sourceLagP99=toint(customDimensions.market_source_lag_p99_ms), queueDepth=toint(customDimensions.queue_depth_current), pendingBuy=toint(customDimensions.pending_buy_current), exitBacklog=toint(customDimensions.exit_backlog_current), exitBacklogOldestAgeMs=tolong(customDimensions.exit_backlog_oldest_age_ms), exitBacklogReasons=tostring(customDimensions.exit_backlog_reasons), exitBacklogInstruments=tostring(customDimensions.exit_backlog_instruments), tradingMode=tostring(customDimensions.tradingMode)`;
+}
+
 export function parseStrategyBaseline(row) {
   if (!row || !["STRATEGY_READY", "STRATEGY_BASELINE_FAILED"].includes(row.status)) return { status: "UNAVAILABLE" };
   return {
@@ -277,6 +284,8 @@ export function assessRuntime({ app, active, replicas, traffic, metric, expected
     traffic: trafficWeight === 100,
     replicasReady: containers.length > 0 && containers.every((container) => container.ready && container.runningState === "Running"),
     telemetryReady: Number(metric?.ready) === 1,
+    exitReady: Number(metric?.exitReady) === 1,
+    exitBacklogClear: Number(metric?.exitBacklog) === 0,
   };
   const healthy = Object.values(checks).every(Boolean);
   const warnings = restartCount === 0 ? [] : ["HISTORICAL_RESTARTS_PRESENT"];
@@ -895,7 +904,7 @@ export async function main(argv = process.argv.slice(2)) {
   const replicas = azJson(["containerapp", "replica", "list", "--resource-group", resourceGroup, "--name", appName, "--revision", revisionName]);
   const traffic = azJson(["containerapp", "ingress", "traffic", "show", "--resource-group", resourceGroup, "--name", appName]);
 
-  const metricQuery = `traces | where ${timeFilter} | where message == 'metric_snapshot RUNTIME_METRICS' | top 1 by timestamp desc | project timestamp, ready=toint(customDimensions.ready), exitReady=toint(customDimensions.exit_ready), readyOwner=toint(customDimensions.ready_owner), readyDatabase=toint(customDimensions.ready_database), readyPublic=toint(customDimensions.ready_public), readyPrivate=toint(customDimensions.ready_private), readyBusiness=toint(customDimensions.ready_business), readyAccount=toint(customDimensions.ready_account), readyInstruments=toint(customDimensions.ready_instruments), strategyReady=toint(customDimensions.strategy_ready), marketMissing=toint(customDimensions.market_missing_instruments), marketOldestAgeMs=tolong(customDimensions.market_oldest_age_ms), decisionMissing=toint(customDimensions.decision_missing_instruments), decisionOldestAgeMs=tolong(customDimensions.decision_oldest_age_ms), anchorDueUnprotected=toint(customDimensions.anchor_due_unprotected_current), eventCount=toint(customDimensions.event_enqueue_count), decisionCount=toint(customDimensions.decision_eval_count), eventP99=toint(customDimensions.event_enqueue_p99_ms), decisionP99=toint(customDimensions.decision_eval_p99_ms), sourceLagP99=toint(customDimensions.market_source_lag_p99_ms), queueDepth=toint(customDimensions.queue_depth_current), pendingBuy=toint(customDimensions.pending_buy_current), exitBacklog=toint(customDimensions.exit_backlog_current), exitBacklogOldestAgeMs=tolong(customDimensions.exit_backlog_oldest_age_ms), exitBacklogReasons=tostring(customDimensions.exit_backlog_reasons), exitBacklogInstruments=tostring(customDimensions.exit_backlog_instruments), tradingMode=tostring(customDimensions.tradingMode)`;
+  const metricQuery = runtimeMetricQuery(revision?.name, timeFilter);
   const decisionQuery = `traces | where ${timeFilter} | where message startswith 'trading_decision ' | project timestamp, message, customDimensions | order by timestamp desc | take 5001`;
   const decisionAggregateQuery = `traces | where ${timeFilter} | where message startswith 'trading_decision ' | summarize decisions=count(), latest=max(timestamp) by reason=tostring(customDimensions.reason), instId=tostring(customDimensions.instId)`;
   const currentDecisionQuery = `traces | where ${currentTimeFilter} | where message startswith 'trading_decision ' | extend instId=tostring(customDimensions.instId) | summarize arg_max(timestamp, customDimensions) by instId`;

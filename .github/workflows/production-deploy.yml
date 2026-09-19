@@ -153,6 +153,18 @@ jobs:
           handoff_args=(--resource-group "$RESOURCE_GROUP" --app "$CONTAINER_APP_NAME" --target-revision "$REVISION" --expect-mode OFF --execute)
           if [ "${{ inputs.emergency_handoff }}" = "true" ]; then handoff_args+=(--emergency); fi
           node scripts/production-revision-handoff.mjs "${handoff_args[@]}"
+      - name: Verify OFF trading readiness and exit clearance
+        shell: bash
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 24); do
+            if node scripts/azure-ops-summary.mjs snapshot --minutes 5 --resource-group "$RESOURCE_GROUP" --app "$CONTAINER_APP_NAME" --expect-mode OFF; then
+              exit 0
+            fi
+            if [ "$attempt" -lt 24 ]; then sleep 10; fi
+          done
+          echo "OFF runtime did not reach trading READY, exit READY, and zero exit backlog." >&2
+          exit 1
       - name: Update read-only jobs
         shell: bash
         env:
