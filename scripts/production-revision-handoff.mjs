@@ -76,14 +76,20 @@ export function createAzureClient({ resourceGroup, app }, exec = execFileSync, s
   };
 }
 
-function revisionReady(revision, replicas) {
+function revisionServing(revision, replicas) {
   const containers = replicas.flatMap((replica) => replica.containers ?? []);
   return revision.active === true
     && revision.healthState === "Healthy"
     && revision.runningState === "RunningAtMaxScale"
     && replicas.length === 1
     && containers.length > 0
-    && containers.every((container) => container.ready === true && container.runningState === "Running" && Number(container.restartCount ?? 0) === 0);
+    && containers.every((container) => container.ready === true && container.runningState === "Running");
+}
+
+function revisionReady(revision, replicas) {
+  const containers = replicas.flatMap((replica) => replica.containers ?? []);
+  return revisionServing(revision, replicas)
+    && containers.every((container) => Number(container.restartCount ?? 0) === 0);
 }
 
 async function waitFor(label, check, { timeoutMs, pollMs, sleep, now, log }) {
@@ -184,7 +190,7 @@ export async function handoffRevision(options, dependencies = {}) {
   const source = sources[0] ?? null;
   if (source && !options.emergency) {
     const sourceReplicas = await client.replicas(source.name);
-    if (!revisionReady({ ...source, active: true }, sourceReplicas)) throw new Error(`SOURCE_NOT_HEALTHY ${source.name}`);
+    if (!revisionServing({ ...source, active: true }, sourceReplicas)) throw new Error(`SOURCE_NOT_HEALTHY ${source.name}`);
   }
 
   const plan = { targetRevision: options.targetRevision, sourceRevision: source?.name ?? null, sourceRevisions: sources.map((revision) => revision.name), expectedMode: options.expectedMode, revisionMode: app.revisionMode, emergency: options.emergency === true };

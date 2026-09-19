@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { appInsightsQueryArgs, assessCollection, assessRuntime, boundedTelemetryRows, classifyBlock, classifyDecision, classifySevereTraces, countCsvInstruments, formatDecisionTelemetryLine, formatInstrumentTimelineSummary, formatPipelineCoverageLine, formatPositionsSummary, formatSevereDiagnostic, instrumentTimelineReadJobName, parseArgs, parseInstrumentTimelineLog, parseManagedPositionsLog, parsePipelineCoverageRow, parseStrategyBaseline, positionsReadJobName, queryRows, redactOperationalError, redactPositionsArtifact, runInstrumentTimelineCommand, runPositionsCommand, runtimeMetricQuery, settleQueryResults, strategyBaselineQuery, summarizeBlockAggregates, summarizeDecisions, summarizeDeployment, summarizeFailedWorkflowLogs, summarizeRunner, summarizeTrading, telemetryWindow, traceEvents } from "../scripts/azure-ops-summary.mjs";
+import { appInsightsQueryArgs, assessCollection, assessRuntime, blockAggregateQuery, boundedTelemetryRows, classifyBlock, classifyDecision, classifySevereTraces, countCsvInstruments, formatDecisionTelemetryLine, formatInstrumentTimelineSummary, formatPipelineCoverageLine, formatPositionsSummary, formatSevereDiagnostic, instrumentTimelineReadJobName, parseArgs, parseInstrumentTimelineLog, parseManagedPositionsLog, parsePipelineCoverageRow, parseStrategyBaseline, positionsReadJobName, productionWorkflowKind, queryRows, redactOperationalError, redactPositionsArtifact, runInstrumentTimelineCommand, runPositionsCommand, runtimeMetricQuery, settleQueryResults, strategyBaselineQuery, summarizeBlockAggregates, summarizeDecisions, summarizeDeployment, summarizeFailedWorkflowLogs, summarizeRunner, summarizeTrading, telemetryWindow, traceEvents } from "../scripts/azure-ops-summary.mjs";
 
 test("Azure ops summary converts query tables and aggregates decisions", () => {
   assert.deepEqual(queryRows({ tables: [{ columns: [{ name: "reason" }, { name: "decisions" }], rows: [["WAIT", 2]] }] }), [{ reason: "WAIT", decisions: 2 }]);
@@ -29,6 +29,16 @@ test("Azure ops summary fixes one API window and keeps aggregate totals outside 
     blockClasses: { LIKELY_RECOVERABLE: 12, MARKET_MOVED: 0, SAFETY_BOUNDARY: 0 },
     blockStages: { PLANNER: 7, AVAILABILITY: 5 },
   });
+});
+
+test("Azure ops summary uses valid aggregate aliases and accepts every production workflow", () => {
+  const query = blockAggregateQuery("timestamp > ago(15m)");
+  assert.match(query, /firstSeen=min\(timestamp\), latestSeen=max\(timestamp\)/);
+  assert.doesNotMatch(query, /\bfirst=|\blatest=/);
+  assert.equal(productionWorkflowKind({ name: "Production deploy" }), "DEPLOY_OFF");
+  assert.equal(productionWorkflowKind({ path: ".github/workflows/production-promote-full.yml" }), "PROMOTE_FULL");
+  assert.equal(productionWorkflowKind({ name: "Production recover OFF" }), "RECOVER_OFF");
+  assert.equal(productionWorkflowKind({ name: "CI" }), null);
 });
 
 test("Azure ops summary marks failed report collection incomplete without treating it as empty telemetry", async () => {

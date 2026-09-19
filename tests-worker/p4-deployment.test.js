@@ -110,6 +110,7 @@ test("P4 production deployment ends at OFF while FULL promotion and OFF recovery
   assert.match(promotion, /node scripts\/production-revision-handoff\.mjs[\s\S]*--expect-mode FULL --execute/);
   assert.match(workflow, /Verify OFF trading readiness and exit clearance[\s\S]*azure-ops-summary\.mjs snapshot[\s\S]*--expect-mode OFF/);
   assert.match(promotion, /Verify FULL trading readiness and exit clearance[\s\S]*azure-ops-summary\.mjs snapshot[\s\S]*--expect-mode FULL/);
+  assert.match(promotion, /FULL runtime did not reach[\s\S]*--target-revision "\$OFF_REVISION" --expect-mode OFF --execute --emergency[\s\S]*--expect-mode OFF/);
   assert.match(recovery, /name: Production recover OFF/);
   assert.match(recovery, /Known-good immutable engine image/);
   assert.match(recovery, /@sha256:\[a-f0-9\]\{64\}/);
@@ -117,14 +118,14 @@ test("P4 production deployment ends at OFF while FULL promotion and OFF recovery
   assert.doesNotMatch(`${workflow}\n${promotion}\n${recovery}`, /for old in \$\(az containerapp revision list/);
 });
 
-function handoffFixture({ targetFailure = false, revisionMode = "Single", sourceHealthy = true, extraSource = false } = {}) {
+function handoffFixture({ targetFailure = false, revisionMode = "Single", sourceHealthy = true, sourceRestarts = 0, extraSource = false } = {}) {
   const revisions = new Map([
     ["old", { name: "old", active: true, healthState: sourceHealthy ? "Healthy" : "Unhealthy", runningState: sourceHealthy ? "RunningAtMaxScale" : "Activating", image: "registry/engine@sha256:old", mode: "OFF" }],
     ["next", { name: "next", active: true, healthState: "Unhealthy", runningState: "Activating", image: "registry/engine@sha256:new", mode: "FULL" }],
     ...(extraSource ? [["older", { name: "older", active: true, healthState: "Unhealthy", runningState: "Activating", image: "registry/engine@sha256:older", mode: "OFF" }]] : []),
   ]);
   const replicas = new Map([
-    ["old", [{ containers: [{ ready: true, restartCount: 0, runningState: "Running" }] }]],
+    ["old", [{ containers: [{ ready: true, restartCount: sourceRestarts, runningState: "Running" }] }]],
     ["next", [{ containers: [{ ready: false, restartCount: 2, runningState: "Waiting" }] }]],
     ...(extraSource ? [["older", []]] : []),
   ]);
@@ -208,6 +209,12 @@ test("P4 revision handoff requires an explicit emergency flag for an unhealthy s
   await assert.rejects(handoffRevision(options, { client: fixture.client, sleep: async () => {} }), /SOURCE_NOT_HEALTHY/);
   assert.deepEqual(fixture.calls, []);
   assert.equal((await handoffRevision({ ...options, emergency: true }, { client: fixture.client, sleep: async () => {} })).status, "COMPLETE");
+});
+
+test("P4 revision handoff treats historical source restarts as a warning", async () => {
+  const fixture = handoffFixture({ sourceRestarts: 4 });
+  const result = await handoffRevision({ targetRevision: "next", expectedMode: "FULL", execute: true, timeoutMs: 10, pollMs: 1 }, { client: fixture.client, sleep: async () => {} });
+  assert.equal(result.status, "COMPLETE");
 });
 
 test("P4 emergency handoff clears every legacy source before verifying one target", async () => {

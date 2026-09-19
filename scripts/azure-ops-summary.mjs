@@ -122,6 +122,18 @@ export function runtimeMetricQuery(revisionName, timeFilter = "timestamp > ago(1
   return `traces | where ${timeFilter} | where message == 'metric_snapshot RUNTIME_METRICS' | where cloud_RoleInstance == ${revision} or cloud_RoleInstance startswith ${replicaPrefix} | top 1 by timestamp desc | project timestamp, ready=toint(customDimensions.ready), exitReady=toint(customDimensions.exit_ready), readyOwner=toint(customDimensions.ready_owner), readyDatabase=toint(customDimensions.ready_database), readyPublic=toint(customDimensions.ready_public), readyPrivate=toint(customDimensions.ready_private), readyBusiness=toint(customDimensions.ready_business), readyAccount=toint(customDimensions.ready_account), readyInstruments=toint(customDimensions.ready_instruments), strategyReady=toint(customDimensions.strategy_ready), marketMissing=toint(customDimensions.market_missing_instruments), marketOldestAgeMs=tolong(customDimensions.market_oldest_age_ms), decisionMissing=toint(customDimensions.decision_missing_instruments), decisionOldestAgeMs=tolong(customDimensions.decision_oldest_age_ms), anchorDueUnprotected=toint(customDimensions.anchor_due_unprotected_current), eventCount=toint(customDimensions.event_enqueue_count), decisionCount=toint(customDimensions.decision_eval_count), eventP99=toint(customDimensions.event_enqueue_p99_ms), decisionP99=toint(customDimensions.decision_eval_p99_ms), sourceLagP99=toint(customDimensions.market_source_lag_p99_ms), queueDepth=toint(customDimensions.queue_depth_current), pendingBuy=toint(customDimensions.pending_buy_current), exitBacklog=toint(customDimensions.exit_backlog_current), exitBacklogOldestAgeMs=tolong(customDimensions.exit_backlog_oldest_age_ms), exitBacklogReasons=tostring(customDimensions.exit_backlog_reasons), exitBacklogInstruments=tostring(customDimensions.exit_backlog_instruments), tradingMode=tostring(customDimensions.tradingMode)`;
 }
 
+export function blockAggregateQuery(timeFilter) {
+  return `traces | where ${timeFilter} | where message startswith 'block_evidence ' | summarize eventCount=count(), instruments=dcount(tostring(customDimensions.instId)), firstSeen=min(timestamp), latestSeen=max(timestamp) by reason=tostring(customDimensions.reason), stage=tostring(customDimensions.stage)`;
+}
+
+export function productionWorkflowKind(runInfo) {
+  const path = String(runInfo?.path ?? "");
+  if (runInfo?.name === "Production deploy" || path.endsWith("/production-deploy.yml")) return "DEPLOY_OFF";
+  if (runInfo?.name === "Production promote FULL" || path.endsWith("/production-promote-full.yml")) return "PROMOTE_FULL";
+  if (runInfo?.name === "Production recover OFF" || path.endsWith("/production-recover-off.yml")) return "RECOVER_OFF";
+  return null;
+}
+
 export function parseStrategyBaseline(row) {
   if (!row || !["STRATEGY_READY", "STRATEGY_BASELINE_FAILED"].includes(row.status)) return { status: "UNAVAILABLE" };
   return {
@@ -827,14 +839,15 @@ async function runInfrastructureCommand(options, resourceGroup, appName) {
   const latest = runJson("gh", ["api", `repos/${repository}/actions/workflows/production-deploy.yml/runs?event=workflow_dispatch&per_page=1`])?.workflow_runs?.[0];
   const runInfo = options.runId ? runJson("gh", ["api", `repos/${repository}/actions/runs/${options.runId}`]) : latest;
   if (!runInfo) throw new Error("No production deployment run found");
-  if (runInfo.name !== "Production deploy" && !String(runInfo.path ?? "").endsWith("/production-deploy.yml")) throw new Error(`Run ${runInfo.id} is not a production deployment`);
+  const workflowKind = productionWorkflowKind(runInfo);
+  if (!workflowKind) throw new Error(`Run ${runInfo.id} is not a production deployment workflow`);
   const jobs = runJson("gh", ["api", `repos/${repository}/actions/runs/${runInfo.id}/jobs?per_page=100`])?.jobs ?? [];
   const pending = runInfo.status === "completed" ? [] : runJson("gh", ["api", `repos/${repository}/actions/runs/${runInfo.id}/pending_deployments`]) ?? [];
   const deployment = summarizeDeployment(runInfo, jobs, pending);
   let runtime;
   try { runtime = collectProductionRuntime(resourceGroup, appName); }
   catch (error) { runtime = { healthy: false, error: error.message, revision: null, mode: null, image: null, trafficWeight: 0, replicas: 0, readyContainers: 0, restarts: 0 }; }
-  const summary = { command: "deploy", healthy: deployment.healthy && runtime.healthy && runner.healthy, target: { resourceGroup, app: appName, repository }, deployment, runtime, runner };
+  const summary = { command: "deploy", workflowKind, healthy: deployment.healthy && runtime.healthy && runner.healthy, target: { resourceGroup, app: appName, repository }, deployment, runtime, runner };
   if (options.details && deployment.state === "FAILED") {
     try { summary.failedLogSummary = failedLogExcerpt(repository, runInfo.id); }
     catch (error) { summary.failedLogSummary = [`LOG_QUERY_${redactOperationalError(error.message) ?? "UNAVAILABLE"}`]; }
@@ -911,7 +924,7 @@ export async function main(argv = process.argv.slice(2)) {
   const lifecycleQuery = `traces | where ${timeFilter} | where message startswith 'order_lifecycle BUY_' or message startswith 'trade_lifecycle BUY_' | project timestamp, message, customDimensions | order by timestamp desc | take 1000`;
   const observabilityQuery = `traces | where ${timeFilter} | where message startswith 'fill_reconciliation FILL_BATCH_COMMITTED' or message startswith 'sell_watch_loaded SELL_WATCH_SNAPSHOT' or message startswith 'account_sell ' | project timestamp, message, customDimensions | order by timestamp desc | take 1000`;
   const blockQuery = `traces | where ${timeFilter} | where message startswith 'block_evidence ' | project timestamp, message, customDimensions | order by timestamp desc | take 5001`;
-  const blockAggregateQuery = `traces | where ${timeFilter} | where message startswith 'block_evidence ' | summarize eventCount=count(), instruments=dcount(tostring(customDimensions.instId)), first=min(timestamp), latest=max(timestamp) by reason=tostring(customDimensions.reason), stage=tostring(customDimensions.stage)`;
+  const blockAggregate = blockAggregateQuery(timeFilter);
   const errorQuery = `traces | where ${timeFilter} | where severityLevel >= 3 | project timestamp, message, cloudRoleInstance=cloud_RoleInstance, tradingMode=tostring(customDimensions.tradingMode), error=tostring(customDimensions.error), failureClass=tostring(customDimensions.failureClass), endpoint=tostring(customDimensions.endpoint), httpStatus=tostring(customDimensions.httpStatus), okxCode=tostring(customDimensions.okxCode), okxMessageClass=tostring(customDimensions.okxMessageClass), okxSummary=tostring(customDimensions.okxSummary), responseClass=tostring(customDimensions.responseClass), durationMs=toint(customDimensions.durationMs), attempts=toint(customDimensions.attempts) | order by timestamp desc | take 10`;
   const baselineQuery = strategyBaselineQuery(revision?.name, baselineTimeFilter);
   const pipelineQuery = `traces | where ${currentTimeFilter} | where message startswith 'instrument_pipeline_coverage ' | top 1 by timestamp desc | project timestamp, runtime=toint(customDimensions.runtime), quote_ready=toint(customDimensions.quote_ready), candle_ready=toint(customDimensions.candle_ready), strategy_row=toint(customDimensions.strategy_row), daily_state=toint(customDimensions.daily_state), evaluator_seen=toint(customDimensions.evaluator_seen), decision_emit=toint(customDimensions.decision_emit), no_market_data=toint(customDimensions.no_market_data), candle_not_initialized=toint(customDimensions.candle_not_initialized), no_strategy_row=toint(customDimensions.no_strategy_row), strategy_state_never_created=toint(customDimensions.strategy_state_never_created), filtered_before_evaluator=toint(customDimensions.filtered_before_evaluator), unknown=toint(customDimensions.unknown)`;
@@ -929,7 +942,7 @@ export async function main(argv = process.argv.slice(2)) {
     query("lifecycle", needLifecycle ? appInsightsQuery(resourceGroup, appInsights, lifecycleQuery, { timeoutMs: queryTimeoutMs, window: userWindow }) : Promise.resolve([])),
     query("observability", needLifecycle ? appInsightsQuery(resourceGroup, appInsights, observabilityQuery, { timeoutMs: queryTimeoutMs, window: userWindow }) : Promise.resolve([])),
     query("block", needDecisions ? appInsightsQuery(resourceGroup, appInsights, blockQuery, { timeoutMs: queryTimeoutMs, window: userWindow }) : Promise.resolve([])),
-    query("blockAggregate", needDecisions ? appInsightsQuery(resourceGroup, appInsights, blockAggregateQuery, { timeoutMs: queryTimeoutMs, window: userWindow }) : Promise.resolve([])),
+    query("blockAggregate", needDecisions ? appInsightsQuery(resourceGroup, appInsights, blockAggregate, { timeoutMs: queryTimeoutMs, window: userWindow }) : Promise.resolve([])),
     query("error", needErrors ? appInsightsQuery(resourceGroup, appInsights, errorQuery, { timeoutMs: queryTimeoutMs, window: userWindow }) : Promise.resolve([])),
     query("baseline", needDecisions && baselineQuery ? appInsightsQuery(resourceGroup, appInsights, baselineQuery, { timeoutMs: queryTimeoutMs, window: baselineWindow }) : Promise.resolve([])),
     query("pipeline", needDecisions ? appInsightsQuery(resourceGroup, appInsights, pipelineQuery, { timeoutMs: queryTimeoutMs, window: currentWindow }) : Promise.resolve([])),
