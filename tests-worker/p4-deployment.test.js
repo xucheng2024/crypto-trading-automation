@@ -370,6 +370,27 @@ test("P5 telemetry sends only important structured traces and strips secrets", a
   await telemetry.flush(); await telemetry.shutdown(); assert.equal(flushed, 1); assert.equal(stopped, 1);
 });
 
+test("P5 telemetry bounds repeated waiting states without hiding transitions", () => {
+  const traces = []; let now = 1_000;
+  const client = { config: {}, commonProperties: {}, trackTrace: (trace) => traces.push(trace) };
+  const telemetry = createApplicationInsightsTelemetry({ client, now: () => now, repeatWindowMs: 900_000 });
+  telemetry({ type: "trading_decision", reason: "PRICE_OUTSIDE", instId: "BTC-USDT" });
+  telemetry({ type: "trading_decision", reason: "PRICE_OUTSIDE", instId: "BTC-USDT" });
+  telemetry({ type: "trading_decision", reason: "PRICE_OUTSIDE", instId: "ETH-USDT" });
+  telemetry({ type: "trading_decision", reason: "READY", instId: "BTC-USDT" });
+  telemetry({ type: "trading_decision", reason: "PRICE_OUTSIDE", instId: "BTC-USDT" });
+  telemetry({ type: "sell_protection", reason: "SELL_QUOTE_STALE", instId: "BTC-USDT" });
+  telemetry({ type: "sell_protection", reason: "SELL_QUOTE_STALE", instId: "BTC-USDT" });
+  telemetry({ type: "sell_protection", reason: "SELL_PROTECTION_MISSING", instId: "BTC-USDT" });
+  telemetry({ type: "sell_protection", reason: "SELL_QUOTE_STALE", instId: "BTC-USDT" });
+  now += 900_000;
+  telemetry({ type: "trading_decision", reason: "PRICE_OUTSIDE", instId: "BTC-USDT" });
+  assert.deepEqual(traces.map((trace) => trace.message), [
+    "trading_decision PRICE_OUTSIDE", "trading_decision PRICE_OUTSIDE", "trading_decision READY", "trading_decision PRICE_OUTSIDE",
+    "sell_protection SELL_QUOTE_STALE", "sell_protection SELL_PROTECTION_MISSING", "sell_protection SELL_QUOTE_STALE", "trading_decision PRICE_OUTSIDE",
+  ]);
+});
+
 test("P4 maintenance composition replays safely with fake management ports", async () => {
   const calls = []; const tx = { query: async () => ({ rowCount: 0 }) };
   const result = await runMaintenanceCycle({ tx, announcements: async () => ({ ok: true }), reconcile: async () => ({ ok: true }), management: { postgresCapacity: async () => ({ ok: true }), natIp: async () => ({ ok: true }) }, retentionBefore: new Date(0), telemetry: (x) => calls.push(x) });

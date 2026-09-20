@@ -2,6 +2,9 @@ import appInsights from "applicationinsights";
 
 const SECRET_KEY = /(secret|password|token|passphrase|api.?key|connection)/i;
 const IMPORTANT = /(FAILED|ERROR|UNKNOWN|LOST|HALT|DEGRADED|SHORTFALL|STALE|BLOCKED|DEFERRED|EXITING|SUBMITTED|RECOVER|READY_FALSE|UNAVAILABLE)/;
+const REPEAT_WINDOW_MS = 15 * 60_000;
+const REPEATED_DECISIONS = new Set(["PRICE_OUTSIDE", "QUOTE_STALE", "BREAKOUT_NOT_CONFIRMED", "CANDLE_PENDING", "ASK_ABOVE_LIMIT"]);
+const REPEATED_PROTECTION = new Set(["SELL_QUOTE_STALE", "SELL_CANDLE_PENDING", "SELL_CANDLE_STALE"]);
 
 function safeProperties(event) {
   const properties = {};
@@ -25,6 +28,13 @@ export function isImportantTelemetry(event) {
   return IMPORTANT.test([event.reason, event.outcome, ...(event.reasons ?? [])].filter(Boolean).join(" "));
 }
 
+function repeatedState(event) {
+  const reason = String(event?.reason ?? "");
+  const repeated = event?.type === "trading_decision" ? REPEATED_DECISIONS.has(reason) : event?.type === "sell_protection" ? REPEATED_PROTECTION.has(reason) : false;
+  if (!["trading_decision", "sell_protection"].includes(event?.type)) return null;
+  return { key: `${event.type}:${event.instId ?? "global"}`, signature: reason, repeated };
+}
+
 export function createApplicationInsightsTelemetry({
   connectionString,
   serviceName = "trading-engine",
@@ -33,16 +43,28 @@ export function createApplicationInsightsTelemetry({
   Client = appInsights.TelemetryClient,
   client,
   fallback = (event) => console.error(JSON.stringify(event)),
+  now = () => Date.now(),
+  repeatWindowMs = REPEAT_WINDOW_MS,
 } = {}) {
+  if (!Number.isSafeInteger(repeatWindowMs) || repeatWindowMs < 0) throw new TypeError("repeatWindowMs must be a non-negative safe integer");
   const telemetryClient = client ?? (connectionString ? new Client(connectionString, { useGlobalProviders: false }) : null);
   if (telemetryClient) {
     telemetryClient.config.samplingPercentage = 100;
     Object.assign(telemetryClient.commonProperties, { service: serviceName, environment, tradingMode });
   }
+  const lastRepeated = new Map();
   const telemetry = (event) => {
     if (!isImportantTelemetry(event)) return;
     try {
       if (!telemetryClient) return fallback(event);
+      const state = repeatedState(event);
+      if (state) {
+        const timestamp = now(); const previous = lastRepeated.get(state.key);
+        if (state.repeated && previous?.signature === state.signature && timestamp - previous.at < repeatWindowMs) return;
+        if (state.repeated) lastRepeated.set(state.key, { signature: state.signature, at: timestamp });
+        else lastRepeated.delete(state.key);
+        if (lastRepeated.size > 4096) for (const [key, value] of lastRepeated) if (timestamp - value.at >= repeatWindowMs) lastRepeated.delete(key);
+      }
       const message = messageFor(event);
       const severe = Boolean(event.error) || /(FAILED|ERROR|UNKNOWN|LOST|HALT|SHORTFALL)/.test(message);
       telemetryClient.trackTrace({ message, severity: severe ? 3 : 2, properties: safeProperties(event) });
