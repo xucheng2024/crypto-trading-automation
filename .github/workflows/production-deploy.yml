@@ -134,6 +134,19 @@ jobs:
           client-id: ${{ secrets.AZURE_DEPLOY_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      - name: Restore Application Insights telemetry binding
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "$CONTAINER_APP_NAME" in
+            *-cae-engine) app_insights_name="${CONTAINER_APP_NAME%-cae-engine}-ai" ;;
+            *) echo "Cannot derive Application Insights name from $CONTAINER_APP_NAME" >&2; exit 1 ;;
+          esac
+          connection_string="$(az monitor app-insights component show --resource-group "$RESOURCE_GROUP" --app "$app_insights_name" --query connectionString --output tsv)"
+          [ -n "$connection_string" ] || { echo "Application Insights connection string is unavailable." >&2; exit 1; }
+          echo "::add-mask::$connection_string"
+          az containerapp secret set --name "$CONTAINER_APP_NAME" --resource-group "$RESOURCE_GROUP" --secrets appinsights-connection-string="$connection_string" --output none
+          unset connection_string
       - id: create_revision
         name: Create OFF revision
         shell: bash
@@ -142,7 +155,7 @@ jobs:
         run: |
           set -euo pipefail
           suffix="off-${GITHUB_SHA:0:7}-${GITHUB_RUN_NUMBER}"
-          revision="$(az containerapp update --name "$CONTAINER_APP_NAME" --resource-group "$RESOURCE_GROUP" --image "$IMAGE" --set-env-vars TRADING_MODE=OFF --revision-suffix "$suffix" --query properties.latestRevisionName --output tsv)"
+          revision="$(az containerapp update --name "$CONTAINER_APP_NAME" --resource-group "$RESOURCE_GROUP" --image "$IMAGE" --set-env-vars TRADING_MODE=OFF APPLICATIONINSIGHTS_CONNECTION_STRING=secretref:appinsights-connection-string --revision-suffix "$suffix" --query properties.latestRevisionName --output tsv)"
           echo "revision=$revision" >> "$GITHUB_OUTPUT"
       - name: Safely hand off and verify the OFF revision
         shell: bash

@@ -100,6 +100,11 @@ test("P4 production deployment ends at OFF while FULL promotion and OFF recovery
   assert.doesNotMatch(workflow, /Require this run's image build before applying SQL|select\(\.name == "build"\) \| \.conclusion/);
   assert.doesNotMatch(workflow, /api\.ipify|firewall-rule (create|delete)|github-migration-/);
   assert.match(workflow, /name: Create OFF revision/);
+  assert.match(workflow, /name: Restore Application Insights telemetry binding/);
+  assert.match(workflow, /az monitor app-insights component show[\s\S]*--query connectionString/);
+  assert.match(workflow, /az containerapp secret set[\s\S]*appinsights-connection-string="\$connection_string"/);
+  assert.match(workflow, /APPLICATIONINSIGHTS_CONNECTION_STRING=secretref:appinsights-connection-string/);
+  assert.ok(workflow.indexOf("name: Restore Application Insights telemetry binding") < workflow.indexOf("name: Create OFF revision"));
   assert.match(workflow, /name: Safely hand off and verify the OFF revision/);
   assert.match(workflow, /name: Update read-only jobs/);
   assert.doesNotMatch(workflow, /  promote_full:/);
