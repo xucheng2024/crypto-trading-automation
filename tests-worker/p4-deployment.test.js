@@ -186,6 +186,22 @@ test("P4 revision handoff stops lock contenders before starting one healthy targ
   assert.ok(logs.every((line) => line.startsWith("handoff_snapshot ")));
 });
 
+test("P4 handoff waits through a stale final readiness read", async () => {
+  const fixture = handoffFixture(); const logs = [];
+  const activate = fixture.client.activate; const replicas = fixture.client.replicas;
+  let activated = false; let reads = 0;
+  fixture.client.activate = async (name) => { await activate(name); if (name === "next") activated = true; };
+  fixture.client.replicas = async (name) => {
+    const rows = await replicas(name);
+    if (name === "next" && activated && ++reads === 3) rows[0].containers[0].ready = false;
+    return rows;
+  };
+  const result = await handoffRevision({ targetRevision: "next", expectedMode: "FULL", execute: true, timeoutMs: 1_000, pollMs: 1 }, { client: fixture.client, sleep: async () => {}, log: (line) => logs.push(line) });
+  assert.equal(result.status, "COMPLETE");
+  assert.ok(logs.some((line) => line.includes('final verification: {"appHealthy":true,"singleActiveTarget":true,"targetReady":false')));
+  assert.deepEqual(fixture.calls, ["deactivate:next", "deactivate:old", "activate:next"]);
+});
+
 test("P4 handoff retries transient Azure reads only and accepts confirmed idempotent deactivation", async () => {
   const delays = []; let reads = 0;
   const client = createAzureClient({ resourceGroup: "rg", app: "app" }, () => {

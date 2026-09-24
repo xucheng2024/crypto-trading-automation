@@ -133,7 +133,6 @@ async function verifyFinal(client, targetRevision, expectedMode, revisionMode) {
     expectedMode: target.mode === expectedMode,
     targetTraffic,
   };
-  if (!Object.values(checks).every(Boolean)) throw new Error(`FINAL_VERIFICATION_FAILED ${JSON.stringify(checks)}`);
   return checks;
 }
 
@@ -219,7 +218,10 @@ export async function handoffRevision(options, dependencies = {}) {
       await recordSnapshot("TARGET_READY_AFTER_START");
       if (app.revisionMode === "Multiple") await client.setTraffic(options.targetRevision);
     }
-    const checks = await verifyFinal(client, options.targetRevision, options.expectedMode, app.revisionMode);
+    const checks = await waitFor("final verification", async () => {
+      const checks = await verifyFinal(client, options.targetRevision, options.expectedMode, app.revisionMode);
+      return { done: Object.values(checks).every(Boolean), detail: JSON.stringify(checks), value: checks };
+    }, wait);
     await recordSnapshot("FINAL");
     return { status: "COMPLETE", plan, checks, snapshots };
   } catch (error) {
