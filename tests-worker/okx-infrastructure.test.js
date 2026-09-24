@@ -192,14 +192,16 @@ test("P1 Private WS keeps exponential backoff until 60 seconds stable", async ()
 
 test("P1 Public WS follows the daily universe with incremental ticker subscriptions", () => {
   const sockets = []; const timers = fakeTimers();
-  const client = new OkxPublicWsClient({ instIds: ["BTC-USDT", "OLD-USDT"], socketFactory: () => { const socket = new FakeSocket(); sockets.push(socket); return socket; }, timers });
+  const instIds = ["BTC-USDT", "OLD-USDT"];
+  const client = new OkxPublicWsClient({ instIds, socketFactory: () => { const socket = new FakeSocket(); sockets.push(socket); return socket; }, timers });
   assert.deepEqual(client.updateInstIds(["BTC-USDT", "OLD-USDT"]), { added: 0, removed: 0 }, "an offline client only records the next set");
   client.connect(); sockets[0].emit("open");
   const ack = (arg) => sockets[0].emit("message", JSON.stringify({ event: "subscribe", code: "0", arg }));
   for (const instId of ["BTC-USDT", "OLD-USDT"]) ack({ channel: "tickers", instId });
   ack({ channel: "instruments", instType: "SPOT" }); ack({ channel: "status" });
   assert.equal(client.snapshot().baseline, true);
-  assert.deepEqual(client.updateInstIds(["BTC-USDT", "NEW-USDT"]), { added: 1, removed: 1 });
+  instIds.splice(0, instIds.length, "BTC-USDT", "NEW-USDT");
+  assert.deepEqual(client.updateInstIds(instIds), { added: 1, removed: 1 }, "the composition root mutates its universe array before notifying WS");
   const [unsubscribe, subscribe] = sockets[0].sent.slice(-2).map((text) => JSON.parse(text));
   assert.deepEqual(unsubscribe, { op: "unsubscribe", args: [{ channel: "tickers", instId: "OLD-USDT" }] });
   assert.deepEqual(subscribe, { op: "subscribe", args: [{ channel: "tickers", instId: "NEW-USDT" }] });

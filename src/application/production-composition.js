@@ -201,6 +201,7 @@ export async function composeProductionRuntime(env, injected = {}) {
   const workLoop = injected.workLoop ?? new EngineWorkLoop({ engine, coordinator, timers: injected.timers ?? globalThis, telemetry });
   const socketFactory = injected.socketFactory ?? ((url) => { if (typeof WebSocket !== "function") throw new Error("WEBSOCKET_FACTORY_UNAVAILABLE"); return new WebSocket(url); });
   const instrumentBaseline = new Set();
+  const protectionWatchInstIds = () => [...new Set([...instIds, ...(sellService.byInst?.keys() ?? [])])];
   // Subscription ACKs never establish account readiness. A valid account
   // observation is required. The REST baseline establishes instrument
   // readiness; public WS freshness is a separate gate, so a reconnect must
@@ -209,7 +210,7 @@ export async function composeProductionRuntime(env, injected = {}) {
   // own — only a trustworthy delist signal may. expTime straight from the exchange is
   // the second such signal alongside announcement text; confirm it once per instrument.
   const maybeConfirmExpTime = (instId, expTime) => {
-    if (!instIds.includes(instId) || !expTime || delistingInstIds.has(instId) || expTimeConfirmingInstIds.has(instId)) return;
+    if ((!instIds.includes(instId) && !sellService.byInst?.has(instId)) || !expTime || delistingInstIds.has(instId) || expTimeConfirmingInstIds.has(instId)) return;
     const baseCcy = market.instrument(instId)?.base; if (!baseCcy) return;
     expTimeConfirmingInstIds.add(instId);
     Promise.resolve(protection.confirm({ instId, baseCcy, reason: "EXP_TIME" }))
@@ -253,7 +254,7 @@ export async function composeProductionRuntime(env, injected = {}) {
   });
   const recurring = injected.recurring ?? new EngineRecurringWork({ timers: injected.timers ?? globalThis, telemetry,
     announcementMs: injected.announcementMs ?? 60_000, reconcileMs: injected.reconcileMs ?? 300_000, routeMs: injected.routeMs ?? 3_600_000, weeklyMs: injected.weeklyMs ?? 7 * 86_400_000, clockSyncMs: injected.clockSyncMs ?? 300_000, sellReviewMs: injected.sellReviewMs ?? 5_000, dustReviewMs: injected.dustReviewMs ?? 15_000,
-    announcements: () => protection.scanAnnouncements((page) => rest.announcements(page), instIds.map((instId) => market.instrument(instId)).filter(Boolean)),
+    announcements: () => protection.scanAnnouncements((page) => rest.announcements(page), protectionWatchInstIds().map((instId) => market.instrument(instId) ?? { instId, base: instId.split("-")[0] })),
     reconcile, refreshRoutes: async () => {
       try {
         const counts = await refreshExecutionRoutes({ rest, instIds, executionRoutes, quoteCurrencies }); readyGate.set("account", true);
@@ -295,7 +296,7 @@ export async function composeProductionRuntime(env, injected = {}) {
         const recovered = await reconciliation.recover({ accountId: config.accountId });
         if (startupWait.cancelled) throw Object.assign(new Error("STARTUP_CANCELLED"), { code: "STARTUP_CANCELLED" });
         exitConfirmation.scheduleAttempts(recovered?.attempts ?? []); await baseline();
-        for (const instId of instIds) maybeConfirmExpTime(instId, market.instrument(instId)?.expTime);
+        for (const instId of protectionWatchInstIds()) maybeConfirmExpTime(instId, market.instrument(instId)?.expTime);
         if (injected.baseline && !injected.buyPlanner) readyGate.set("strategy", true); else await buyPlanner.prime();
         engine.enqueueSellEvents?.(sellService.reviewDueWatches?.() ?? []);
         if (startupWait.cancelled) throw Object.assign(new Error("STARTUP_CANCELLED"), { code: "STARTUP_CANCELLED" });

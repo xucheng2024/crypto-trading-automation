@@ -28,6 +28,7 @@ export const PANIC_MIN_HOLD_HOURS = "3";
 export const PANIC_MIN_HOLD_MS = 3 * 3_600_000;
 export const PANIC_CLOSE_SELL_LEAD_MS = 60_000;
 export const PANIC_MIN_ORDER_USDT = "10";
+export const PANIC_BACKFILL_BAR_MS = 5 * 60_000;
 export const PANIC_STRATEGY_HASH = "panic-rebound-v1:count=0.82:buy=0.72:skip=2:hold=3h:close=23:59";
 
 const DAY_MS = 86_400_000;
@@ -68,12 +69,19 @@ export function panicPrices({ open, tickSz }) {
   return { countPrice: multiplyDecimal(open, PANIC_COUNT_RATIO), buyPrice };
 }
 
-// Rank is 1-based in exchange-time order of the first 82% touch; ties break by
-// instId so every process derives the same order from the same durable rows.
+// A backfilled 5m candle locates a first touch only within that candle. Rank
+// each instrument by the number of touches guaranteed to have happened before
+// it. Ambiguous ties and overlapping windows stay below the buyable rank.
 export function rankCountHits(rows) {
-  const ranked = rows.filter((row) => row.countHitAt !== null && row.countHitAt !== undefined && row.countHitAt !== "" && Number.isFinite(Number(row.countHitAt)))
-    .sort((a, b) => Number(a.countHitAt) - Number(b.countHitAt) || String(a.instId).localeCompare(String(b.instId)));
-  return new Map(ranked.map((row, index) => [row.instId, index + 1]));
+  const hits = rows.filter((row) => row.countHitAt !== null && row.countHitAt !== undefined && row.countHitAt !== "" && Number.isFinite(Number(row.countHitAt)))
+    .map((row) => ({ instId: row.instId, first: Number(row.countHitAt), last: Number(row.countHitAt) + (row.countHitSource === "BACKFILL" ? PANIC_BACKFILL_BAR_MS - 1 : 0) }))
+    .sort((a, b) => a.first - b.first || String(a.instId).localeCompare(String(b.instId)));
+  const ends = hits.map((hit) => hit.last).sort((a, b) => a - b);
+  return new Map(hits.map((hit) => {
+    let low = 0; let high = ends.length;
+    while (low < high) { const middle = (low + high) >>> 1; if (ends[middle] < hit.first) low = middle + 1; else high = middle; }
+    return [hit.instId, low + 1];
+  }));
 }
 
 function addDecimal(left, right) {

@@ -120,7 +120,7 @@ test("P5 panic planner restart backfills missed first touches before ranking and
   const t = DAY_START + 9 * HOUR;
   const first = harness({ instIds: ["A-USDT", "B-USDT", "C-USDT"], state, now: t });
   await first.planner.prime();
-  first.tick("C-USDT", "80", "80", t + 10 * 60_000); await first.observe("C-USDT");
+  first.tick("C-USDT", "80", "80", t + 15 * 60_000); await first.observe("C-USDT");
   assert.equal(first.planner.rank("C-USDT"), 1);
   // Restart: A and B touched 82% while the process was down.
   const bars = { "A-USDT": [[String(t + 300_000), "90", "91", "81", "85"], [String(t), "95", "96", "90", "91"], [String(DAY_START - 300_000), "80", "80", "10", "80"]], "B-USDT": [[String(t + 600_000), "90", "91", "81.9", "85"]] };

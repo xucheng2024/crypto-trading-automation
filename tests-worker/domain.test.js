@@ -50,5 +50,13 @@ test("panic-rebound prices, ranks and UTC+8 day boundaries are pure", () => {
   assert.throws(() => panicSellTime({ strategyDay: "2026-09-24", fillTime: "x" }));
 
   const ranks = rankCountHits([{ instId: "C-USDT", countHitAt: 30 }, { instId: "A-USDT", countHitAt: 10 }, { instId: "B-USDT", countHitAt: 10 }, { instId: "D-USDT", countHitAt: null }]);
-  assert.deepEqual([...ranks], [["A-USDT", 1], ["B-USDT", 2], ["C-USDT", 3]], "ties break by instId and unhit symbols are unranked");
+  assert.deepEqual([...ranks], [["A-USDT", 1], ["B-USDT", 1], ["C-USDT", 3]], "same-time touches are ambiguous and unhit symbols are unranked");
+  const bar = dayStart + 9 * hour;
+  const backfilled = rankCountHits([
+    { instId: "A-USDT", countHitAt: bar, countHitSource: "BACKFILL" },
+    { instId: "B-USDT", countHitAt: bar + 2 * 60_000, countHitSource: "LIVE" },
+    { instId: "C-USDT", countHitAt: bar + 3 * 60_000, countHitSource: "LIVE" },
+    { instId: "D-USDT", countHitAt: bar + 5 * 60_000, countHitSource: "LIVE" },
+  ]);
+  assert.deepEqual([...backfilled], [["A-USDT", 1], ["B-USDT", 1], ["C-USDT", 2], ["D-USDT", 4]], "a live touch inside a backfill candle cannot prove that two other pairs were earlier");
 });

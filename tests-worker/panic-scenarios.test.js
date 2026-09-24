@@ -25,12 +25,13 @@ const text = (value) => String(round(value));
 async function freePort() { return new Promise((resolve, reject) => { const server = net.createServer(); server.once("error", reject); server.listen(0, "127.0.0.1", () => { const { port } = server.address(); server.close((error) => error ? reject(error) : resolve(port)); }); }); }
 
 class FakeSocket {
-  constructor(url) { this.url = url; this.listeners = new Map(); queueMicrotask(() => this.emit("open")); }
+  constructor(url) { this.url = url; this.listeners = new Map(); this.sent = []; queueMicrotask(() => this.emit("open")); }
   addEventListener(name, fn) { this.listeners.set(name, fn); }
   emit(name, data) { this.listeners.get(name)?.(name === "message" ? { data: JSON.stringify(data) } : {}); }
   send(raw) {
     if (raw === "ping") return;
     const message = JSON.parse(raw);
+    this.sent.push(message);
     queueMicrotask(() => {
       if (message.op === "login") this.emit("message", { event: "login", code: "0" });
       if (message.op === "subscribe") for (const arg of message.args) this.emit("message", { event: "subscribe", code: "0", arg });
@@ -281,6 +282,59 @@ test("panic-rebound scenarios against a simulated OKX and real PostgreSQL", { ti
       } finally { await s.close(); }
     });
 
+    await t.test("a delisting announcement immediately sells a held pair and prevents another buy", async () => {
+      const s = await scenario(cluster, "delisting", { instruments: EIGHT });
+      try {
+        await s.advanceTo(at(14));
+        await s.move("A-USDT", 81); await s.move("B-USDT", 81); await s.move("C-USDT", 71);
+        assert.equal(s.buys().length, 1); assert.equal(s.sells().length, 0);
+        s.ex.announcements = async (page) => ({ data: [{ details: page === 1 ? [{ title: "Spot delisting C-USDT", pTime: String(s.clock.value) }] : [] }] });
+        await s.composed.recurring.announcements(); await s.pump();
+        assert.deepEqual(s.sells().map((row) => [row.instId, row.ordType]), [["C-USDT", "market"]], "delisting exits before the scheduled close");
+        assert.ok(s.sells()[0].at < at(23, 59));
+        await s.move("C-USDT", 70);
+        assert.equal(s.buys().length, 1, "the protected pair cannot be bought again after its exit");
+        assert.equal(s.decisions("C-USDT").at(-1), "INSTRUMENT_PROTECTED");
+      } finally { await s.close(); }
+    });
+
+    await t.test("exchange expTime also exits a held pair before the scheduled close", async () => {
+      const s = await scenario(cluster, "expiring", { instruments: EIGHT });
+      try {
+        await s.advanceTo(at(14));
+        await s.move("A-USDT", 81); await s.move("B-USDT", 81); await s.move("C-USDT", 71);
+        assert.equal(s.buys().length, 1);
+        const instrument = { ...s.ex.instruments.get("C-USDT"), expTime: String(at(23)), uTime: String(s.ex.next()) };
+        s.ex.instruments.set("C-USDT", instrument);
+        s.ex.sockets.public.emit("message", { arg: { channel: "instruments", instType: "SPOT" }, data: [instrument] });
+        for (let attempt = 0; attempt < 50 && !s.events.some((event) => event.type === "protection" && event.reason === "DELIST_QUEUED" && event.instId === "C-USDT"); attempt += 1) await new Promise((resolve) => setTimeout(resolve, 10));
+        assert.ok(s.events.some((event) => event.type === "protection" && event.reason === "DELIST_QUEUED" && event.instId === "C-USDT"), "the instrument update must queue an exit");
+        await s.pump();
+        assert.deepEqual(s.sells().map((row) => row.instId), ["C-USDT"]);
+        assert.ok(s.sells()[0].at < at(23, 59));
+        await s.move("C-USDT", 70);
+        assert.equal(s.buys().length, 1);
+      } finally { await s.close(); }
+    });
+
+    await t.test("a held pair removed from tomorrow's buy universe still receives delisting protection", async () => {
+      const s = await scenario(cluster, "removedheld", { instruments: EIGHT, startAt: at(21, 30) });
+      try {
+        await s.advanceTo(at(22));
+        await s.move("A-USDT", 81); await s.move("B-USDT", 81); await s.move("C-USDT", 71);
+        assert.equal(s.buys().length, 1);
+        s.ex.instruments.delete("C-USDT");
+        const next = "2026-09-25";
+        for (const instId of Object.keys(EIGHT)) s.ex.opens.set(instId, Number(s.ex.quotes.get(instId).last));
+        await s.advanceTo(at(0, 10, 0, next));
+        assert.equal(s.composed.buyPlanner.instIds.includes("C-USDT"), false, "the pair left the buy universe while its prior-day position remains open");
+        assert.equal(s.sells().length, 0, "the three-hour hold has not elapsed");
+        s.ex.announcements = async (page) => ({ data: [{ details: page === 1 ? [{ title: "Spot delisting C-USDT", pTime: String(s.clock.value) }] : [] }] });
+        await s.composed.recurring.announcements(); await s.pump();
+        assert.deepEqual(s.sells().map((row) => row.instId), ["C-USDT"], "the held pair exits before its normal 01:00 sell time");
+      } finally { await s.close(); }
+    });
+
     await t.test("ask above the limit waits; a thin book partially fills and the same symbol tops up on the next tick", async () => {
       const s = await scenario(cluster, "askbook", { instruments: EIGHT });
       try {
@@ -387,6 +441,39 @@ test("panic-rebound scenarios against a simulated OKX and real PostgreSQL", { ti
         await s.advanceTo(at(10, 31));
         await s.move("C-USDT", 71);
         assert.deepEqual(s.buys().map((row) => row.instId), ["C-USDT"], "without the backfill C would have been ranked 1st and skipped");
+      } finally { await s.close(); }
+    });
+
+    await t.test("same-candle backfill skips every pair that could be among the first two", async () => {
+      const s = await scenario(cluster, "ambiguous", { instruments: EIGHT, startAt: at(10, 30), beforeStart: (ex, clock) => {
+        for (const [instId, minute] of [["A-USDT", 1], ["B-USDT", 2], ["C-USDT", 4]]) {
+          clock.value = at(9, minute); ex.setQuote(instId, 80);
+          clock.value += 1_000; ex.setQuote(instId, 95);
+        }
+        clock.value = at(10, 30);
+      } });
+      try {
+        const hits = await s.db("SELECT inst_id, count_hit_at, count_hit_source FROM panic_daily_instruments WHERE count_hit_at IS NOT NULL ORDER BY inst_id");
+        assert.deepEqual(hits.map((row) => row.count_hit_source), ["BACKFILL", "BACKFILL", "BACKFILL"]);
+        assert.equal(new Set(hits.map((row) => row.count_hit_at)).size, 1, "the exchange candle cannot recover the order inside five minutes");
+        await s.move("C-USDT", 71);
+        assert.equal(s.buys().length, 0, "C might have been one of the first two, so it must not be bought");
+        await s.move("D-USDT", 71);
+        assert.deepEqual(s.buys().map((row) => row.instId), ["D-USDT"], "a later unambiguous fourth touch remains buyable");
+      } finally { await s.close(); }
+    });
+
+    await t.test("a pair added at the new day is subscribed and can enter the count", async () => {
+      const s = await scenario(cluster, "newpair", { instruments: EIGHT, startAt: at(23, 50) });
+      try {
+        const next = "2026-09-25";
+        s.ex.instruments.set("I-USDT", { instId: "I-USDT", state: "live", tickSz: "0.01", lotSz: "0.001", minSz: "0.001", baseCcy: "I", quoteCcy: "USDT", uTime: "2" });
+        s.ex.opens.set("I-USDT", 100); s.ex.setQuote("I-USDT", 100);
+        for (const instId of Object.keys(EIGHT)) s.ex.opens.set(instId, 100);
+        await s.advanceTo(at(0, 1, 0, next));
+        assert.ok(s.ex.sockets.public.sent.some((message) => message.op === "subscribe" && message.args.some((arg) => arg.channel === "tickers" && arg.instId === "I-USDT")), "the live socket must receive the new ticker subscription");
+        await s.move("A-USDT", 81); await s.move("B-USDT", 81); await s.move("I-USDT", 71);
+        assert.deepEqual(s.buys().map((row) => row.instId), ["I-USDT"]);
       } finally { await s.close(); }
     });
 

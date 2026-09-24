@@ -21,7 +21,7 @@ The runtime does not create OKX algo-trigger orders. Buy signals are evaluated f
 ## Strategy: panic rebound
 
 - **Universe:** every live OKX USDT spot pair, discovered at startup and refreshed each UTC+8 day (`OKX_INSTRUMENTS` no longer drives trading).
-- **Count:** each UTC+8 day, a pair counts once its last trade reaches its day open × 0.82 (OKX `sodUtc8`). Pairs are ranked by the exchange time of that first touch; blacklisted or delisting pairs still count.
+- **Count:** each UTC+8 day, a pair counts once its last trade reaches its day open × 0.82 (OKX `sodUtc8`). Pairs are ranked by the exchange time of that first touch; blacklisted or delisting pairs still count. After a restart, 5m candles only bound a missed touch to a five-minute window, so pairs whose order could affect the first two are skipped until two earlier touches are certain.
 - **Skip:** the first two counted pairs are never bought.
 - **Buy:** any later counted pair whose last trade reaches open × 0.72 (with ask at or below that price) is queued. One global queue submits one IOC at a time at exactly the 72% limit, sized from a fresh REST read of owned USDT (never borrowed capacity), until owned USDT falls below the minimum order. Blacklisted, delisting and route-unavailable pairs are never bought. No new buy from 23:59 UTC+8 (the close sells must not be recycled into overnight positions) or while a position from an earlier day is still open; dust remainders (below the minimum size or worth under 10 USDT) never count as open.
 - **Sell:** each fill is market-sold at 23:59 UTC+8 of its strategy day, or after 3 hours if bought later; no stop loss, take profit or price-conditioned deferral. A stalled exit is re-driven every few seconds.
