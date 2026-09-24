@@ -11,18 +11,31 @@ export class TradingStateRepository {
       instrument_exp_time=COALESCE(EXCLUDED.instrument_exp_time,instrument_protection.instrument_exp_time),
       version=instrument_protection.version+1,updated_at=now()`, [row.instId, row.baseCcy, row.state, row.reason, row.announcement?.url ?? null, row.announcement?.pTime ?? null, row.expTime ?? null]);
   }
-  async listDaily(tx) { return (await tx.query("SELECT * FROM daily_limit_cache ORDER BY inst_id,strategy_day")).rows; }
-  async findDaily(tx, instId, strategyDay) { return (await tx.query("SELECT * FROM daily_limit_cache WHERE inst_id=$1 AND strategy_day=$2", [instId, strategyDay])).rows[0] ?? null; }
-  async claimDaily(tx, row) {
-    await tx.query(`INSERT INTO daily_limit_cache(
-      inst_id,strategy_day,status,daily_limit_price,input_hash,today_candle_ts,today_open,
-      yesterday_candle_ts,yesterday_open,yesterday_close,best_limit,tick_sz,strategy_config_hash,ma20
-    ) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) ON CONFLICT(inst_id,strategy_day) DO NOTHING`, [
-      row.instId, row.strategyDay, row.status, row.dailyLimitPrice ?? null, row.inputHash,
-      row.todayCandleTs, row.todayOpen, row.yesterdayCandleTs, row.yesterdayOpen,
-      row.yesterdayClose, row.bestLimit, row.tickSz, row.strategyConfigHash, row.ma20 ?? null,
-    ]);
-    return this.findDaily(tx, row.instId, row.strategyDay);
+  async listPanicDay(tx, strategyDay) {
+    return (await tx.query("SELECT *, strategy_day::text AS strategy_day FROM panic_daily_instruments WHERE strategy_day=$1::date ORDER BY inst_id", [strategyDay])).rows;
+  }
+  async findPanicDayRow(tx, strategyDay, instId) {
+    return (await tx.query("SELECT *, strategy_day::text AS strategy_day FROM panic_daily_instruments WHERE strategy_day=$1::date AND inst_id=$2", [strategyDay, instId])).rows[0] ?? null;
+  }
+  async claimDailyOpens(tx, rows) {
+    if (!rows.length) return { rowCount: 0 };
+    const column = (name) => rows.map((row) => row[name]);
+    return tx.query(`INSERT INTO panic_daily_instruments(strategy_day,inst_id,open_price,open_ts,open_source,tick_sz,count_price,buy_price)
+      SELECT $1::date,* FROM unnest($2::text[],$3::numeric[],$4::bigint[],$5::text[],$6::numeric[],$7::numeric[],$8::numeric[])
+      ON CONFLICT(strategy_day,inst_id) DO NOTHING`, [rows[0].strategyDay, column("instId"), column("openPrice"), column("openTs"), column("openSource"), column("tickSz"), column("countPrice"), column("buyPrice")]);
+  }
+  // First-touch evidence is write-once: a replay, a restart backfill or a
+  // concurrent observer can never move an already ranked touch.
+  async recordCountHit(tx, { strategyDay, instId, hitAt, price, source }) {
+    return tx.query(`UPDATE panic_daily_instruments SET count_hit_at=$3,count_hit_price=$4,count_hit_source=$5,updated_at=now()
+      WHERE strategy_day=$1::date AND inst_id=$2 AND count_hit_at IS NULL RETURNING *, strategy_day::text AS strategy_day`, [strategyDay, instId, hitAt, price, source]);
+  }
+  async recordBuyHit(tx, { strategyDay, instId, hitAt, price }) {
+    return tx.query(`UPDATE panic_daily_instruments SET buy_hit_at=$3,buy_hit_price=$4,updated_at=now()
+      WHERE strategy_day=$1::date AND inst_id=$2 AND buy_hit_at IS NULL AND count_hit_at IS NOT NULL RETURNING *, strategy_day::text AS strategy_day`, [strategyDay, instId, hitAt, price]);
+  }
+  async hasOpenManagedBase(tx, { accountId, baseCcy }) {
+    return (await tx.query("SELECT 1 FROM filled_orders WHERE account_id=$1 AND base_ccy=$2 AND side='BUY' AND disposed_size < fill_size LIMIT 1", [accountId, baseCcy])).rowCount > 0;
   }
   async listManagedFills(tx, accountId) { return (await tx.query("SELECT * FROM filled_orders WHERE account_id=$1 ORDER BY fill_time,bill_id,trade_id", [accountId])).rows; }
   async listPendingAccountSellBases(tx, accountId) {
@@ -82,15 +95,6 @@ export class TradingStateRepository {
         AND $4 ~ '^[0-9]+$'`, [accountId, instId, tradeId, billId ?? null]);
   }
 
-  async recordAdversePrice(tx, { accountId, instId, price }) {
-    return tx.query(`UPDATE filled_orders SET
-      min_price_after_fill=LEAST(COALESCE(min_price_after_fill,fill_price),$3::numeric),
-      max_adverse_pct=GREATEST(COALESCE(max_adverse_pct,0),GREATEST(0,(fill_price-$3::numeric)/fill_price*100)),
-      version=version+1
-      WHERE account_id=$1 AND inst_id=$2 AND side='BUY' AND disposed_size<fill_size
-        AND fill_price IS NOT NULL AND (min_price_after_fill IS NULL OR $3::numeric<min_price_after_fill)`, [accountId, instId, price]);
-  }
-
   async compareAndSetFill(tx, id, version, disposedSize) {
     return tx.query(
       "UPDATE filled_orders SET disposed_size=$1,version=version+1 WHERE id=$2 AND version=$3",
@@ -112,19 +116,6 @@ export class TradingStateRepository {
       sell_trigger_reason=$6,version=version+1
       WHERE account_id=$1 AND inst_id=$2 AND trade_id=$3 AND side='BUY' AND version=$4
       AND sell_state IN ('WAITING','SELL_TRIGGERED','DUST_PENDING') RETURNING *`, [accountId, instId, tradeId, version, protectionPrice, sellTriggerReason]);
-  }
-
-  async deferSellWindow(tx, { accountId, instId, tradeId, version, sellTime, bidPx }) {
-    return tx.query(`UPDATE filled_orders SET sell_time=$5,version=version+1
-      WHERE account_id=$1 AND inst_id=$2 AND trade_id=$3 AND side='BUY' AND version=$4
-      AND sell_state='WAITING' AND fill_price > $6::numeric
-      AND sell_time=fill_time+hold_hours*3600000 AND $5 > sell_time RETURNING *`, [accountId, instId, tradeId, version, sellTime, bidPx]);
-  }
-
-  async raiseProtection(tx, { accountId, instId, tradeId, version, protectionPrice }) {
-    return tx.query(`UPDATE filled_orders SET protection_price=GREATEST(COALESCE(protection_price,$5::numeric),$5::numeric),version=version+1
-      WHERE account_id=$1 AND inst_id=$2 AND trade_id=$3 AND side='BUY' AND version=$4
-      AND sell_state IN ('WAITING','SELL_TRIGGERED','DUST_PENDING') RETURNING *`, [accountId, instId, tradeId, version, protectionPrice]);
   }
 
   async markDust(tx, { accountId, instId, tradeId, version }) {

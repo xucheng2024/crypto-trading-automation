@@ -11,4 +11,5 @@ export const postgresMigrations = [
   "0010_sell_take_profit.sql",
   "0011_timeline_watermark_read.sql",
   "0012_daily_ma20.sql",
+  "0013_panic_rebound.sql",
 ];

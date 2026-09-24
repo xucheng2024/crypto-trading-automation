@@ -6,7 +6,6 @@ import { SellService } from "../src/application/sell-service.js";
 import { InstrumentProtectionService } from "../src/application/instrument-protection-service.js";
 import { ReconciliationService } from "../src/application/reconciliation-service.js";
 import { ExitSubmissionReconciler } from "../src/application/exit-submission-reconciler.js";
-import { expectedClosedCandleTs } from "../src/domain/rules.js";
 
 const config = { accountId: "p3", strategyTag: "P3", orderVersion: "v1", orderExpiryMs: 1_000, accountFreshMs: 10_000, quoteFreshMs: 10_000 };
 const clock = () => ({ nowMs: () => 1_000 });
@@ -152,158 +151,6 @@ test("P3 dust transition drops the hot pending intent and synchronizes the watch
   await coordinator.drainOnce(); assert.equal(availCalls, 1);
 });
 
-test("P3 engine latches breach in the callback and persists only from its critical consumer", async () => {
-  const now = clock(); const market = new MarketProjection({ clock: now });
-  market.updateInstrument({ instId: "BTC-USDT", ts: 1, state: "live", tickSz: "0.1", lotSz: "0.1", minSz: "0.1", base: "BTC" });
-  const row = { account_id: "a", inst_id: "BTC-USDT", base_ccy: "BTC", trade_id: "t1", side: "BUY", fill_size: "1", disposed_size: "0", sell_time: 1, sell_state: "WAITING", version: 1, protection_price: "90", availableBase: "1" };
-  let writes = 0; const queued = [];
-  const sell = new SellService({ market, clock: now, coordinator: { enqueue: (intent) => queued.push(intent) }, state: {
-    markSellTriggered: async () => { writes += 1; return { rowCount: 1, rows: [{ ...row, sell_state: "SELL_TRIGGERED", version: 2 }] }; }, raiseProtection: async () => ({ rowCount: 1 }),
-  }, loadFill: async () => row });
-  sell.rebuild([row]); const engine = new (await import("../src/application/trading-engine.js")).TradingEngine({ projection: market, clock: now, sellService: sell });
-  market.updateTicker({ instId: "BTC-USDT", ts: 2, last: "89", bidPx: "89" });
-  const events = sell.observeTicker("BTC-USDT"); assert.equal(events.length, 1); assert.equal(writes, 0, "WS-side observation does no DB work");
-  engine.queue.enqueue(events[0]); await engine.consumeOne(); assert.equal(writes, 1); assert.equal(queued.length, 1);
-  assert.equal(sell.observeTicker("BTC-USDT").length, 0, "latch survives a price bounce and duplicate tick");
-  market.updateCandle({ instId: "BTC-USDT", ts: expectedClosedCandleTs(now.nowMs()), low: "95", confirm: true });
-  assert.equal(sell.observeCandle("BTC-USDT").find((event) => event.type === "SELL_PROTECTION"), undefined, "a triggered exit must not receive a later protection update");
-  market.updateCandle({ instId: "BTC-USDT", ts: expectedClosedCandleTs(now.nowMs()), low: "80", confirm: true });
-  assert.equal(sell.observeCandle("BTC-USDT").find((event) => event.type === "SELL_PROTECTION"), undefined, "a corrected lower low never loosens protection");
-});
-
-test("P3 SELL uses a strict 3m breakdown: equality does not trigger", async () => {
-  const now = clock(); const market = new MarketProjection({ clock: now });
-  market.updateInstrument({ instId: "BTC-USDT", ts: 1, state: "live", tickSz: "0.1", lotSz: "0.1", minSz: "0.1", base: "BTC" });
-  const fill = { account_id: "a", inst_id: "BTC-USDT", base_ccy: "BTC", trade_id: "strict", side: "BUY", fill_size: "1", disposed_size: "0", sell_time: 0, sell_state: "WAITING", version: 1 };
-  const sell = new SellService({ market, clock: now, coordinator: { enqueue: () => true }, state: { raiseProtection: async () => ({ rowCount: 1, rows: [{ ...fill, protection_price: "99.7", version: 2 }] }) } });
-  sell.rebuild([fill]); market.updateCandle({ instId: "BTC-USDT", ts: expectedClosedCandleTs(now.nowMs()), low: "100", confirm: true });
-  await sell.consume(sell.observeCandle("BTC-USDT").find((event) => event.type === "SELL_PROTECTION"));
-  market.updateTicker({ instId: "BTC-USDT", ts: 11, last: "99.7", bidPx: "99.7" });
-  assert.equal(sell.observeTicker("BTC-USDT").length, 0);
-  market.updateTicker({ instId: "BTC-USDT", ts: 12, last: "99.699", bidPx: "99.699" });
-  assert.equal(sell.observeTicker("BTC-USDT").length, 1);
-});
-
-test("P3 take-profit fires immediately from bidPx, independent of sell_time, without touching protection_price", async () => {
-  const now = clock(); const market = new MarketProjection({ clock: now });
-  market.updateInstrument({ instId: "BTC-USDT", ts: 1, state: "live", tickSz: "0.1", lotSz: "0.1", minSz: "0.1", base: "BTC" });
-  market.updateTicker({ instId: "BTC-USDT", ts: 2, last: "120", bidPx: "120" });
-  const fill = { account_id: "a", inst_id: "BTC-USDT", base_ccy: "BTC", trade_id: "tp-fast", side: "BUY", fill_size: "1", disposed_size: "0", fill_price: "100", sell_time: 999_999_999_999, sell_state: "WAITING", version: 1 };
-  let markCall;
-  const sell = new SellService({ market, clock: now, coordinator: { enqueue: () => true }, loadFill: async () => fill, state: { markSellTriggered: async (_tx, row) => { markCall = row; return { rowCount: 1, rows: [{ ...fill, sell_state: "SELL_TRIGGERED", version: 2 }] }; } } });
-  sell.rebuild([fill]);
-  const events = sell.observeTicker("BTC-USDT");
-  assert.equal(events.length, 1);
-  assert.equal(events[0].reason, "TAKE_PROFIT");
-  assert.equal(events[0].referencePrice, "120");
-  assert.equal(events[0].protection, undefined, "no downside floor was ever armed for this fill");
-  await sell.consume(events[0]);
-  assert.equal(markCall.protectionPrice, undefined, "take-profit must not write a fabricated floor into protection_price");
-  assert.equal(markCall.sellTriggerReason, "TAKE_PROFIT");
-});
-
-test("P3 take-profit boundary is inclusive and judged by bidPx, not last", async () => {
-  const now = clock(); const market = new MarketProjection({ clock: now });
-  market.updateInstrument({ instId: "BTC-USDT", ts: 1, state: "live", tickSz: "0.1", lotSz: "0.1", minSz: "0.1", base: "BTC" });
-  const fill = { account_id: "a", inst_id: "BTC-USDT", base_ccy: "BTC", trade_id: "tp-boundary", side: "BUY", fill_size: "1", disposed_size: "0", fill_price: "100", sell_time: 1, sell_state: "WAITING", version: 1 };
-  const sell = new SellService({ market, clock: now, coordinator: { enqueue: () => true }, state: {} });
-  sell.rebuild([fill]);
-  market.updateTicker({ instId: "BTC-USDT", ts: 2, last: "120", bidPx: "119.99" });
-  assert.equal(sell.observeTicker("BTC-USDT").length, 0, "just under the 1.20x line does not trigger");
-  market.updateTicker({ instId: "BTC-USDT", ts: 3, last: "120", bidPx: "120" });
-  assert.equal(sell.observeTicker("BTC-USDT").length, 1, "exactly at the 1.20x line triggers (>=)");
-  sell.latches.clear();
-  market.updateTicker({ instId: "BTC-USDT", ts: 4, last: "125", bidPx: "115" });
-  assert.equal(sell.observeTicker("BTC-USDT").length, 0, "last looks up 25% but bidPx is still under the line — must not trigger on last");
-});
-
-test("P3 take-profit ignores non-WAITING fills and requires a complete quote", async () => {
-  const now = clock(); const market = new MarketProjection({ clock: now });
-  market.updateInstrument({ instId: "BTC-USDT", ts: 1, state: "live", tickSz: "0.1", lotSz: "0.1", minSz: "0.1", base: "BTC" });
-  market.updateTicker({ instId: "BTC-USDT", ts: 2, last: "120", bidPx: "120" });
-  const base = { account_id: "a", inst_id: "BTC-USDT", base_ccy: "BTC", side: "BUY", fill_size: "1", disposed_size: "0", fill_price: "100", sell_time: 1, version: 1 };
-  const sold = { ...base, trade_id: "tp-sold", sell_state: "SOLD" };
-  const dust = { ...base, trade_id: "tp-dust", sell_state: "DUST_PENDING" };
-  const triggered = { ...base, trade_id: "tp-triggered", sell_state: "SELL_TRIGGERED", sell_trigger_reason: "MAX_HOLD_EXPIRED" };
-  const sell = new SellService({ market, clock: now, coordinator: { enqueue: () => true }, state: {} });
-  sell.rebuild([sold, dust, triggered]);
-  assert.equal(sell.observeTicker("BTC-USDT").length, 0, "SOLD/DUST_PENDING/SELL_TRIGGERED must never be relabeled TAKE_PROFIT by this scan");
-  const waiting = { ...base, trade_id: "tp-waiting", sell_state: "WAITING" };
-  sell.rebuild([waiting]);
-  market.updateTicker({ instId: "BTC-USDT", ts: 3, last: "120" });
-  assert.equal(sell.observeTicker("BTC-USDT").length, 0, "missing bidPx must wait for a complete quote, not fall back to last");
-  market.updateTicker({ instId: "BTC-USDT", ts: 4, last: "120", bidPx: "120" });
-  assert.equal(sell.observeTicker("BTC-USDT").length, 1);
-});
-
-test("P3 take-profit outranks force hold with a fresh quote, but force hold still fires without one", () => {
-  const now = clock(); const market = new MarketProjection({ clock: now });
-  market.updateInstrument({ instId: "BTC-USDT", ts: 1, state: "live", tickSz: "0.1", lotSz: "0.1", minSz: "0.1", base: "BTC" });
-  const fill = { account_id: "a", inst_id: "BTC-USDT", base_ccy: "BTC", trade_id: "tp-vs-hold", side: "BUY", fill_size: "1", disposed_size: "0", fill_price: "100", sell_time: 1, force_sell_time: 1_000, sell_state: "WAITING", version: 1 };
-  const sellWithQuote = new SellService({ market, clock: now, coordinator: { enqueue: () => true }, state: {} });
-  sellWithQuote.rebuild([fill]);
-  market.updateTicker({ instId: "BTC-USDT", ts: 2, last: "120", bidPx: "120" });
-  const events = sellWithQuote.observeTicker("BTC-USDT");
-  assert.equal(events.length, 1, "force hold must not also fire once take-profit has already latched this fill");
-  assert.equal(events[0].reason, "TAKE_PROFIT");
-  const sellNoQuote = new SellService({ market: { quoteStatus: () => ({ quote: null, fresh: false, reason: "MISSING", receiptAgeMs: null, sourceAgeMs: null, sourceTs: null }) }, clock: now, coordinator: { enqueue: () => true }, state: {} });
-  sellNoQuote.rebuild([fill]);
-  const withoutQuote = sellNoQuote.observeTicker("BTC-USDT");
-  assert.equal(withoutQuote.length, 1, "force hold must still fire independently when no fresh quote exists");
-  assert.equal(withoutQuote[0].reason, "MAX_HOLD_EXPIRED");
-});
-
-test("P3 take-profit decision reason and reference price persist through submitExits", async () => {
-  const now = clock(); const market = new MarketProjection({ clock: now }); const account = new AccountCapitalSnapshot({ clock: now }); account.update({ ts: 1, totalEq: "100", adjEq: "100" });
-  market.updateInstrument({ instId: "BTC-USDT", ts: 1, state: "live", tickSz: "0.1", lotSz: "0.1", minSz: "0.1", base: "BTC" });
-  let attempt;
-  const coordinator = new OrderCoordinator({ transaction: async (fn) => fn({}), state: {}, market, account, readyGate: gate(), ownerGuard: { isHeld: () => true }, mode: () => "OFF", clock: now, config,
-    orders: { reserveExit: async (_tx, row) => { attempt = row; return { authorized: true }; }, markSubmitted: async () => {} },
-    transport: { maxAvailSize: async () => [{ instId: "BTC-USDT", availSell: "1" }], submitBatchOrders: async (rows) => rows.map((row) => ({ clOrdId: row.clOrdId, status: "SUBMITTED", ordId: "tp" })) },
-  });
-  coordinator.enqueue({ intent: "SELL", instId: "BTC-USDT", baseCcy: "BTC", sourceBuyTradeId: "tp-1", remainingSize: "1", fillVersion: 1, sellTime: 0, availableBase: "1", bidPx: "120", referencePrice: "120", reason: "TAKE_PROFIT" });
-  await coordinator.drainOnce();
-  assert.equal(attempt.decisionReason, "SELL_TAKE_PROFIT_CONFIRMED");
-  assert.equal(attempt.decisionReferencePrice, "120");
-});
-
-test("P3 breakdown-triggered exits still record SELL_BREAKDOWN_CONFIRMED (regression)", async () => {
-  const now = clock(); const market = new MarketProjection({ clock: now }); const account = new AccountCapitalSnapshot({ clock: now }); account.update({ ts: 1, totalEq: "100", adjEq: "100" });
-  market.updateInstrument({ instId: "BTC-USDT", ts: 1, state: "live", tickSz: "0.1", lotSz: "0.1", minSz: "0.1", base: "BTC" });
-  let attempt;
-  const coordinator = new OrderCoordinator({ transaction: async (fn) => fn({}), state: {}, market, account, readyGate: gate(), ownerGuard: { isHeld: () => true }, mode: () => "OFF", clock: now, config,
-    orders: { reserveExit: async (_tx, row) => { attempt = row; return { authorized: true }; }, markSubmitted: async () => {} },
-    transport: { maxAvailSize: async () => [{ instId: "BTC-USDT", availSell: "1" }], submitBatchOrders: async (rows) => rows.map((row) => ({ clOrdId: row.clOrdId, status: "SUBMITTED", ordId: "bd" })) },
-  });
-  coordinator.enqueue({ intent: "SELL", instId: "BTC-USDT", baseCcy: "BTC", sourceBuyTradeId: "bd-1", remainingSize: "1", fillVersion: 1, sellTime: 0, availableBase: "1", bidPx: "90", protection: "90", reason: "PRICE_BREAKDOWN" });
-  await coordinator.drainOnce();
-  assert.equal(attempt.decisionReason, "SELL_BREAKDOWN_CONFIRMED");
-  assert.equal(attempt.decisionReferencePrice, "90");
-});
-
-test("P3 settleExit partial-fill continuations preserve the original trigger reason", async () => {
-  const now = clock(); const market = new MarketProjection({ clock: now });
-  market.updateInstrument({ instId: "BTC-USDT", ts: 1, state: "live", tickSz: "0.1", lotSz: "0.1", minSz: "0.1", base: "BTC" });
-  const takeProfitAttempt = { intent: "SELL", account_id: "a", inst_id: "BTC-USDT", base_ccy: "BTC", source_buy_trade_id: "tp-partial", generation: 0, cl_ord_id: "tp-partial-1" };
-  const takeProfitSource = { fill_size: "2", disposed_size: "1", version: 5, sell_trigger_reason: "TAKE_PROFIT", fill_price: "100", protection_price: null };
-  const tpCoordinator = new OrderCoordinator({ transaction: async (fn) => fn({}), state: { recordSystemSell: async () => ({ source: takeProfitSource }) }, orders: { markSettled: async () => ({ rowCount: 1 }) }, market, account: new AccountCapitalSnapshot({ clock: now }), readyGate: gate(), ownerGuard: { isHeld: () => true }, mode: () => "OFF", clock: now, config });
-  const tpResult = await tpCoordinator.settleExit({ attempt: takeProfitAttempt, fills: [{ tradeId: "t1", fillSz: "1", fillTime: "1" }], exchangeState: "canceled", accFillSz: "1" });
-  assert.deepEqual(tpResult, { settled: true, remaining: "1" });
-  const tpQueued = [...tpCoordinator.pending.SELL.values()][0];
-  assert.equal(tpQueued.reason, "TAKE_PROFIT");
-  assert.equal(tpQueued.referencePrice, "120");
-  assert.equal(tpQueued.protection == null, true, "no downside floor was ever armed — must stay null/undefined, never the take-profit target");
-
-  const breakdownAttempt = { intent: "SELL", account_id: "a", inst_id: "BTC-USDT", base_ccy: "BTC", source_buy_trade_id: "bd-partial", generation: 0, cl_ord_id: "bd-partial-1" };
-  const breakdownSource = { fill_size: "2", disposed_size: "1", version: 5, sell_trigger_reason: "PRICE_BREAKDOWN", fill_price: "100", protection_price: "95" };
-  const bdCoordinator = new OrderCoordinator({ transaction: async (fn) => fn({}), state: { recordSystemSell: async () => ({ source: breakdownSource }) }, orders: { markSettled: async () => ({ rowCount: 1 }) }, market, account: new AccountCapitalSnapshot({ clock: now }), readyGate: gate(), ownerGuard: { isHeld: () => true }, mode: () => "OFF", clock: now, config });
-  await bdCoordinator.settleExit({ attempt: breakdownAttempt, fills: [{ tradeId: "t2", fillSz: "1", fillTime: "1" }], exchangeState: "canceled", accFillSz: "1" });
-  const bdQueued = [...bdCoordinator.pending.SELL.values()][0];
-  assert.equal(bdQueued.reason, "PRICE_BREAKDOWN");
-  assert.equal(bdQueued.referencePrice, undefined);
-  assert.equal(bdQueued.protection, "95");
-});
-
 test("P3 rebuild reports a redacted sell-watch state snapshot", () => {
   const telemetry = []; const sell = new SellService({ market: new MarketProjection({ clock: { nowMs: () => 1 } }), coordinator: { enqueue: () => true }, telemetry: (event) => telemetry.push(event) });
   sell.rebuild([
@@ -312,46 +159,6 @@ test("P3 rebuild reports a redacted sell-watch state snapshot", () => {
     { account_id: "secret", inst_id: "ETH-USDT", base_ccy: "ETH", trade_id: "three", side: "BUY", sell_state: "DUST_PENDING" },
   ]);
   assert.deepEqual(telemetry.at(-1), { type: "sell_watch_loaded", reason: "SELL_WATCH_SNAPSHOT", total: 3, instruments: 2, waiting: 1, triggered: 1, dustPending: 1 });
-});
-
-test("P3 force hold fires at its boundary without a candle, fresh quote, or clock sync", () => {
-  const now = { value: 100, nowMs() { return this.value; } }; const market = new MarketProjection({ clock: now });
-  market.updateInstrument({ instId: "BTC-USDT", ts: 1, state: "live", tickSz: "0.1", lotSz: "0.1", minSz: "0.1", base: "BTC" });
-  const fill = { account_id: "a", inst_id: "BTC-USDT", base_ccy: "BTC", trade_id: "force", side: "BUY", fill_size: "1", disposed_size: "0", sell_time: 1, force_sell_time: 100, sell_state: "WAITING", version: 1 };
-  const sell = new SellService({ market, clock: now, clockFresh: () => false, coordinator: { enqueue: () => true }, state: {} });
-  sell.rebuild([fill]); assert.equal(sell.reviewForceHold().length, 1);
-  assert.equal(sell.reviewForceHold().length, 0, "latch deduplicates recurring scans");
-});
-
-test("P3 force hold resumes after restart and persists its explicit reason", async () => {
-  const now = { nowMs: () => 100 }; const market = new MarketProjection({ clock: now }); const writes = [];
-  const fill = { account_id: "a", inst_id: "BTC-USDT", base_ccy: "BTC", trade_id: "force-resume", side: "BUY", fill_size: "1", disposed_size: "0", sell_time: 1, force_sell_time: 100, sell_state: "WAITING", version: 1 };
-  const sell = new SellService({ market, clock: now, coordinator: { enqueue: () => true }, loadFill: async () => fill, state: { markSellTriggered: async (_tx, row) => { writes.push(row); return { rowCount: 1, rows: [{ ...fill, sell_state: "SELL_TRIGGERED", version: 2 }] }; } } });
-  sell.rebuild([fill]); const [event] = sell.resumeForceHold();
-  assert.equal(event.reason, "MAX_HOLD_EXPIRED"); await sell.consume(event);
-  assert.equal(writes[0].sellTriggerReason, "MAX_HOLD_EXPIRED");
-});
-
-test("P3 protection only changes in memory after durable ratchet success", async () => {
-  const now = clock(); const market = new MarketProjection({ clock: now });
-  market.updateInstrument({ instId: "BTC-USDT", ts: 1, state: "live", tickSz: "0.1", lotSz: "0.1", minSz: "0.1", base: "BTC" });
-  const fill = { account_id: "a", inst_id: "BTC-USDT", base_ccy: "BTC", trade_id: "ratchet", side: "BUY", fill_size: "1", disposed_size: "0", sell_time: 0, sell_state: "WAITING", version: 1 };
-  const sell = new SellService({ market, clock: now, coordinator: { enqueue: () => true }, loadFill: async () => fill, state: { raiseProtection: async () => ({ rowCount: 1, rows: [{ ...fill, protection_price: "94.715", version: 2 }] }) } });
-  sell.rebuild([fill]); market.updateCandle({ instId: "BTC-USDT", ts: expectedClosedCandleTs(now.nowMs()), low: "95", confirm: true });
-  const event = sell.observeCandle("BTC-USDT").find((row) => row.type === "SELL_PROTECTION");
-  assert.equal(sell.fills.get(sell.key(fill)).protection_price, undefined); await sell.consume(event);
-  market.updateCandle({ instId: "BTC-USDT", ts: expectedClosedCandleTs(now.nowMs()), low: "80", confirm: true });
-  assert.equal(sell.observeCandle("BTC-USDT").some((row) => row.type === "SELL_PROTECTION"), false);
-});
-
-test("P3 stale clock freezes protection updates but leaves armed breakdown detection live", () => {
-  const now = clock(); const market = new MarketProjection({ clock: now }); const telemetry = []; let syncs = 0;
-  market.updateInstrument({ instId: "BTC-USDT", ts: 1, state: "live", tickSz: "0.1", lotSz: "0.1", minSz: "0.1", base: "BTC" });
-  market.updateTicker({ instId: "BTC-USDT", ts: 2, last: "89", bidPx: "89" }); market.updateCandle({ instId: "BTC-USDT", ts: expectedClosedCandleTs(now.nowMs()), low: "95", confirm: true });
-  const fill = { account_id: "a", inst_id: "BTC-USDT", base_ccy: "BTC", trade_id: "stale-clock", side: "BUY", fill_size: "1", disposed_size: "0", sell_time: 1, sell_state: "WAITING", version: 1, protection_price: "90" };
-  const sell = new SellService({ market, clock: now, clockFresh: () => false, triggerClockSync: () => { syncs += 1; }, coordinator: { enqueue: () => true }, telemetry: (row) => telemetry.push(row), state: {} });
-  sell.rebuild([fill]); assert.equal(sell.observeCandle("BTC-USDT").filter((row) => row.type === "SELL_BREACH").length, 1);
-  sell.rebuild([fill]); sell.observeCandle("BTC-USDT"); assert.equal(syncs, 1); assert.equal(telemetry.filter((row) => row.reason === "SELL_CLOCK_SYNC_STALE").length, 1);
 });
 
 test("P3 releases a breach latch when the critical queue rejects the event", async () => {
@@ -393,22 +200,6 @@ test("P3 resumes durable SELL_TRIGGERED exits without another price breach", asy
   assert.equal(marks, 0); assert.equal(intents.length, 1);
 });
 
-test("P3 resume recovers TAKE_PROFIT attribution and recomputed referencePrice from durable state", async () => {
-  const now = clock(); const market = new MarketProjection({ clock: now }); const intents = []; let marks = 0;
-  market.updateInstrument({ instId: "BTC-USDT", ts: 1, state: "live", tickSz: "0.1", lotSz: "0.1", minSz: "0.1", base: "BTC" });
-  market.updateTicker({ instId: "BTC-USDT", ts: 2, last: "120", bidPx: "120" });
-  const fill = { account_id: "a", inst_id: "BTC-USDT", base_ccy: "BTC", trade_id: "tp-durable", side: "BUY", fill_size: "1", disposed_size: "0", fill_price: "100", sell_time: 1, sell_state: "SELL_TRIGGERED", sell_trigger_reason: "TAKE_PROFIT", version: 2, protection_price: null };
-  const sell = new SellService({ market, clock: now, coordinator: { enqueue: (intent) => Boolean(intents.push(intent)) }, loadFill: async () => fill, state: { markSellTriggered: async () => { marks += 1; } } });
-  sell.rebuild([fill]); const [event] = sell.resumeTriggered();
-  assert.equal(event.reason, "TAKE_PROFIT");
-  assert.equal(event.referencePrice, "120");
-  assert.equal(event.protection, null, "protection_price is carried through untouched, never overwritten with the take-profit target");
-  assert.equal((await sell.consume(event)).reason, "SELL_TRIGGERED_RESUMED");
-  assert.equal(marks, 0, "an already-triggered fill is never re-written on resume");
-  assert.equal(intents[0].reason, "TAKE_PROFIT");
-  assert.equal(intents[0].referencePrice, "120");
-});
-
 test("P3 retries Coordinator rejection after persisting SELL_TRIGGERED", async () => {
   const now = { value: 1_000, nowMs() { return this.value; } }; const market = new MarketProjection({ clock: now });
   market.updateInstrument({ instId: "BTC-USDT", ts: 1, state: "live", tickSz: "0.1", lotSz: "0.1", minSz: "0.1", base: "BTC" }); market.updateTicker({ instId: "BTC-USDT", ts: 2, last: "89", bidPx: "89" });
@@ -418,114 +209,6 @@ test("P3 retries Coordinator rejection after persisting SELL_TRIGGERED", async (
   sell.rebuild([waiting]); const engine = new (await import("../src/application/trading-engine.js")).TradingEngine({ projection: market, clock: now, sellService: sell }); engine.enqueueSellEvents(sell.observeTicker("BTC-USDT"));
   assert.equal((await engine.consumeOne()).reason, "COORDINATOR_REJECTED"); accepts = true; now.value += 100;
   assert.equal((await engine.consumeOne()).reason, "SELL_TRIGGERED"); assert.equal(marks, 1, "retry does not rewrite durable trigger state");
-});
-
-test("P3 stale candle preserves protection, warns when unarmed, and REST refresh re-enters candle evaluation", async () => {
-  const now = { value: 720_000, nowMs() { return this.value; } }; const market = new MarketProjection({ clock: now }); const events = []; let refreshes = 0;
-  market.updateInstrument({ instId: "BTC-USDT", ts: 1, state: "live", tickSz: "0.1", lotSz: "0.1", minSz: "0.1", base: "BTC" });
-  market.updateCandle({ instId: "BTC-USDT", ts: 180_000, low: "80", confirm: true });
-  const protectedFill = { account_id: "a", inst_id: "BTC-USDT", base_ccy: "BTC", trade_id: "protected", side: "BUY", fill_size: "1", disposed_size: "0", sell_time: 1, sell_state: "WAITING", version: 1, protection_price: "90" };
-  const unarmedFill = { ...protectedFill, trade_id: "unarmed", protection_price: null };
-  const sell = new SellService({ market, clock: now, coordinator: { enqueue: () => true }, telemetry: (event) => events.push(event), refreshCandle: async () => { refreshes += 1; market.updateCandle({ instId: "BTC-USDT", ts: 540_000, low: "95", confirm: true }); } });
-  sell.rebuild([protectedFill, unarmedFill]);
-  assert.deepEqual(sell.observeCandle("BTC-USDT"), []); sell.reviewCandleFreshness(); await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(sell.fills.get(sell.key(protectedFill)).protection_price, "90"); assert.equal(refreshes, 1);
-  assert.ok(events.some((event) => event.reason === "SELL_CANDLE_STALE")); assert.ok(events.some((event) => event.reason === "SELL_PROTECTION_UNARMED"));
-  assert.equal(sell.observeCandle("BTC-USDT").filter((event) => event.type === "SELL_PROTECTION").length, 1, "a refreshed candle only ratchets an already protected fill; first protection requires its exact anchor");
-  now.value = 1_080_000; sell.reviewCandleFreshness(); await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(refreshes, 2, "periodic review detects a feed that stopped producing candle events");
-});
-
-test("P3 first-arm waits for a 3m candle that closed at or after sellTime", () => {
-  const now = clock(); const market = new MarketProjection({ clock: now });
-  market.updateInstrument({ instId: "BTC-USDT", ts: 1, state: "live", tickSz: "0.1", lotSz: "0.1", minSz: "0.1", base: "BTC" });
-  market.updateCandle({ instId: "BTC-USDT", ts: expectedClosedCandleTs(now.nowMs()), low: "100", confirm: true });
-  const fill = { account_id: "a", inst_id: "BTC-USDT", base_ccy: "BTC", trade_id: "pre-close", side: "BUY", fill_size: "1", disposed_size: "0", sell_time: 1, sell_state: "WAITING", version: 1 };
-  const sell = new SellService({ market, clock: now, coordinator: { enqueue: () => true } });
-  sell.rebuild([fill]);
-  assert.equal(sell.observeCandle("BTC-USDT").some((row) => row.type === "SELL_PROTECTION"), false);
-  assert.equal(sell.reviewDueWatches().some((row) => row.type === "SELL_PROTECTION"), false);
-});
-
-test("P3 ticker arms an unarmed fill after sellTime without waiting for another candle event", () => {
-  const now = { nowMs: () => 181_000 }; const market = new MarketProjection({ clock: now });
-  market.updateInstrument({ instId: "BTC-USDT", ts: 1, state: "live", tickSz: "0.1", lotSz: "0.1", minSz: "0.1", base: "BTC" });
-  market.updateCandle({ instId: "BTC-USDT", ts: expectedClosedCandleTs(now.nowMs()), low: "100", confirm: true });
-  market.updateTicker({ instId: "BTC-USDT", ts: 181_000, last: "100", bidPx: "100" });
-  const fill = { account_id: "a", inst_id: "BTC-USDT", base_ccy: "BTC", trade_id: "arm-on-tick", side: "BUY", fill_size: "1", disposed_size: "0", sell_time: 1_000, sell_state: "WAITING", version: 1 };
-  const sell = new SellService({ market, clock: now, coordinator: { enqueue: () => true } });
-  sell.rebuild([fill]);
-  const events = sell.observeTicker("BTC-USDT").filter((row) => row.type === "SELL_PROTECTION");
-  assert.equal(events.length, 1);
-  assert.equal(events[0].protection, "99.7");
-});
-
-test("P3 defers a loss-making sell window once, including across restart", async () => {
-  const originalSellTime = 3_601_000;
-  const now = { value: originalSellTime + 1, nowMs() { return this.value; } }; const market = new MarketProjection({ clock: now }); const writes = [];
-  market.updateInstrument({ instId: "BTC-USDT", ts: 1, state: "live", tickSz: "0.1", lotSz: "0.1", minSz: "0.1", base: "BTC" });
-  market.updateTicker({ instId: "BTC-USDT", ts: now.value, last: "89", bidPx: "89" }); market.updateCandle({ instId: "BTC-USDT", ts: expectedClosedCandleTs(now.nowMs()), low: "95", confirm: true });
-  const fill = { account_id: "a", inst_id: "BTC-USDT", base_ccy: "BTC", trade_id: "loss-window", side: "BUY", fill_size: "1", disposed_size: "0", fill_time: 1_000, hold_hours: "1", fill_price: "100", sell_time: originalSellTime, sell_state: "WAITING", version: 1, protection_price: "90" };
-  const sell = new SellService({ market, clock: now, coordinator: { enqueue: () => true }, loadFill: async () => fill, state: { deferSellWindow: async (_tx, row) => { writes.push(row); return { rowCount: 1, rows: [{ ...fill, sell_time: row.sellTime, version: 2 }] }; } } });
-  sell.rebuild([fill]); const [event] = sell.observeTicker("BTC-USDT");
-  assert.equal(event.type, "SELL_DEFER_LOSS"); assert.equal(event.nextSellTime, now.value + 86_400_000);
-  assert.equal(sell.observeTicker("BTC-USDT").length, 0, "pending durable deferral suppresses further sell triggers");
-  const engine = new (await import("../src/application/trading-engine.js")).TradingEngine({ projection: market, clock: now, sellService: sell });
-  engine.enqueueSellEvents([event]); assert.equal((await engine.consumeOne()).reason, "LOSS_SELL_WINDOW_DEFERRED"); assert.deepEqual(writes[0], { accountId: "a", instId: "BTC-USDT", tradeId: "loss-window", version: 1, sellTime: now.value + 86_400_000, bidPx: "89" });
-  market.updateTicker({ instId: "BTC-USDT", ts: now.value + 1, last: "89", bidPx: "89" });
-  assert.equal(sell.observeTicker("BTC-USDT").length, 0, "deferred sell_time keeps the fill outside the loss-triggered sell window");
-
-  const deferred = { ...fill, sell_time: event.nextSellTime, version: 2 };
-  now.value = event.nextSellTime;
-  market.updateTicker({ instId: "BTC-USDT", ts: now.value, last: "89", bidPx: "89" });
-  market.updateCandle({ instId: "BTC-USDT", ts: expectedClosedCandleTs(now.nowMs()), low: "95", confirm: true });
-  const restarted = new SellService({ market, clock: now, coordinator: { enqueue: () => true } });
-  restarted.rebuild([deferred]);
-  const afterRestart = restarted.observeTicker("BTC-USDT");
-  assert.equal(afterRestart.some((row) => row.type === "SELL_DEFER_LOSS"), false);
-  assert.equal(afterRestart.some((row) => row.type === "SELL_BREACH"), true, "the second due window follows the normal protection rule");
-});
-
-test("P3 first protection uses only the exact anchor candle and breaches in the same evaluation", async () => {
-  const now = { nowMs: () => 541_000 }; const market = new MarketProjection({ clock: now }); let recoveries = 0;
-  market.updateInstrument({ instId: "BTC-USDT", ts: 1, state: "live", tickSz: "0.1", lotSz: "0.1", minSz: "0.1", base: "BTC" });
-  market.updateTicker({ instId: "BTC-USDT", ts: 541_000, last: "98", bidPx: "98" });
-  // This is fresh, but it is the 18:30-18:33-equivalent bar, not the exact 18:27-18:30 anchor.
-  market.updateCandle({ instId: "BTC-USDT", ts: 360_000, low: "80", confirm: true });
-  const fill = { account_id: "a", inst_id: "BTC-USDT", base_ccy: "BTC", trade_id: "exact-anchor", side: "BUY", fill_size: "1", disposed_size: "0", sell_time: 180_001, sell_state: "WAITING", version: 1 };
-  const sell = new SellService({ market, clock: now, coordinator: { enqueue: () => true }, recoverAnchorCandle: async (_instId, anchorTs) => { recoveries += 1; assert.equal(anchorTs, 180_000); return { instId: "BTC-USDT", ts: 180_000, low: "100", confirm: true }; } });
-  sell.rebuild([fill]);
-  assert.equal(sell.observeTicker("BTC-USDT").length, 0, "a newer candle must never substitute for the anchor");
-  assert.equal(recoveries, 0, "WS observation never performs REST I/O");
-  const events = await sell.recoverDueAnchors();
-  assert.equal(recoveries, 1);
-  assert.equal(events.length, 1);
-  assert.equal(events[0].type, "SELL_BREACH");
-  assert.equal(events[0].protection, "99.7");
-});
-
-test("P3 anchor recovery times out and leaves the protection retryable", async () => {
-  const now = { nowMs: () => 541_000 }; const market = new MarketProjection({ clock: now }); const telemetry = [];
-  market.updateInstrument({ instId: "BTC-USDT", ts: 1, state: "live", tickSz: "0.1", lotSz: "0.1", minSz: "0.1", base: "BTC" });
-  market.updateTicker({ instId: "BTC-USDT", ts: 541_000, last: "100", bidPx: "100" });
-  const fill = { account_id: "a", inst_id: "BTC-USDT", base_ccy: "BTC", trade_id: "anchor-timeout", side: "BUY", fill_size: "1", disposed_size: "0", sell_time: 180_001, sell_state: "WAITING", version: 1 };
-  const sell = new SellService({ market, clock: now, coordinator: { enqueue: () => true }, anchorRecoveryTimeoutMs: 1, recoverAnchorCandle: async () => new Promise(() => {}), telemetry: (event) => telemetry.push(event) });
-  sell.rebuild([fill]); sell.observeTicker("BTC-USDT");
-  assert.deepEqual(await sell.recoverDueAnchors(), []);
-  assert.equal(sell.anchorRecoveries.size, 1);
-  assert.ok(telemetry.some((event) => event.reason === "SELL_ANCHOR_RECOVERY_FAILED" && event.error === "SELL_ANCHOR_RECOVERY_TIMEOUT"));
-});
-
-test("P3 deduplicates an unpersisted protection checkpoint per fill and floor", () => {
-  const now = { nowMs: () => 181_000 }; const market = new MarketProjection({ clock: now });
-  market.updateInstrument({ instId: "BTC-USDT", ts: 1, state: "live", tickSz: "0.1", lotSz: "0.1", minSz: "0.1", base: "BTC" });
-  market.updateTicker({ instId: "BTC-USDT", ts: 181_000, last: "100", bidPx: "100" });
-  market.updateCandle({ instId: "BTC-USDT", ts: 0, low: "95", confirm: true });
-  const fill = { account_id: "a", inst_id: "BTC-USDT", base_ccy: "BTC", trade_id: "dedupe-protection", side: "BUY", fill_size: "1", disposed_size: "0", sell_time: 1_000, sell_state: "WAITING", version: 1 };
-  const sell = new SellService({ market, clock: now, coordinator: { enqueue: () => true } });
-  sell.rebuild([fill]);
-  assert.equal(sell.observeTicker("BTC-USDT").filter((event) => event.type === "SELL_PROTECTION").length, 1);
-  assert.equal(sell.observeTicker("BTC-USDT").filter((event) => event.type === "SELL_PROTECTION").length, 0, "ticker bursts do not queue duplicate floor writes");
 });
 
 test("P3 recovery retains PREPARED and UNKNOWN after every consistency source misses, and rebuilds durable watches", async () => {
@@ -587,4 +270,72 @@ test("P3 slow or rejected telemetry cannot delay Coordinator persistence or reco
   const recovery = new ReconciliationService({ ownerGuard: owner, readyGate: ready, safetyWaitMs: 0, telemetry, transaction: async (fn) => fn({}), state: { listProtection: async () => [], listDaily: async () => [], listManagedFills: async () => [] }, orders: { listNonTerminal: async () => [], listTodayBuys: async () => [], listWatermarks: async () => [] }, transport: {} });
   lost(); assert.equal(ready.ready, false);
   assert.equal((await recovery.recover({ accountId: "slow" })).reason, "BASELINES_REQUIRED");
+});
+test("P3 scheduled close latches in the callback, sells regardless of price, and persists only from its critical consumer", async () => {
+  const now = { value: 1_000, nowMs() { return this.value; } }; const market = new MarketProjection({ clock: now });
+  market.updateInstrument({ instId: "BTC-USDT", ts: 1, state: "live", tickSz: "0.1", lotSz: "0.1", minSz: "0.1", base: "BTC" });
+  const row = { account_id: "a", inst_id: "BTC-USDT", base_ccy: "BTC", trade_id: "t1", side: "BUY", fill_size: "1", disposed_size: "0", fill_price: "100", sell_time: 2_000, sell_state: "WAITING", version: 1, availableBase: "1" };
+  let writes = 0; const queued = []; const marks = [];
+  const sell = new SellService({ market, clock: now, coordinator: { enqueue: (intent) => queued.push(intent) }, state: {
+    markSellTriggered: async (_tx, args) => { writes += 1; marks.push(args); return { rowCount: 1, rows: [{ ...row, sell_state: "SELL_TRIGGERED", sell_trigger_reason: args.sellTriggerReason, version: 2 }] }; },
+  }, loadFill: async () => row });
+  sell.rebuild([row]); const engine = new (await import("../src/application/trading-engine.js")).TradingEngine({ projection: market, clock: now, sellService: sell });
+  market.updateTicker({ instId: "BTC-USDT", ts: 1_000, last: "150", bidPx: "150" });
+  assert.deepEqual(sell.observeTicker("BTC-USDT"), [], "no take-profit: a large gain before sell_time never sells");
+  market.updateTicker({ instId: "BTC-USDT", ts: 1_001, last: "30", bidPx: "30" });
+  assert.deepEqual(sell.observeTicker("BTC-USDT"), [], "no stop loss: a deep drawdown before sell_time never sells");
+  assert.deepEqual(sell.protectionHealth(), { sell_overdue_current: 0, anchor_due_unprotected_current: 0 });
+  now.value = 2_000;
+  const events = sell.observeTicker("BTC-USDT");
+  assert.deepEqual(events.map((event) => [event.type, event.reason, event.sellTime]), [["SELL_BREACH", "SCHEDULED_CLOSE", 2_000]]);
+  assert.equal(writes, 0, "WS-side observation does no DB work");
+  assert.deepEqual(sell.reviewDueWatches(), [], "the latch dedupes the periodic review");
+  engine.queue.enqueue(events[0]); await engine.consumeOne();
+  assert.equal(writes, 1); assert.equal(marks[0].sellTriggerReason, "SCHEDULED_CLOSE"); assert.equal(marks[0].protectionPrice, null);
+  assert.deepEqual(queued.map((intent) => [intent.intent, intent.reason, intent.remainingSize]), [["SELL", "SCHEDULED_CLOSE", "1"]]);
+  now.value = 70_000;
+  assert.equal(sell.protectionHealth().sell_overdue_current, 1, "a triggered close that has not sold within a minute is reported for alerting");
+});
+
+test("P3 scheduled close is found by the periodic review even without ticks and routes delisting symbols to DELIST", async () => {
+  const now = { nowMs: () => 5_000 }; const market = new MarketProjection({ clock: now }); const queued = [];
+  const rows = [
+    { account_id: "a", inst_id: "QUIET-USDT", base_ccy: "QUIET", trade_id: "q", side: "BUY", fill_size: "1", disposed_size: "0", sell_time: 4_000, sell_state: "WAITING", version: 1 },
+    { account_id: "a", inst_id: "LATER-USDT", base_ccy: "LATER", trade_id: "l", side: "BUY", fill_size: "1", disposed_size: "0", sell_time: 6_000, sell_state: "WAITING", version: 1 },
+    { account_id: "a", inst_id: "DUST-USDT", base_ccy: "DUST", trade_id: "d", side: "BUY", fill_size: "1", disposed_size: "0", sell_time: 1, sell_state: "DUST_PENDING", version: 1 },
+  ];
+  const sell = new SellService({ market, clock: now, isDelisting: (instId) => instId === "QUIET-USDT", coordinator: { enqueue: (intent) => Boolean(queued.push(intent)) }, loadFill: async (_tx, key) => rows.find((row) => key.endsWith(`:${row.trade_id}`)), state: { markSellTriggered: async (_tx, args) => ({ rowCount: 1, rows: [{ ...rows[0], sell_state: "SELL_TRIGGERED", sell_trigger_reason: args.sellTriggerReason, version: 2 }] }) } });
+  sell.rebuild(rows);
+  const events = sell.reviewDueWatches();
+  assert.deepEqual(events.map((event) => event.instId), ["QUIET-USDT"], "only due WAITING fills; dust is owned by reviewDust");
+  await sell.consume(events[0]);
+  assert.deepEqual(queued.map((intent) => [intent.intent, intent.instId]), [["DELIST", "QUIET-USDT"]]);
+});
+
+test("P3 an exhausted exit is re-driven after the stall window instead of waiting for reconciliation", () => {
+  const now = { value: 1_000, nowMs() { return this.value; } }; const telemetry = [];
+  const fill = { account_id: "a", inst_id: "BTC-USDT", base_ccy: "BTC", trade_id: "stalled", side: "BUY", fill_size: "1", disposed_size: "0", sell_time: 1, sell_state: "SELL_TRIGGERED", sell_trigger_reason: "SCHEDULED_CLOSE", version: 3 };
+  const sell = new SellService({ market: new MarketProjection({ clock: now }), clock: now, coordinator: { enqueue: () => true }, telemetry: (event) => telemetry.push(event) });
+  sell.rebuild([fill]);
+  assert.equal(sell.hasTriggered(), true);
+  assert.equal(sell.resumeTriggered().length, 1, "restart resume latches the exit");
+  assert.deepEqual(sell.resumeStalled({ nowMs: 10_000 }), [], "a freshly latched exit is left alone");
+  assert.deepEqual(sell.resumeStalled({ nowMs: 40_000, activeSourceTradeIds: new Set(["stalled"]) }), [], "an active attempt owns it");
+  assert.deepEqual(sell.resumeStalled({ nowMs: 40_000, pendingSourceTradeIds: new Set(["stalled"]) }), [], "a pending Coordinator intent owns it");
+  const resumed = sell.resumeStalled({ nowMs: 40_000 });
+  assert.deepEqual(resumed.map((event) => [event.type, event.reason, event.resumed]), [["SELL_BREACH", "SCHEDULED_CLOSE", true]]);
+  assert.ok(telemetry.some((event) => event.reason === "SELL_EXIT_STALL_RECOVERED"));
+  assert.deepEqual(sell.resumeStalled({ nowMs: 50_000 }), [], "and it is re-latched");
+});
+
+test("P3 settleExit partial-fill continuations keep the scheduled-close reason and no take-profit reference", async () => {
+  const now = clock(); const market = new MarketProjection({ clock: now });
+  market.updateInstrument({ instId: "BTC-USDT", ts: 1, state: "live", tickSz: "0.1", lotSz: "0.1", minSz: "0.1", base: "BTC" });
+  const attempt = { intent: "SELL", account_id: "a", inst_id: "BTC-USDT", base_ccy: "BTC", source_buy_trade_id: "partial", generation: 0, cl_ord_id: "partial-1" };
+  const source = { fill_size: "2", disposed_size: "1", version: 5, sell_trigger_reason: "SCHEDULED_CLOSE", fill_price: "100", protection_price: null };
+  const coordinator = new OrderCoordinator({ transaction: async (fn) => fn({}), state: { recordSystemSell: async () => ({ source }) }, orders: { markSettled: async () => ({ rowCount: 1 }) }, market, account: new AccountCapitalSnapshot({ clock: now }), readyGate: gate(), ownerGuard: { isHeld: () => true }, mode: () => "OFF", clock: now, config });
+  assert.deepEqual(await coordinator.settleExit({ attempt, fills: [{ tradeId: "t1", fillSz: "1", fillTime: "1" }], exchangeState: "canceled", accFillSz: "1" }), { settled: true, remaining: "1" });
+  const queued = [...coordinator.pending.SELL.values()][0];
+  assert.deepEqual([queued.reason, queued.referencePrice, queued.generation, queued.remainingSize], ["SCHEDULED_CLOSE", undefined, 1, "1"]);
+  assert.deepEqual([...coordinator.pendingExitSources()], ["partial"]);
 });

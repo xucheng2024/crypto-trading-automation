@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { normalizeInstrument } from "../src/domain/instrument.js";
 import { assertAttemptState, createClOrdId, createDecisionId, payloadHash } from "../src/domain/order.js";
-import { buySignal, CANDLE_STALE_HARD_MS, candleFreshness, dailyLimit, delistPlan, expectedClosedCandleTs, normalizeHoldHours, sellBreakdownPrice, sellProtectionAnchorClose, sellProtectionAnchorTs, strategyDay, takeProfitPrice } from "../src/domain/rules.js";
+import { delistPlan, normalizeHoldHours, normalizeStrategyDay, panicPrices, panicSellTime, previousStrategyDay, rankCountHits, strategyDay, strategyDayCloseSellMs, strategyDayStartMs } from "../src/domain/rules.js";
 
 test("domain instrument and order contracts normalize deterministically", async () => {
   assert.deepEqual(normalizeInstrument({ instId: "btc-usdt", tickSz: "0.1", lotSz: "0.001", state: "live" }), { instId: "BTC-USDT", base: "BTC", quote: "USDT", tickSz: "0.1", lotSz: "0.001", minSz: "0.001", state: "live", expTime: null });
@@ -18,47 +18,37 @@ test("domain instrument and order contracts normalize deterministically", async 
   assert.throws(() => assertAttemptState("FILLED"));
 });
 
-test("daily, duration, clock, buy, leverage and exit boundaries are pure", () => {
+test("strategy day, duration and exit boundaries are pure", () => {
   assert.equal(strategyDay(Date.UTC(2026, 0, 1, 16, 1)), "2026-01-02");
   assert.equal(normalizeHoldHours("2D"), "48");
   assert.equal(normalizeHoldHours("2", "H"), "2");
   assert.throws(() => normalizeHoldHours("2"));
-  const closes = Array(20).fill("30");
-  assert.equal(dailyLimit({ todayOpen: "100", yesterdayOpen: "100", yesterdayClose: "110", bestLimit: "90", tickSz: "0.1", ma20Closes: Array(20).fill("100") }).skipped, false);
-  assert.equal(dailyLimit({ todayOpen: "100", yesterdayOpen: "100", yesterdayClose: "110.01", bestLimit: "90", tickSz: "0.1", ma20Closes: closes }).skipped, true);
-  assert.deepEqual(dailyLimit({ todayOpen: "100", yesterdayOpen: "100", yesterdayClose: "100", bestLimit: "89.9", tickSz: "0.1", ma20Closes: closes }), { skipped: false, price: "89.9", ma20: "30" });
-  assert.deepEqual(dailyLimit({ todayOpen: "100", yesterdayOpen: "100", yesterdayClose: "100", bestLimit: "90", tickSz: "0.1", ma20Closes: closes }), { skipped: true, reason: "SKIPPED_ABOVE_MA20", ma20: "30" });
-  assert.equal(dailyLimit({ todayOpen: "100", yesterdayOpen: "100", yesterdayClose: "100", bestLimit: "90", tickSz: "0.1", ma20Closes: [...closes, "1000"] }).reason, "SKIPPED_ABOVE_MA20", "only the latest 20 closes count");
-  assert.equal(dailyLimit({ todayOpen: "100", yesterdayOpen: "100", yesterdayClose: "100", bestLimit: "90", tickSz: "0.1", ma20Closes: closes.slice(1) }).reason, "SKIPPED_MA20_UNAVAILABLE");
-  assert.equal(dailyLimit({ todayOpen: "100", yesterdayOpen: "100", yesterdayClose: "110.01", bestLimit: "90", tickSz: "0.1" }).reason, "SKIPPED_YESTERDAY_GAIN");
-  assert.equal(buySignal({ last: "90", askPx: "90", limitPrice: "90", previousClosedHigh: "89" }).eligible, true);
-  assert.deepEqual(buySignal({ last: "84", askPx: "84", limitPrice: "90", previousClosedHigh: "89" }), { eligible: true, reason: "ELIGIBLE", breakoutPrice: "89.267", dipPrice: "84.6", trigger: "DIP" });
-  assert.equal(buySignal({ last: "84.6", askPx: "84.6", limitPrice: "90", previousClosedHigh: "89" }).trigger, "DIP");
-  assert.equal(buySignal({ last: "89.267", askPx: "89.267", limitPrice: "90", previousClosedHigh: "89" }).reason, "BREAKOUT_NOT_CONFIRMED");
-  assert.equal(buySignal({ last: "85", askPx: "85", limitPrice: "90", previousClosedHigh: "89" }).reason, "BREAKOUT_NOT_CONFIRMED");
-  assert.deepEqual(buySignal({ last: "80", askPx: "80", limitPrice: "90", previousClosedHigh: "10" }), { eligible: true, reason: "ELIGIBLE", breakoutPrice: "10.03", dipPrice: "84.6", trigger: "BREAKOUT" });
-  assert.deepEqual(buySignal({ last: "90.1", askPx: "90", limitPrice: "90", previousClosedHigh: "89" }), { eligible: false, reason: "PRICE_OUTSIDE", breakoutPrice: "89.267", dipPrice: "84.6" });
-  assert.deepEqual(buySignal({ last: "90", askPx: "90.1", limitPrice: "90", previousClosedHigh: "89" }), { eligible: false, reason: "ASK_ABOVE_LIMIT", breakoutPrice: "89.267", dipPrice: "84.6" });
-  assert.equal(sellBreakdownPrice("100"), "99.7");
-  assert.equal(takeProfitPrice("100"), "120");
-  assert.throws(() => takeProfitPrice("0"));
-  assert.equal(sellProtectionAnchorClose(180_000), 180_000);
-  assert.equal(sellProtectionAnchorTs(180_000), 0);
-  assert.equal(sellProtectionAnchorClose(180_001), 360_000);
-  assert.equal(sellProtectionAnchorTs(180_001), 180_000);
-  assert.throws(() => takeProfitPrice("-5"));
   assert.deepEqual(delistPlan({ fillSize: "2", disposedSize: "0.5", availableSize: "1.2", availSell: "1", lotSz: "0.1", minSz: "0.1", price: "10" }), { executable: true, size: "1" });
 });
 
-test("confirmed 3m candle freshness follows the expected exchange-time bucket", () => {
-  const now = 720_000;
-  assert.equal(expectedClosedCandleTs(now), 540_000);
-  assert.deepEqual(candleFreshness({ candle: null, exchangeNowMs: now }), { state: "MISSING" });
-  assert.equal(candleFreshness({ candle: { confirm: true, ts: 540_000 }, exchangeNowMs: now }).state, "FRESH");
-  assert.equal(candleFreshness({ candle: { confirm: true, ts: 360_000 }, exchangeNowMs: now }).state, "PENDING");
-  assert.equal(candleFreshness({ candle: { confirm: true, ts: 180_000 }, exchangeNowMs: now }).state, "STALE");
-  assert.equal(candleFreshness({ candle: { confirm: true, ts: now - CANDLE_STALE_HARD_MS }, exchangeNowMs: now }).state, "STALE", "the hard stale boundary is inclusive");
-  assert.equal(candleFreshness({ candle: { confirm: true, ts: "not-a-timestamp" }, exchangeNowMs: now }).state, "STALE", "non-finite timestamps fail closed");
-  assert.equal(candleFreshness({ candle: { confirm: true, ts: now + 1 }, exchangeNowMs: now }).state, "STALE", "negative candle age fails closed");
-  assert.equal(candleFreshness({ candle: { confirm: true, ts: 720_000 }, exchangeNowMs: now }).state, "STALE", "future/current buckets cannot masquerade as closed candles");
+test("panic-rebound prices, ranks and UTC+8 day boundaries are pure", () => {
+  const dayStart = strategyDayStartMs("2026-09-24");
+  assert.equal(new Date(dayStart).toISOString(), "2026-09-23T16:00:00.000Z", "a strategy day starts at 00:00 UTC+8");
+  assert.equal(strategyDay(dayStart), "2026-09-24");
+  assert.equal(strategyDay(dayStart - 1), "2026-09-23");
+  assert.equal(previousStrategyDay("2026-09-24"), "2026-09-23");
+  assert.equal(normalizeStrategyDay(new Date(2026, 8, 24)), "2026-09-24", "pg DATE values are local-midnight Dates");
+  assert.equal(normalizeStrategyDay("2026-09-24T00:00:00Z"), "2026-09-24");
+  assert.throws(() => normalizeStrategyDay("not-a-day"));
+  assert.equal(strategyDayCloseSellMs("2026-09-24"), dayStart + 86_400_000 - 60_000, "close sells at 23:59:00 UTC+8");
+
+  assert.deepEqual(panicPrices({ open: "100", tickSz: "0.1" }), { countPrice: "82", buyPrice: "72" });
+  assert.deepEqual(panicPrices({ open: "1.2345", tickSz: "0.0001" }), { countPrice: "1.01229", buyPrice: "0.8888" }, "the buy limit rounds down to the tick");
+  assert.throws(() => panicPrices({ open: "0", tickSz: "0.1" }));
+  assert.throws(() => panicPrices({ open: "0.001", tickSz: "1" }), /rounds to zero/);
+
+  const hour = 3_600_000;
+  assert.equal(panicSellTime({ strategyDay: "2026-09-24", fillTime: dayStart + 15 * hour }), strategyDayCloseSellMs("2026-09-24"), "a 15:00 buy sells at 23:59");
+  assert.equal(panicSellTime({ strategyDay: "2026-09-24", fillTime: dayStart + 20 * hour }), strategyDayCloseSellMs("2026-09-24"), "a 20:00 buy still holds 3h before 23:59");
+  assert.equal(panicSellTime({ strategyDay: "2026-09-24", fillTime: dayStart + 22 * hour }), dayStart + 25 * hour, "a 22:00 buy sells at 01:00 next day");
+  assert.equal(panicSellTime({ strategyDay: "2026-09-24", fillTime: dayStart + 21 * hour }), dayStart + 24 * hour, "a 21:00 buy holds the full 3h");
+  assert.throws(() => panicSellTime({ strategyDay: "2026-09-24", fillTime: "x" }));
+
+  const ranks = rankCountHits([{ instId: "C-USDT", countHitAt: 30 }, { instId: "A-USDT", countHitAt: 10 }, { instId: "B-USDT", countHitAt: 10 }, { instId: "D-USDT", countHitAt: null }]);
+  assert.deepEqual([...ranks], [["A-USDT", 1], ["B-USDT", 2], ["C-USDT", 3]], "ties break by instId and unhit symbols are unranked");
 });

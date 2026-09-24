@@ -1,39 +1,26 @@
 import { compareDecimal, multiplyDecimal, roundToStep, subtractDecimal } from "../decimal.js";
-import { candleFreshness, sellBreakdownPrice, sellProtectionAnchorClose, sellProtectionAnchorTs, takeProfitPrice } from "../domain/rules.js";
 
 const field = (row, snake, camel) => row[snake] ?? row[camel];
-const LOSS_SELL_WINDOW_DELAY_MS = 24 * 60 * 60 * 1_000;
-
-// The frozen fill time and hold duration define the original window. A later
-// durable sell_time already records a deferral, including across restarts.
-const hasOriginalSellTime = (fill) => {
-  const original = Number(field(fill, "fill_time", "fillTime")) + Number(field(fill, "hold_hours", "holdHours")) * 3_600_000;
-  return Number.isSafeInteger(original) && Number(field(fill, "sell_time", "sellTime")) === original;
-};
+const SELL_OVERDUE_MS = 60_000;
+const STALLED_EXIT_MS = 30_000;
 
 /**
- * SELL watch has a deliberately split boundary. observe* is safe in a WS
- * callback: it touches only the projection/index and returns a critical event.
- * consume* runs later and is the only part that reads/writes durable state.
+ * Panic-rebound exits are purely time based: every WAITING BUY fill is market
+ * sold once its durable sell_time (day close, or fill + minimum hold) passes.
+ * There is no stop loss, take profit or price-conditioned deferral.
+ *
+ * The boundary stays split: the observe and review methods only touch memory and return
+ * critical events; consume runs later and is the only durable writer.
  */
 export class SellService {
-  constructor({ state, transaction = async (fn) => fn(null), coordinator, market, clock = { nowMs: () => Date.now() }, exchangeNowMs = () => clock.nowMs(), clockFresh = () => true, triggerClockSync = () => {}, refreshCandle = async () => {}, recoverAnchorCandle = async () => null, anchorRecoveryTimeoutMs = 20_000, isDelisting = () => false, telemetry = () => {}, loadFill = async (_tx, key) => this.fills.get(key) }) {
-    Object.assign(this, { state, transaction, coordinator, market, clock, exchangeNowMs, clockFresh, triggerClockSync, refreshCandle, recoverAnchorCandle, anchorRecoveryTimeoutMs, isDelisting, telemetry, loadFill });
-    this.fills = new Map(); this.byInst = new Map(); this.latches = new Set(); this.candleRefreshes = new Set(); this.anchorCandles = new Map(); this.anchorRecoveries = new Set(); this.pendingProtections = new Map(); this.clockSyncStale = false;
+  constructor({ state, transaction = async (fn) => fn(null), coordinator, market, clock = { nowMs: () => Date.now() }, exchangeNowMs = () => clock.nowMs(), isDelisting = () => false, telemetry = () => {}, loadFill = async (_tx, key) => this.fills.get(key) }) {
+    Object.assign(this, { state, transaction, coordinator, market, clock, exchangeNowMs, isDelisting, telemetry, loadFill });
+    this.fills = new Map(); this.byInst = new Map(); this.latches = new Map();
   }
   key(fill) { return `${field(fill, "account_id", "accountId")}:${field(fill, "inst_id", "instId")}:${field(fill, "trade_id", "tradeId")}`; }
   _emit(event) { try { Promise.resolve(this.telemetry(event)).catch(() => {}); } catch { /* best effort */ } }
+  _latch(key, atMs = this.clock.nowMs()) { this.latches.set(key, atMs); }
   releaseLatch(event, reason) {
-    if (event?.type === "SELL_DEFER_LOSS" && event.key) {
-      const released = this.latches.delete(event.key);
-      if (released) this._emit({ type: "sell_window_deferred", reason, instId: event.instId, key: event.key });
-      return released;
-    }
-    if (event?.type === "SELL_PROTECTION" && event.key) {
-      if (this.pendingProtections.get(event.key) !== event.protection) return false;
-      this.pendingProtections.delete(event.key);
-      return true;
-    }
     if (event?.type !== "SELL_BREACH" || !event.key) return false;
     const released = this.latches.delete(event.key);
     if (released) this._emit({ type: "sell_trigger_retry", reason, instId: event.instId, key: event.key });
@@ -53,7 +40,7 @@ export class SellService {
     this._emit({ type: "sell_trigger_retry", reason: "SELL_EVENT_RETRY_SCHEDULED", retryReason: reason, retryCount: event.retryCount, delayMs, instId: event.instId, key: event.key });
   }
   rebuild(fills) {
-    this.fills.clear(); this.byInst.clear(); this.latches.clear(); this.pendingProtections.clear(); this.anchorCandles.clear(); this.anchorRecoveries.clear();
+    this.fills.clear(); this.byInst.clear(); this.latches.clear();
     const snapshot = { total: 0, instruments: new Set(), waiting: 0, triggered: 0, dustPending: 0 };
     for (const fill of fills) {
       if (field(fill, "side", "side") !== "BUY" || !["WAITING", "SELL_TRIGGERED", "DUST_PENDING"].includes(field(fill, "sell_state", "sellState"))) continue;
@@ -66,267 +53,74 @@ export class SellService {
     }
     this._emit({ type: "sell_watch_loaded", reason: "SELL_WATCH_SNAPSHOT", total: snapshot.total, instruments: snapshot.instruments.size, waiting: snapshot.waiting, triggered: snapshot.triggered, dustPending: snapshot.dustPending });
   }
+  _resumeEvent(key, fill) {
+    return { type: "SELL_BREACH", priority: "critical", key, instId: field(fill, "inst_id", "instId"), reason: field(fill, "sell_trigger_reason", "sellTriggerReason") ?? "SCHEDULED_CLOSE", resumed: true };
+  }
   resumeTriggered(activeSourceTradeIds = new Set()) {
     const events = [];
     for (const [key, fill] of this.fills) {
       const tradeId = field(fill, "trade_id", "tradeId");
       if (field(fill, "sell_state", "sellState") !== "SELL_TRIGGERED" || activeSourceTradeIds.has(tradeId) || this.latches.has(key)) continue;
-      this.latches.add(key);
-      const reason = field(fill, "sell_trigger_reason", "sellTriggerReason") ?? "PRICE_BREAKDOWN";
-      const fillPrice = field(fill, "fill_price", "fillPrice");
-      const referencePrice = reason === "TAKE_PROFIT" && fillPrice ? takeProfitPrice(fillPrice) : undefined;
-      events.push({ type: "SELL_BREACH", priority: "critical", key, instId: field(fill, "inst_id", "instId"), protection: fill.protection_price, referencePrice, reason, resumed: true });
+      this._latch(key); events.push(this._resumeEvent(key, fill));
     }
     return events;
   }
-  resumeForceHold(activeSourceTradeIds = new Set()) {
+  // An exit whose Coordinator retries were exhausted keeps its latch but has
+  // no pending intent and no active attempt.  Re-drive it here instead of
+  // waiting for the next periodic reconciliation to rebuild the watch.
+  hasTriggered() { for (const fill of this.fills.values()) if (field(fill, "sell_state", "sellState") === "SELL_TRIGGERED") return true; return false; }
+  resumeStalled({ activeSourceTradeIds = new Set(), pendingSourceTradeIds = new Set(), nowMs = this.clock.nowMs() } = {}) {
     const events = [];
     for (const [key, fill] of this.fills) {
-      const tradeId = field(fill, "trade_id", "tradeId"); const forceSellTime = field(fill, "force_sell_time", "forceSellTime");
-      if (field(fill, "sell_state", "sellState") !== "WAITING" || activeSourceTradeIds.has(tradeId) || this.latches.has(key) || forceSellTime == null || Number(forceSellTime) > this.clock.nowMs()) continue;
-      this.latches.add(key);
-      events.push({ type: "SELL_BREACH", priority: "critical", key, instId: field(fill, "inst_id", "instId"), protection: fill.protection_price ?? fill.protectionPrice ?? null, reason: "MAX_HOLD_EXPIRED", resumed: true });
+      const tradeId = field(fill, "trade_id", "tradeId"); const latchedAt = this.latches.get(key);
+      if (field(fill, "sell_state", "sellState") !== "SELL_TRIGGERED" || activeSourceTradeIds.has(tradeId) || pendingSourceTradeIds.has(tradeId)) continue;
+      if (latchedAt !== undefined && nowMs - latchedAt < STALLED_EXIT_MS) continue;
+      this._latch(key, nowMs); events.push(this._resumeEvent(key, fill));
+      this._emit({ type: "sell_trigger_retry", reason: "SELL_EXIT_STALL_RECOVERED", instId: field(fill, "inst_id", "instId"), sourceBuyTradeId: tradeId });
     }
     return events;
   }
-  checkForceHold(instId, nowMs = this.clock.nowMs()) {
+  _dueEvents(keys, nowMs) {
     const events = [];
-    for (const key of this.byInst.get(instId) ?? []) {
-      const fill = this.fills.get(key); const forceSellTime = field(fill ?? {}, "force_sell_time", "forceSellTime");
-      if (!fill || field(fill, "sell_state", "sellState") !== "WAITING" || forceSellTime == null || Number(forceSellTime) > nowMs || this.latches.has(key)) continue;
-      this.latches.add(key);
-      events.push({ type: "SELL_BREACH", priority: "critical", key, instId, protection: fill.protection_price ?? fill.protectionPrice ?? null, reason: "MAX_HOLD_EXPIRED" });
+    for (const key of keys) {
+      const fill = this.fills.get(key);
+      // DUST_PENDING is owned exclusively by reviewDust(): it decides
+      // sellability from remaining size/notional, not from time alone.
+      if (!fill || field(fill, "sell_state", "sellState") !== "WAITING" || this.latches.has(key)) continue;
+      const sellTime = Number(field(fill, "sell_time", "sellTime"));
+      if (!Number.isFinite(sellTime) || sellTime > nowMs) continue;
+      this._latch(key); // must happen before event enqueue / any await
+      events.push({ type: "SELL_BREACH", priority: "critical", key, instId: field(fill, "inst_id", "instId"), reason: "SCHEDULED_CLOSE", sellTime });
     }
     return events;
   }
-  reviewForceHold() {
-    const events = []; const nowMs = this.clock.nowMs();
-    for (const instId of this.byInst.keys()) events.push(...this.checkForceHold(instId, nowMs));
-    return events;
-  }
-  observeCandle(instId) {
-    const candle = this.market.candle(instId); const instrument = this.market.instrument(instId);
-    if (!instrument) return [];
-    if (!this.clockFresh()) {
-      if (!this.clockSyncStale) {
-        this.clockSyncStale = true;
-        this._emit({ type: "sell_protection", reason: "SELL_CLOCK_SYNC_STALE", instId });
-        try { Promise.resolve(this.triggerClockSync()).catch(() => {}); } catch { /* best effort */ }
-      }
-      return this.observeTicker(instId);
-    }
-    this.clockSyncStale = false;
-    const freshness = candleFreshness({ candle, exchangeNowMs: this.exchangeNowMs() });
-    if (freshness.state !== "FRESH") {
-      const reason = freshness.state === "PENDING" ? "SELL_CANDLE_PENDING" : freshness.state === "MISSING" ? "SELL_CANDLE_MISSING" : "SELL_CANDLE_STALE";
-      const fills = [...(this.byInst.get(instId) ?? [])].map((key) => this.fills.get(key)).filter(Boolean);
-      this._emit({ type: "sell_protection", reason, instId, candleTs: candle?.ts, expectedTs: freshness.expectedTs, age: freshness.age });
-      for (const fill of fills) if (!fill.protection_price) this._emit({ type: "sell_protection", reason: "SELL_PROTECTION_UNARMED", instId, sourceBuyTradeId: field(fill, "trade_id", "tradeId") });
-      const events = this.observeTicker(instId);
-      return events;
-    }
-    return this.observeTicker(instId);
-  }
-  _anchorKey(instId, anchorTs) { return `${instId}:${anchorTs}`; }
-  _cacheAnchor(instId, anchorTs, candle) {
-    if (!candle?.confirm || Number(candle.ts) !== anchorTs) return null;
-    this.anchorCandles.set(this._anchorKey(instId, anchorTs), candle);
-    this.anchorRecoveries.delete(this._anchorKey(instId, anchorTs));
-    return candle;
-  }
-  _requestAnchor(instId, anchorTs, fill) {
-    const key = this._anchorKey(instId, anchorTs);
-    if (!this.anchorRecoveries.has(key)) this._emit({ type: "sell_protection", reason: "SELL_PROTECTION_MISSING", instId, sourceBuyTradeId: field(fill, "trade_id", "tradeId"), anchorTs });
-    this.anchorRecoveries.add(key);
-  }
-  _candidateProtection(fill, instId, candle) {
-    if (!fill || field(fill, "sell_state", "sellState") !== "WAITING" || !this.clockFresh()) return null;
-    const sellTime = Number(field(fill, "sell_time", "sellTime"));
-    if (!Number.isFinite(sellTime) || sellTime > this.clock.nowMs()) return null;
-    if (fill.protection_price) {
-      if (!candle?.confirm || candleFreshness({ candle, exchangeNowMs: this.exchangeNowMs() }).state !== "FRESH") return null;
-      return { protection: sellBreakdownPrice(candle.low), candle };
-    }
-    const anchorClose = sellProtectionAnchorClose(sellTime);
-    if (this.exchangeNowMs() < anchorClose) return null;
-    const anchorTs = sellProtectionAnchorTs(sellTime);
-    const exact = this._cacheAnchor(instId, anchorTs, candle) ?? this.anchorCandles.get(this._anchorKey(instId, anchorTs));
-    if (!exact) { this._requestAnchor(instId, anchorTs, fill); return null; }
-    return { protection: sellBreakdownPrice(exact.low), candle: exact };
-  }
-  _protectionEvent(key, instId, protection, candle) {
-    if (this.pendingProtections.get(key) === protection) return null;
-    this.pendingProtections.set(key, protection);
-    return { type: "SELL_PROTECTION", key, instId, protection, candleTs: candle.ts, previousClosedLow: candle.low };
-  }
-  reviewDueWatches() {
-    const events = [];
-    for (const instId of this.byInst.keys()) events.push(...this.observeTicker(instId));
-    return events;
-  }
+  observeTicker(instId) { return this._dueEvents(this.byInst.get(instId) ?? [], this.exchangeNowMs()); }
+  reviewDueWatches() { return this._dueEvents([...this.fills.keys()], this.exchangeNowMs()); }
   protectionHealth() {
-    const now = this.clock.nowMs(); let anchorDueUnprotected = 0;
+    const nowMs = this.exchangeNowMs(); let overdue = 0;
     for (const fill of this.fills.values()) {
       const sellTime = Number(field(fill, "sell_time", "sellTime"));
-      if (field(fill, "sell_state", "sellState") !== "WAITING" || fill.protection_price || !Number.isFinite(sellTime) || sellTime > now) continue;
-      if (this.exchangeNowMs() >= sellProtectionAnchorClose(sellTime)) anchorDueUnprotected += 1;
+      if (["WAITING", "SELL_TRIGGERED"].includes(field(fill, "sell_state", "sellState")) && Number.isFinite(sellTime) && nowMs - sellTime > SELL_OVERDUE_MS) overdue += 1;
     }
-    return { anchor_due_unprotected_current: anchorDueUnprotected };
-  }
-  async recoverDueAnchors() {
-    const events = [];
-    for (const key of [...this.anchorRecoveries]) {
-      const [instId, anchorText] = key.split(":"); const anchorTs = Number(anchorText);
-      try {
-        this._emit({ type: "sell_protection", reason: "SELL_ANCHOR_RECOVERY_STARTED", instId, anchorTs });
-        const candle = await this._recoverAnchorWithDeadline(instId, anchorTs);
-        if (!this._cacheAnchor(instId, anchorTs, candle)) {
-          this._emit({ type: "sell_protection", reason: "SELL_PROTECTION_MISSING", instId, anchorTs });
-          continue;
-        }
-        this._emit({ type: "sell_protection", reason: "SELL_ANCHOR_RECOVERED", instId, anchorTs, candleTs: candle.ts });
-        events.push(...this.observeTicker(instId));
-      } catch (error) {
-        this._emit({ type: "sell_protection", reason: "SELL_ANCHOR_RECOVERY_FAILED", instId, anchorTs, error: error?.message });
-      }
-    }
-    return events;
-  }
-  async _recoverAnchorWithDeadline(instId, anchorTs) {
-    const timeoutMs = Number(this.anchorRecoveryTimeoutMs);
-    if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) return this.recoverAnchorCandle(instId, anchorTs);
-    let timer;
-    try {
-      return await Promise.race([
-        this.recoverAnchorCandle(instId, anchorTs),
-        new Promise((_, reject) => { timer = setTimeout(() => reject(new Error("SELL_ANCHOR_RECOVERY_TIMEOUT")), timeoutMs); }),
-      ]);
-    } finally { clearTimeout(timer); }
-  }
-  reviewCandleFreshness() {
-    for (const instId of this.byInst.keys()) {
-      const freshness = candleFreshness({ candle: this.market.candle(instId), exchangeNowMs: this.exchangeNowMs() });
-      if (freshness.state === "FRESH") continue;
-      const reason = freshness.state === "PENDING" ? "SELL_CANDLE_PENDING" : freshness.state === "MISSING" ? "SELL_CANDLE_MISSING" : "SELL_CANDLE_STALE";
-      this._emit({ type: "sell_protection", reason, instId, candleTs: this.market.candle(instId)?.ts, expectedTs: freshness.expectedTs, age: freshness.age });
-      for (const key of this.byInst.get(instId) ?? []) {
-        const fill = this.fills.get(key);
-        if (fill && !fill.protection_price) this._emit({ type: "sell_protection", reason: "SELL_PROTECTION_UNARMED", instId, sourceBuyTradeId: field(fill, "trade_id", "tradeId") });
-      }
-      this._refreshCandle(instId);
-    }
-  }
-  _refreshCandle(instId) {
-    if (this.candleRefreshes.has(instId)) return;
-    this.candleRefreshes.add(instId);
-    try {
-      Promise.resolve(this.refreshCandle(instId)).catch((error) => this._emit({ type: "sell_protection", reason: "SELL_CANDLE_REFRESH_FAILED", instId, error: error?.message })).finally(() => this.candleRefreshes.delete(instId));
-    } catch (error) {
-      this.candleRefreshes.delete(instId); this._emit({ type: "sell_protection", reason: "SELL_CANDLE_REFRESH_FAILED", instId, error: error?.message });
-    }
-  }
-  observeTicker(instId) {
-    const quoteStatus = this.market.quoteStatus(instId, this.market.quoteFreshMs ?? 30_000, this.exchangeNowMs());
-    const quote = quoteStatus.fresh ? quoteStatus.quote : null;
-    if (!quoteStatus.fresh && quoteStatus.quote) this._emit({ type: "sell_protection", reason: "SELL_QUOTE_STALE", instId, quoteTs: quoteStatus.sourceTs, quoteReceiptAgeMs: quoteStatus.receiptAgeMs, quoteSourceAgeMs: quoteStatus.sourceAgeMs, quoteFreshness: quoteStatus.reason });
-    const events = [];
-    // Requires a fresh quote *and* an actual bidPx — no `?? last` fallback. A market SELL
-    // fills against the bid; falling back to `last` when bidPx is missing would trigger on
-    // a price nobody can actually sell at. Missing bidPx just waits for the next full quote.
-    if (quote && quote.bidPx) {
-      for (const key of this.byInst.get(instId) ?? []) {
-        const fill = this.fills.get(key); const state = fill && field(fill, "sell_state", "sellState");
-        // Only WAITING fills — never re-evaluate an already SELL_TRIGGERED fill here. If its
-        // latch was released (queue-full retry, restart) it must be re-armed by
-        // resumeTriggered() from the durable sell_trigger_reason, never relabeled TAKE_PROFIT
-        // just because price happens to be up when it's re-scanned for an unrelated reason.
-        if (!fill || state !== "WAITING" || this.latches.has(key)) continue;
-        const sellTime = Number(field(fill, "sell_time", "sellTime"));
-        const fillPrice = field(fill, "fill_price", "fillPrice");
-        // When the original sell window opens below entry, postpone it once
-        // for 24 hours. Latching before queueing makes the delay
-        // effective immediately, rather than allowing another event in this
-        // tick burst to submit a sell while the durable CAS update is pending.
-        if (hasOriginalSellTime(fill) && sellTime <= this.clock.nowMs() && fillPrice && compareDecimal(quote.bidPx, fillPrice) < 0) {
-          this.latches.add(key);
-          events.push({ type: "SELL_DEFER_LOSS", priority: "critical", key, instId, bidPx: quote.bidPx, nextSellTime: this.clock.nowMs() + LOSS_SELL_WINDOW_DELAY_MS });
-          continue;
-        }
-        const takeProfit = fillPrice ? takeProfitPrice(fillPrice) : null;
-        if (!takeProfit || compareDecimal(quote.bidPx, takeProfit) < 0) continue;
-        this.latches.add(key); // must happen before event enqueue / any await
-        // Never write fillPrice*1.20 into `protection` — that field is durably persisted
-        // as filled_orders.protection_price (the downside trailing floor) by consume();
-        // the take-profit target only travels as referencePrice for decision evidence.
-        events.push({ type: "SELL_BREACH", priority: "critical", key, instId, protection: fill.protection_price, referencePrice: takeProfit, triggerPrice: quote.bidPx, quoteTs: quote.ts, reason: "TAKE_PROFIT" });
-      }
-    }
-    events.push(...this.checkForceHold(instId, this.clock.nowMs()));
-    const candle = this.market.candle?.(instId);
-    for (const key of this.byInst.get(instId) ?? []) {
-      const fill = this.fills.get(key); const state = fill && field(fill, "sell_state", "sellState");
-      // DUST_PENDING is owned exclusively by reviewDust(): it decides
-      // sellability from remaining size/notional, not from price alone.
-      if (!fill || state !== "WAITING" || Number(field(fill, "sell_time", "sellTime")) > this.clock.nowMs() || this.latches.has(key)) continue;
-      const candidate = this._candidateProtection(fill, instId, candle);
-      const effectiveFloor = candidate ? (fill.protection_price && compareDecimal(fill.protection_price, candidate.protection) > 0 ? fill.protection_price : candidate.protection) : fill.protection_price;
-      if (!effectiveFloor) continue;
-      if (quote && compareDecimal(quote.last, effectiveFloor) < 0) {
-        this.latches.add(key); // must happen before event enqueue / any await
-        events.push({ type: "SELL_BREACH", priority: "critical", key, instId, protection: effectiveFloor, triggerPrice: quote.last, quoteTs: quote.ts, reason: "PRICE_BREAKDOWN" });
-        continue;
-      }
-      if (candidate && (!fill.protection_price || compareDecimal(candidate.protection, fill.protection_price) > 0)) {
-        const event = this._protectionEvent(key, instId, candidate.protection, candidate.candle);
-        if (event) events.push(event);
-      }
-    }
-    return events;
+    // anchor_due_unprotected_current keeps the existing sell alert wired to
+    // the one exit failure this strategy can have: a close that has not sold.
+    return { sell_overdue_current: overdue, anchor_due_unprotected_current: overdue };
   }
   async consume(event) {
+    if (event.type !== "SELL_BREACH") return { accepted: false, reason: "UNSUPPORTED" };
     const fill = await this.transaction((tx) => this.loadFill(tx, event.key));
     if (!fill) { this.releaseLatch(event, "FILL_MISSING"); return { accepted: false, reason: "FILL_MISSING" }; }
     const accountId = field(fill, "account_id", "accountId"); const instId = field(fill, "inst_id", "instId"); const tradeId = field(fill, "trade_id", "tradeId");
-    if (event.type === "SELL_DEFER_LOSS") {
-      if (field(fill, "sell_state", "sellState") !== "WAITING" || !hasOriginalSellTime(fill)) {
-        this.fills.set(event.key, fill);
-        this.releaseLatch(event, "LOSS_SELL_WINDOW_NOT_ELIGIBLE");
-        return { accepted: false, reason: "LOSS_SELL_WINDOW_NOT_ELIGIBLE" };
-      }
-      const result = await this.transaction((tx) => this.state.deferSellWindow(tx, { accountId, instId, tradeId, version: fill.version, sellTime: event.nextSellTime, bidPx: event.bidPx }));
-      if (result?.rowCount !== 1) return { accepted: false, reason: "CAS_LOST", retryable: true };
-      const current = result.rows?.[0] ?? { ...fill, sell_time: event.nextSellTime, version: BigInt(fill.version) + 1n };
-      this.fills.set(event.key, current);
-      this.latches.delete(event.key);
-      this._emit({ type: "sell_window_deferred", reason: "PRICE_BELOW_ENTRY", instId, sourceBuyTradeId: tradeId, bidPx: event.bidPx, entryPrice: field(fill, "fill_price", "fillPrice"), sellTime: event.nextSellTime });
-      return { accepted: true, reason: "LOSS_SELL_WINDOW_DEFERRED" };
-    }
-    if (event.type === "SELL_PROTECTION") {
-      if (fill.protection_price && compareDecimal(fill.protection_price, event.protection) >= 0) {
-        this.releaseLatch(event, "PROTECTION_ALREADY_APPLIED");
-        return { accepted: true, reason: "PROTECTION_ALREADY_APPLIED" };
-      }
-      const result = await this.transaction((tx) => this.state.raiseProtection(tx, { accountId, instId, tradeId, version: fill.version, protectionPrice: event.protection }));
-      if (result?.rowCount === 1) {
-        const current = result.rows?.[0] ?? { ...fill, protection_price: event.protection, version: BigInt(fill.version) + 1n };
-        this.fills.set(event.key, current);
-        this.releaseLatch(event, "PROTECTION_UPDATED");
-        this._emit({ type: "sell_watch_armed", reason: "SELL_WATCH_ARMED", instId, sourceBuyTradeId: tradeId, sellTime: field(fill, "sell_time", "sellTime"), candleTs: event.candleTs, previousClosedLow: event.previousClosedLow, breakdownPrice: event.protection });
-      }
-      if (result?.rowCount !== 1) return { accepted: false, reason: "CAS_LOST", retryable: true };
-      return { accepted: true, reason: "PROTECTION_UPDATED" };
-    }
-    if (event.type !== "SELL_BREACH") return { accepted: false, reason: "UNSUPPORTED" };
     const sellState = field(fill, "sell_state", "sellState");
     if (sellState === "SOLD") { this.releaseLatch(event, "FILL_SOLD"); return { accepted: false, reason: "FILL_SOLD" }; }
     if (sellState === "SELL_TRIGGERED") return this._enqueueTriggered(fill, event);
-    const result = await this.transaction((tx) => this.state.markSellTriggered(tx, { accountId, instId, tradeId, version: fill.version, protectionPrice: event.protection, sellTriggerReason: event.reason ?? "PRICE_BREAKDOWN" }));
+    const result = await this.transaction((tx) => this.state.markSellTriggered(tx, { accountId, instId, tradeId, version: fill.version, protectionPrice: null, sellTriggerReason: event.reason ?? "SCHEDULED_CLOSE" }));
     if (result?.rowCount !== 1) return { accepted: false, reason: "CAS_LOST", retryable: true };
-    const current = result.rows?.[0] ?? { ...fill, sell_state: "SELL_TRIGGERED", protection_price: event.protection, version: BigInt(fill.version) + 1n };
+    const current = result.rows?.[0] ?? { ...fill, sell_state: "SELL_TRIGGERED", sell_trigger_reason: event.reason ?? "SCHEDULED_CLOSE", version: BigInt(fill.version) + 1n };
     this.fills.set(event.key, current);
     const queued = this._enqueueTriggered(current, event);
     if (!queued.accepted) return queued;
-    this._emit({ type: "sell_triggered", reason: "SELL_TRIGGERED", instId, sourceBuyTradeId: tradeId, breakdownPrice: event.protection, triggerPrice: event.triggerPrice, quoteTs: event.quoteTs });
+    this._emit({ type: "sell_triggered", reason: "SELL_TRIGGERED", triggerReason: event.reason ?? "SCHEDULED_CLOSE", instId, sourceBuyTradeId: tradeId, sellTime: field(fill, "sell_time", "sellTime") });
     return { accepted: true, reason: "SELL_TRIGGERED" };
   }
   _enqueueTriggered(fill, event) {
@@ -336,7 +130,7 @@ export class SellService {
     // _exitGuard only accepts a DELIST-kind attempt for it — a fill reclaimed
     // here while delisting must route the same way or it can never sell.
     const intentKind = this.isDelisting(instId) ? "DELIST" : "SELL";
-    const accepted = this.coordinator.enqueue({ intent: intentKind, accountId, instId, baseCcy: field(fill, "base_ccy", "baseCcy"), sourceBuyTradeId: tradeId, remainingSize: subtractDecimal(field(fill, "fill_size", "fillSize"), field(fill, "disposed_size", "disposedSize") ?? "0"), fillVersion: fill.version, sellTime: Number(field(fill, "sell_time", "sellTime")), availableBase: fill.availableBase, bidPx: quote?.bidPx ?? quote?.last, protection: event.protection ?? fill.protection_price, referencePrice: event.referencePrice, reason: event.reason, triggerPrice: event.triggerPrice, quoteTs: event.quoteTs, executionMode: field(fill, "execution_mode", "executionMode"), executionRoute: field(fill, "execution_route", "executionRoute") });
+    const accepted = this.coordinator.enqueue({ intent: intentKind, accountId, instId, baseCcy: field(fill, "base_ccy", "baseCcy"), sourceBuyTradeId: tradeId, remainingSize: subtractDecimal(field(fill, "fill_size", "fillSize"), field(fill, "disposed_size", "disposedSize") ?? "0"), fillVersion: fill.version, sellTime: Number(field(fill, "sell_time", "sellTime")), availableBase: fill.availableBase, bidPx: quote?.bidPx ?? quote?.last, protection: fill.protection_price ?? undefined, reason: event.reason ?? field(fill, "sell_trigger_reason", "sellTriggerReason"), triggerPrice: quote?.bidPx ?? quote?.last, quoteTs: quote?.ts, executionMode: field(fill, "execution_mode", "executionMode"), executionRoute: field(fill, "execution_route", "executionRoute") });
     if (!accepted) {
       this._emit({ type: "sell_trigger_retry", reason: "COORDINATOR_REJECTED", instId, sourceBuyTradeId: tradeId });
       return { accepted: false, reason: "COORDINATOR_REJECTED", retryable: true };
@@ -350,7 +144,7 @@ export class SellService {
       const instId = field(fill, "inst_id", "instId"); const instrument = this.market.instrument(instId); const quoteStatus = this.market.quoteStatus(instId, this.market.quoteFreshMs ?? 30_000, this.exchangeNowMs()); const quote = quoteStatus.fresh ? quoteStatus.quote : null;
       const remaining = subtractDecimal(field(fill, "fill_size", "fillSize"), field(fill, "disposed_size", "disposedSize") ?? "0");
       if (instrument && quote && compareDecimal(roundToStep(remaining, instrument.lotSz, "down"), instrument.minSz) >= 0 && compareDecimal(multiplyDecimal(remaining, quote.bidPx ?? quote.last), "0.1") >= 0) {
-        this.latches.add(key); await this.consume({ type: "SELL_BREACH", key, instId, protection: fill.protection_price });
+        this._latch(key); await this.consume({ type: "SELL_BREACH", key, instId, reason: field(fill, "sell_trigger_reason", "sellTriggerReason") ?? "SCHEDULED_CLOSE" });
       }
     }
   }

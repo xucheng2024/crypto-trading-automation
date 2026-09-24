@@ -3,6 +3,8 @@ const TERMINAL = new Set(["NOT_CREATED", "SETTLED"]);
 // The private orders stream is the primary terminal signal.  This short-lived
 // read-only loop covers the gap when that stream is delayed or briefly absent;
 // the normal five-minute reconciliation remains the restart-safe backstop.
+// BUY attempts use it too, so an UNKNOWN IOC stops blocking its symbol quickly.
+const CONFIRMED_INTENTS = new Set(["BUY", "SELL", "DELIST"]);
 export class ExitSubmissionReconciler {
   constructor({ orders, reconciliation, transaction = async (fn) => fn(null), timers = globalThis, telemetry = () => {}, delaysMs = [250, 500, 1_000, 2_000, 5_000, 5_000, 5_000, 5_000, 5_000] } = {}) {
     if (!orders || !reconciliation) throw new TypeError("orders and reconciliation are required");
@@ -14,7 +16,7 @@ export class ExitSubmissionReconciler {
   schedule(attempt) {
     const clOrdId = attempt?.cl_ord_id ?? attempt?.clOrdId;
     const intent = attempt?.intent;
-    if (this.stopped || !clOrdId || !["SELL", "DELIST"].includes(intent) || this.pending.has(clOrdId)) return false;
+    if (this.stopped || !clOrdId || !CONFIRMED_INTENTS.has(intent) || this.pending.has(clOrdId)) return false;
     const task = { clOrdId, index: 0, handle: null, running: false };
     this.pending.set(clOrdId, task); this._arm(task); return true;
   }
@@ -22,7 +24,7 @@ export class ExitSubmissionReconciler {
     const attempts = await this.transaction((tx) => this.orders.listNonTerminal?.(tx, accountId) ?? []);
     return this.scheduleAttempts(attempts);
   }
-  scheduleAttempts(attempts = []) { return attempts.filter((attempt) => ["SELL", "DELIST"].includes(attempt.intent) && ["SUBMITTED", "UNKNOWN"].includes(attempt.state)).filter((attempt) => this.schedule(attempt)).length; }
+  scheduleAttempts(attempts = []) { return attempts.filter((attempt) => CONFIRMED_INTENTS.has(attempt.intent) && ["SUBMITTED", "UNKNOWN"].includes(attempt.state)).filter((attempt) => this.schedule(attempt)).length; }
   _arm(task) {
     if (this.stopped || !this.pending.has(task.clOrdId)) return;
     const delay = this.delaysMs[task.index++];

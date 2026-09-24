@@ -6,7 +6,6 @@ function base64(bytes) { let text = ""; for (const byte of new Uint8Array(bytes)
 const subscriptions = {
   public: (instIds) => [...instIds.map((instId) => ({ channel: "tickers", instId })), { channel: "instruments", instType: "SPOT" }, { channel: "status" }],
   private: () => [{ channel: "account" }, { channel: "balance_and_position" }, { channel: "orders", instType: "ANY" }],
-  business: (instIds) => instIds.map((instId) => ({ channel: "candle3m", instId })),
 };
 
 function key(arg, row = {}) { return `${arg.channel}:${row.instId || row.ccy || arg.instId || arg.instType || ""}`; }
@@ -27,11 +26,6 @@ function normalize(kind, arg, row) {
   if (kind === "public" && arg.channel === "instruments") return { type: "instrument", instId: row.instId, ts: Number(row.uTime || row.ts || 0), state: row.state, tickSz: row.tickSz, lotSz: row.lotSz, minSz: row.minSz, expTime: row.expTime, base: row.baseCcy ?? row.instId?.split("-")[0], quote: row.quoteCcy ?? row.instId?.split("-")[1], version: row.uTime ?? row.ts ?? "1" };
   if (kind === "public" && arg.channel === "status") return { ...row, type: "status", ts: Number(row.ts || 0) };
   if (kind === "private") return { ...row, type: arg.channel, ts: Number(row.pTime || row.uTime || row.ts || 0) };
-  if (kind === "business" && arg.channel === "candle3m") {
-    const [ts, open, high, low, close, volume, volumeCcy, volumeCcyQuote, confirm] = row;
-    if (String(confirm) !== "1") return null;
-    return { type: "candle3m", instId: arg.instId, ts: Number(ts), open, high, low, close, volume, volumeCcy, volumeCcyQuote, confirm: true };
-  }
   return null;
 }
 
@@ -79,6 +73,22 @@ export class OkxWsClient {
     this.pendingAcks = new Set(args.map(key));
     this.socket.send(JSON.stringify({ op: "subscribe", args }));
     if (this.pendingAcks.size === 0) this.confirmBaseline();
+  }
+  // The public ticker set follows the daily universe.  Only the difference is
+  // (un)subscribed on a live socket; a later reconnect subscribes the full set.
+  updateInstIds(next) {
+    const target = [...new Set(next)];
+    const current = new Set(this.instIds); const wanted = new Set(target);
+    const added = target.filter((instId) => !current.has(instId)); const removed = this.instIds.filter((instId) => !wanted.has(instId));
+    this.instIds = target;
+    if (this.kind !== "public" || !this.socket || !this.connected || (!added.length && !removed.length)) return { added: added.length, removed: removed.length };
+    if (removed.length) this.socket.send(JSON.stringify({ op: "unsubscribe", args: removed.map((instId) => ({ channel: "tickers", instId })) }));
+    if (added.length) {
+      const args = added.map((instId) => ({ channel: "tickers", instId }));
+      for (const arg of args) this.pendingAcks.add(key(arg));
+      this.socket.send(JSON.stringify({ op: "subscribe", args }));
+    }
+    return { added: added.length, removed: removed.length };
   }
   confirmBaseline() {
     this.baseline = true; this.stableSince = this.clock.nowMs(); this.armStableReset(); this.emitState();
@@ -133,4 +143,3 @@ export class OkxWsClient {
 
 export class OkxPublicWsClient extends OkxWsClient { constructor(options) { super({ ...options, kind: "public" }); } }
 export class OkxPrivateWsClient extends OkxWsClient { constructor(options) { super({ ...options, kind: "private" }); } }
-export class OkxBusinessWsClient extends OkxWsClient { constructor(options) { super({ ...options, kind: "business" }); } }

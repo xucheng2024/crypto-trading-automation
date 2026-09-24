@@ -119,7 +119,7 @@ export function runtimeMetricQuery(revisionName, timeFilter = "timestamp > ago(1
   if (!revisionName) return null;
   const revision = kustoString(revisionName);
   const replicaPrefix = kustoString(`${revisionName}-`);
-  return `traces | where ${timeFilter} | where message == 'metric_snapshot RUNTIME_METRICS' | where cloud_RoleInstance == ${revision} or cloud_RoleInstance startswith ${replicaPrefix} | top 1 by timestamp desc | project timestamp, ready=toint(customDimensions.ready), exitReady=toint(customDimensions.exit_ready), readyOwner=toint(customDimensions.ready_owner), readyDatabase=toint(customDimensions.ready_database), readyPublic=toint(customDimensions.ready_public), readyPrivate=toint(customDimensions.ready_private), readyBusiness=toint(customDimensions.ready_business), readyAccount=toint(customDimensions.ready_account), readyInstruments=toint(customDimensions.ready_instruments), strategyReady=toint(customDimensions.strategy_ready), marketMissing=toint(customDimensions.market_missing_instruments), marketOldestAgeMs=tolong(customDimensions.market_oldest_age_ms), decisionMissing=toint(customDimensions.decision_missing_instruments), decisionOldestAgeMs=tolong(customDimensions.decision_oldest_age_ms), anchorDueUnprotected=toint(customDimensions.anchor_due_unprotected_current), eventCount=toint(customDimensions.event_enqueue_count), decisionCount=toint(customDimensions.decision_eval_count), eventP99=toint(customDimensions.event_enqueue_p99_ms), decisionP99=toint(customDimensions.decision_eval_p99_ms), sourceLagP99=toint(customDimensions.market_source_lag_p99_ms), queueDepth=toint(customDimensions.queue_depth_current), pendingBuy=toint(customDimensions.pending_buy_current), exitBacklog=toint(customDimensions.exit_backlog_current), exitBacklogOldestAgeMs=tolong(customDimensions.exit_backlog_oldest_age_ms), exitBacklogReasons=tostring(customDimensions.exit_backlog_reasons), exitBacklogInstruments=tostring(customDimensions.exit_backlog_instruments), tradingMode=tostring(customDimensions.tradingMode)`;
+  return `traces | where ${timeFilter} | where message == 'metric_snapshot RUNTIME_METRICS' | where cloud_RoleInstance == ${revision} or cloud_RoleInstance startswith ${replicaPrefix} | top 1 by timestamp desc | project timestamp, ready=toint(customDimensions.ready), exitReady=toint(customDimensions.exit_ready), readyOwner=toint(customDimensions.ready_owner), readyDatabase=toint(customDimensions.ready_database), readyPublic=toint(customDimensions.ready_public), readyPrivate=toint(customDimensions.ready_private), readyAccount=toint(customDimensions.ready_account), readyInstruments=toint(customDimensions.ready_instruments), strategyReady=toint(customDimensions.strategy_ready), marketMissing=toint(customDimensions.market_missing_instruments), marketOldestAgeMs=tolong(customDimensions.market_oldest_age_ms), decisionMissing=toint(customDimensions.decision_missing_instruments), decisionOldestAgeMs=tolong(customDimensions.decision_oldest_age_ms), anchorDueUnprotected=toint(customDimensions.anchor_due_unprotected_current), eventCount=toint(customDimensions.event_enqueue_count), decisionCount=toint(customDimensions.decision_eval_count), eventP99=toint(customDimensions.event_enqueue_p99_ms), decisionP99=toint(customDimensions.decision_eval_p99_ms), sourceLagP99=toint(customDimensions.market_source_lag_p99_ms), queueDepth=toint(customDimensions.queue_depth_current), pendingBuy=toint(customDimensions.pending_buy_current), exitBacklog=toint(customDimensions.exit_backlog_current), exitBacklogOldestAgeMs=tolong(customDimensions.exit_backlog_oldest_age_ms), exitBacklogReasons=tostring(customDimensions.exit_backlog_reasons), exitBacklogInstruments=tostring(customDimensions.exit_backlog_instruments), tradingMode=tostring(customDimensions.tradingMode)`;
 }
 
 export function blockAggregateQuery(timeFilter) {
@@ -147,7 +147,7 @@ export function parseStrategyBaseline(row) {
 
 export function formatPipelineCoverageLine(row) {
   if (!row || optionalInt(row.runtime) == null) return "Pipeline coverage: unavailable";
-  return `Pipeline coverage: runtime=${row.runtime} quote_ready=${row.quote_ready} candle_ready=${row.candle_ready} strategy_row=${row.strategy_row} daily_state=${row.daily_state} evaluator_seen=${row.evaluator_seen} decision_emit=${row.decision_emit} | drop no_market_data=${row.no_market_data} candle_not_initialized=${row.candle_not_initialized} no_strategy_row=${row.no_strategy_row} strategy_state_never_created=${row.strategy_state_never_created} filtered_before_evaluator=${row.filtered_before_evaluator} unknown=${row.unknown}`;
+  return `Pipeline coverage: runtime=${row.runtime} quote_ready=${row.quote_ready} open_ready=${row.open_ready} count_hit=${row.count_hit} candidate=${row.candidate} buy_hit=${row.buy_hit} evaluator_seen=${row.evaluator_seen} | missing no_market_data=${row.no_market_data} open_missing=${row.open_missing}`;
 }
 
 export function parsePipelineCoverageRow(row) {
@@ -156,18 +156,15 @@ export function parsePipelineCoverageRow(row) {
   if (runtime == null) return null;
   return {
     runtime,
-    quote_ready: optionalInt(row.quote_ready), candle_ready: optionalInt(row.candle_ready),
-    strategy_row: optionalInt(row.strategy_row), daily_state: optionalInt(row.daily_state),
-    evaluator_seen: optionalInt(row.evaluator_seen), decision_emit: optionalInt(row.decision_emit),
-    no_market_data: optionalInt(row.no_market_data), candle_not_initialized: optionalInt(row.candle_not_initialized),
-    no_strategy_row: optionalInt(row.no_strategy_row), strategy_state_never_created: optionalInt(row.strategy_state_never_created),
-    filtered_before_evaluator: optionalInt(row.filtered_before_evaluator), unknown: optionalInt(row.unknown),
+    quote_ready: optionalInt(row.quote_ready), open_ready: optionalInt(row.open_ready),
+    count_hit: optionalInt(row.count_hit), candidate: optionalInt(row.candidate), buy_hit: optionalInt(row.buy_hit),
+    evaluator_seen: optionalInt(row.evaluator_seen), no_market_data: optionalInt(row.no_market_data), open_missing: optionalInt(row.open_missing),
   };
 }
 
-const WAITING_REASONS = new Set(["PRICE_OUTSIDE", "BREAKOUT_NOT_CONFIRMED", "CANDLE_PENDING", "ASK_ABOVE_LIMIT"]);
-const POLICY_REASONS = new Set(["SKIPPED_YESTERDAY_GAIN", "SKIPPED_ABOVE_MA20", "SKIPPED_MA20_UNAVAILABLE", "STRATEGY_POSITION_EXISTS", "ACTIVE_BUY_ATTEMPT", "TARGET_FILLED", "DIP_FIRST_ENTRY_ONLY"]);
-const OPPORTUNITY_REASONS = new Set(["BUY_QUEUED"]);
+const WAITING_REASONS = new Set(["ABOVE_COUNT_PRICE", "ABOVE_BUY_PRICE", "ASK_ABOVE_LIMIT", "DAILY_OPEN_PENDING"]);
+const POLICY_REASONS = new Set(["SKIPPED_FIRST_TWO", "PRIOR_POSITION_OPEN", "CAPITAL_EXHAUSTED", "DAY_CLOSED", "ACTIVE_BUY_ATTEMPT", "DUPLICATE_MARKET_SNAPSHOT", "COUNT_HIT_RECORDED"]);
+const OPPORTUNITY_REASONS = new Set(["BUY_QUEUED", "BUY_PRICE_REACHED"]);
 
 export function classifyDecision(reason) {
   if (WAITING_REASONS.has(reason)) return "waiting";
@@ -176,8 +173,8 @@ export function classifyDecision(reason) {
   return "blocked";
 }
 
-const RECOVERABLE_REASONS = new Set(["QUOTE_STALE", "CANDLE_STALE", "CLOCK_SYNC_STALE", "NOT_READY", "MARKET", "MAX_AVAIL_FAILED", "INSUFFICIENT_FUNDS_WAIT_RISK_VERSION", "EXECUTION_ROUTE_UNAVAILABLE"]);
-const MARKET_MOVED_REASONS = new Set(["BREAKOUT_NOT_CONFIRMED"]);
+const RECOVERABLE_REASONS = new Set(["QUOTE_STALE", "CLOCK_SYNC_STALE", "NOT_READY", "MARKET", "MAX_AVAIL_FAILED", "EXECUTION_ROUTE_UNAVAILABLE", "STRATEGY_DAY_REFRESH", "DAILY_OPEN_PENDING"]);
+const MARKET_MOVED_REASONS = new Set(["ABOVE_BUY_PRICE", "ASK_ABOVE_LIMIT"]);
 
 export function classifyBlock(reason) {
   if (RECOVERABLE_REASONS.has(reason)) return "LIKELY_RECOVERABLE";
@@ -213,9 +210,10 @@ export function summarizeTrading(decisionEvents, lifecycleEvents, routeByInst = 
     return {
       timestamp: event.timestamp, decisionId: event.decisionId, clOrdId: event.clOrdId, stage: event.stage, instId: event.instId, reason: event.reason, route: event.executionRoute ?? routeByInst.get(event.instId), apiBoundary: event.stage ? `PRE_API_${event.stage}` : apiBoundary,
       last: event.last, askPx: event.askPx, previousClosedHigh: event.previousClosedHigh,
-      dailyLimitPrice: event.dailyLimitPrice, breakoutPrice: event.breakoutPrice,
+      dailyLimitPrice: event.dailyLimitPrice ?? event.buyPrice ?? event.limitPrice, breakoutPrice: event.breakoutPrice,
+      countRank: event.countRank, countPrice: event.countPrice, ownedQuote: event.ownedQuote, notional: event.notional,
       breakoutGap: event.breakoutGap ?? gap(event.last, event.breakoutPrice), priceLimitGap: event.priceLimitGap,
-      limitHeadroom: gap(event.dailyLimitPrice, event.last), askLimitGap: gap(event.askPx, event.dailyLimitPrice),
+      limitHeadroom: gap(event.dailyLimitPrice ?? event.buyPrice ?? event.limitPrice, event.last), askLimitGap: gap(event.askPx, event.dailyLimitPrice ?? event.buyPrice ?? event.limitPrice),
       quoteAgeMs: event.quoteAgeMs, quoteReceiptAgeMs: event.quoteReceiptAgeMs, quoteSourceAgeMs: event.quoteSourceAgeMs, quoteFreshness: event.quoteFreshness, candleAgeMs: event.candleAgeMs, availBuy: event.availBuy,
       remainingCapacity: event.remainingCapacity, plannedSize: event.plannedSize, minSize: event.minSize,
       availableCapacity: event.availableCapacity, minimumCapacity: event.minimumCapacity, capacityGap: event.capacityGap,
@@ -927,7 +925,7 @@ export async function main(argv = process.argv.slice(2)) {
   const blockAggregate = blockAggregateQuery(timeFilter);
   const errorQuery = `traces | where ${timeFilter} | where severityLevel >= 3 | project timestamp, message, cloudRoleInstance=cloud_RoleInstance, tradingMode=tostring(customDimensions.tradingMode), error=tostring(customDimensions.error), failureClass=tostring(customDimensions.failureClass), endpoint=tostring(customDimensions.endpoint), httpStatus=tostring(customDimensions.httpStatus), okxCode=tostring(customDimensions.okxCode), okxMessageClass=tostring(customDimensions.okxMessageClass), okxSummary=tostring(customDimensions.okxSummary), responseClass=tostring(customDimensions.responseClass), durationMs=toint(customDimensions.durationMs), attempts=toint(customDimensions.attempts) | order by timestamp desc | take 10`;
   const baselineQuery = strategyBaselineQuery(revision?.name, baselineTimeFilter);
-  const pipelineQuery = `traces | where ${currentTimeFilter} | where message startswith 'instrument_pipeline_coverage ' | top 1 by timestamp desc | project timestamp, runtime=toint(customDimensions.runtime), quote_ready=toint(customDimensions.quote_ready), candle_ready=toint(customDimensions.candle_ready), strategy_row=toint(customDimensions.strategy_row), daily_state=toint(customDimensions.daily_state), evaluator_seen=toint(customDimensions.evaluator_seen), decision_emit=toint(customDimensions.decision_emit), no_market_data=toint(customDimensions.no_market_data), candle_not_initialized=toint(customDimensions.candle_not_initialized), no_strategy_row=toint(customDimensions.no_strategy_row), strategy_state_never_created=toint(customDimensions.strategy_state_never_created), filtered_before_evaluator=toint(customDimensions.filtered_before_evaluator), unknown=toint(customDimensions.unknown)`;
+  const pipelineQuery = `traces | where ${currentTimeFilter} | where message startswith 'instrument_pipeline_coverage ' | top 1 by timestamp desc | project timestamp, runtime=toint(customDimensions.runtime), quote_ready=toint(customDimensions.quote_ready), open_ready=toint(customDimensions.open_ready), count_hit=toint(customDimensions.count_hit), candidate=toint(customDimensions.candidate), buy_hit=toint(customDimensions.buy_hit), evaluator_seen=toint(customDimensions.evaluator_seen), no_market_data=toint(customDimensions.no_market_data), open_missing=toint(customDimensions.open_missing)`;
   const needDecisions = options.command !== "snapshot";
   const needCurrentDecisions = options.command === "report" || options.command === "blocks";
   const needLifecycle = options.command === "report" || options.command === "activity";
@@ -975,7 +973,8 @@ export async function main(argv = process.argv.slice(2)) {
   const assessment = assessRuntime({ app, active, replicas, traffic, metric, expectedMode: options.expectedMode });
   const container = revision?.properties?.template?.containers?.[0];
   const okxInstruments = container?.env?.find((row) => row.name === "OKX_INSTRUMENTS")?.value;
-  const runtimeInstruments = okxInstruments ? countCsvInstruments(okxInstruments) : null;
+  // The universe is discovered at runtime; the strategy baseline reports it.
+  const runtimeInstruments = Number.isInteger(baseline.instruments) ? baseline.instruments : okxInstruments ? countCsvInstruments(okxInstruments) : null;
   const strategyReadyInstruments = baseline.status === "STRATEGY_READY" ? baseline.instruments : null;
   const severe = classifySevereTraces(errors, revision?.name);
   const replicaContainers = replicas.flatMap((replica) => replica.properties?.containers ?? []);
@@ -1025,8 +1024,8 @@ export async function main(argv = process.argv.slice(2)) {
       console.log(`Runtime: traffic=${summary.runtime.trafficWeight}% replicas=${summary.runtime.replicas} ready=${summary.runtime.readyContainers} restarts_cumulative=${summary.runtime.restarts} image=${summary.runtime.image}`);
       if (summary.warnings.length) console.log(`Runtime warnings: ${summary.warnings.join(",")}`);
       console.log(`Latest metrics: ready=${metric?.ready ?? "missing"} events=${metric?.eventCount ?? 0} decisions=${metric?.decisionCount ?? decisions.decisions}`);
-      console.log(`Readiness gates: exit_ready=${metric?.exitReady ?? "?"} owner=${metric?.readyOwner ?? "?"} database=${metric?.readyDatabase ?? "?"} public=${metric?.readyPublic ?? "?"} private=${metric?.readyPrivate ?? "?"} business=${metric?.readyBusiness ?? "?"} account=${metric?.readyAccount ?? "?"} instruments=${metric?.readyInstruments ?? "?"} strategy=${metric?.strategyReady ?? "?"}`);
-      console.log(`Health telemetry: strategy_ready=${metric?.strategyReady ?? "?"} market_missing=${metric?.marketMissing ?? "?"} market_oldest_age_ms=${metric?.marketOldestAgeMs ?? "?"} decision_missing=${metric?.decisionMissing ?? "?"} decision_oldest_age_ms=${metric?.decisionOldestAgeMs ?? "?"} anchor_due_unprotected=${metric?.anchorDueUnprotected ?? "?"}`);
+      console.log(`Readiness gates: exit_ready=${metric?.exitReady ?? "?"} owner=${metric?.readyOwner ?? "?"} database=${metric?.readyDatabase ?? "?"} public=${metric?.readyPublic ?? "?"} private=${metric?.readyPrivate ?? "?"} account=${metric?.readyAccount ?? "?"} instruments=${metric?.readyInstruments ?? "?"} strategy=${metric?.strategyReady ?? "?"}`);
+      console.log(`Health telemetry: strategy_ready=${metric?.strategyReady ?? "?"} market_missing=${metric?.marketMissing ?? "?"} market_oldest_age_ms=${metric?.marketOldestAgeMs ?? "?"} decision_missing=${metric?.decisionMissing ?? "?"} decision_oldest_age_ms=${metric?.decisionOldestAgeMs ?? "?"} sell_overdue=${metric?.anchorDueUnprotected ?? "?"}`);
       console.log(formatDecisionTelemetryLine({ windowInstruments: decisions.instruments, currentStateCoverage: trading.currentStateCoverage, currentStates: trading.currentStates, runtimeInstruments, repoEnabled: artifact.enabled_count, strategyReadyInstruments, strategyBaseline: baseline }));
       console.log(formatPipelineCoverageLine(pipelineCoverage));
       console.log(`Latency: enqueue_p99=${metric?.eventP99 ?? "?"}ms decision_p99=${metric?.decisionP99 ?? "?"}ms source_lag_p99=${metric?.sourceLagP99 ?? "?"}ms`);
@@ -1060,7 +1059,7 @@ export async function main(argv = process.argv.slice(2)) {
     }
     const evidence = (row) => [
       row.decisionId && `decision=${row.decisionId}`, row.clOrdId && `order=${row.clOrdId}`, row.stage && `stage=${row.stage}`,
-      row.last && `last=${row.last}`, row.askPx && `ask=${row.askPx}`, row.breakoutPrice && `breakout=${row.breakoutPrice}`, row.dailyLimitPrice && `limit=${row.dailyLimitPrice}`,
+      row.last && `last=${row.last}`, row.askPx && `ask=${row.askPx}`, row.breakoutPrice && `breakout=${row.breakoutPrice}`, row.dailyLimitPrice && `limit=${row.dailyLimitPrice}`, row.countRank !== undefined && `count_rank=${row.countRank}`, row.ownedQuote !== undefined && `owned_usdt=${row.ownedQuote}`,
       row.breakoutGap !== undefined && `breakout_gap=${row.breakoutGap}`, row.priceLimitGap !== undefined && `price_limit_gap=${row.priceLimitGap}`, row.limitHeadroom !== undefined && `limit_headroom=${row.limitHeadroom}`,
       row.quoteAgeMs !== undefined && `quote_age_ms=${row.quoteAgeMs}`, row.quoteReceiptAgeMs !== undefined && `quote_receipt_age_ms=${row.quoteReceiptAgeMs}`, row.quoteSourceAgeMs !== undefined && `quote_source_age_ms=${row.quoteSourceAgeMs}`, row.quoteFreshness && `quote_freshness=${row.quoteFreshness}`, row.candleAgeMs !== undefined && `candle_age_ms=${row.candleAgeMs}`,
       row.availBuy !== undefined && `avail_buy=${row.availBuy}`, row.remainingCapacity !== undefined && `remaining_capacity=${row.remainingCapacity}`,

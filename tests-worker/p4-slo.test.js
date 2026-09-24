@@ -9,12 +9,11 @@ test('P4 SLO hooks observe actual WS projection and bounded latest-ticker queue'
   for (let i = 1; i <= 100; i += 1) { clock.n += 1; engine.receiveTicker({ instId: 'Q-USDT', ts: i, last: String(i), askPx: String(i) }); }
   assert.equal(engine.projection.ticker('Q-USDT').ts, 100); assert.equal(engine.queue.size, 1); assert.equal(percentile(slo.samples.get('event_enqueue'), .99), 0); assert.equal(percentile(slo.samples.get('ws_projection_enqueue'), .99), 0); assert.equal(percentile(slo.samples.get('queue_depth'), 1), 1);
 });
-test('P4 queue saturation exposes dropped recheck, sell and order counters', () => {
+test('P4 queue saturation exposes dropped sell and order counters', () => {
   const clock = { nowMs: () => 1 }; const slo = new VirtualSloMetrics(clock); const queue = new BoundedPriorityQueue({ capacity: 0 });
-  const sellService = { observeTicker: () => [{ type: 'SELL_BREACH', priority: 'critical' }], observeCandle: () => [{ type: 'SELL_PROTECTION', priority: 'critical' }] };
+  const sellService = { observeTicker: () => [{ type: 'SELL_BREACH', priority: 'critical' }] };
   const engine = new TradingEngine({ clock, slo, queue, sellService });
   engine.receiveTicker({ instId: 'Q-USDT', ts: 1, last: '1', askPx: '1' });
-  engine.receiveCandle({ instId: 'Q-USDT', ts: 1, low: '1', confirm: true });
   assert.equal(engine.receiveOrder({ instId: 'Q-USDT' }), false);
-  assert.deepEqual(slo.snapshot(), { queue_dropped_sell: 2, queue_dropped_recheck: 1, queue_dropped_order: 1, event_enqueue_count: 1, event_enqueue_p50_ms: 0, event_enqueue_p95_ms: 0, event_enqueue_p99_ms: 0, event_enqueue_max_ms: 0, ws_projection_enqueue_count: 1, ws_projection_enqueue_p50_ms: 0, ws_projection_enqueue_p95_ms: 0, ws_projection_enqueue_p99_ms: 0, ws_projection_enqueue_max_ms: 0, queue_depth_count: 1, queue_depth_p50_ms: 1, queue_depth_p95_ms: 1, queue_depth_p99_ms: 1, queue_depth_max_ms: 1, market_source_lag_count: 1, market_source_lag_p50_ms: 0, market_source_lag_p95_ms: 0, market_source_lag_p99_ms: 0, market_source_lag_max_ms: 0 });
+  assert.deepEqual(slo.snapshot(), { queue_dropped_sell: 1, queue_dropped_order: 1, event_enqueue_count: 1, event_enqueue_p50_ms: 0, event_enqueue_p95_ms: 0, event_enqueue_p99_ms: 0, event_enqueue_max_ms: 0, ws_projection_enqueue_count: 1, ws_projection_enqueue_p50_ms: 0, ws_projection_enqueue_p95_ms: 0, ws_projection_enqueue_p99_ms: 0, ws_projection_enqueue_max_ms: 0, queue_depth_count: 1, queue_depth_p50_ms: 1, queue_depth_p95_ms: 1, queue_depth_p99_ms: 1, queue_depth_max_ms: 1, market_source_lag_count: 1, market_source_lag_p50_ms: 0, market_source_lag_p95_ms: 0, market_source_lag_p99_ms: 0, market_source_lag_max_ms: 0 });
 });

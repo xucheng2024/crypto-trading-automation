@@ -1,5 +1,6 @@
 import { classifyManagedFill } from "../infrastructure/okx/rest-client.js";
 import { addDecimal, compareDecimal, divideDecimal, multiplyDecimal } from "../decimal.js";
+import { PANIC_MIN_HOLD_HOURS, PANIC_STRATEGY_HASH, normalizeStrategyDay, panicSellTime, strategyDay } from "../domain/rules.js";
 
 export const FILL_WATERMARK_SETTLEMENT_LAG_MS = 5 * 60_000;
 export const ORDER_ABSENCE_CONFIRMATION_MAX_AGE_MS = 7 * 24 * 60 * 60_000;
@@ -31,6 +32,17 @@ function recordConfirmedBuy(groups, { managed, fill, attempt, sellTime }) {
   groups.set(key, current);
 }
 
+// A SYSTEM BUY recovered from the exchange before (or instead of) its own
+// settlement gets exactly the schedule settleBuy would have written.
+function systemBuyPlan(managed, attempt) {
+  const day = attempt?.strategy_day ?? attempt?.strategyDay;
+  return {
+    holdHours: attempt?.hold_hours ?? attempt?.holdHours ?? PANIC_MIN_HOLD_HOURS,
+    strategyConfigHash: attempt?.strategy_config_hash ?? attempt?.strategyConfigHash ?? PANIC_STRATEGY_HASH,
+    sellTime: panicSellTime({ strategyDay: day ? normalizeStrategyDay(day) : strategyDay(Number(managed.fillTime)), fillTime: managed.fillTime }),
+  };
+}
+
 /** Read-only reconciliation and ACCOUNT fill ingestion; it never invokes mutation transport. */
 export class ReconciliationService {
   constructor({ orders, state, transport, ownerGuard, readyGate, clock = { nowMs: () => Date.now() }, sleep = async () => {}, aborted = () => false, safetyWaitMs, telemetry = () => {}, transaction = async (fn) => fn(null), ownership = {}, onAccountBuy = () => {}, onRecovery = async () => {}, onTerminal = async () => {} }) {
@@ -42,15 +54,15 @@ export class ReconciliationService {
       this.readyGate.set("owner", false);
     });
   }
-  async recover({ accountId, scopes = ["public", "private", "business"], strategyDay } = {}) {
+  async recover({ accountId, scopes = ["public", "private"], strategyDay } = {}) {
     this.readyGate.set("owner", false); for (const scope of scopes) this.readyGate.set(scope, false);
     if (!this.ownerGuard.isHeld()) return { ready: false, reason: "OWNER_NOT_HELD" };
     try {
       if (this.aborted()) throw Object.assign(new Error("STARTUP_CANCELLED"), { code: "STARTUP_CANCELLED" });
       this.readyGate.set("owner", true); await this.sleep(this.safetyWaitMs);
       if (this.aborted()) throw Object.assign(new Error("STARTUP_CANCELLED"), { code: "STARTUP_CANCELLED" });
-      const [protection, daily, initialLedger, attempts, buyAttempts, watermarks] = await this.transaction((tx) => Promise.all([
-        this.state.listProtection?.(tx, accountId) ?? [], this.state.listDaily?.(tx, accountId) ?? [], this.state.listManagedFills?.(tx, accountId) ?? [],
+      const [protection, initialLedger, attempts, buyAttempts, watermarks] = await this.transaction((tx) => Promise.all([
+        this.state.listProtection?.(tx, accountId) ?? [], this.state.listManagedFills?.(tx, accountId) ?? [],
         this.orders.listNonTerminal?.(tx, accountId) ?? [], this.orders.listTodayBuys?.(tx, accountId, strategyDay) ?? [], this.orders.listWatermarks?.(tx, accountId) ?? [],
       ]));
       const recovered = await this.reconcileAll({ accountId, attempts, watermarks });
@@ -60,8 +72,8 @@ export class ReconciliationService {
       const ledger = await this.transaction((tx) => this.state.listManagedFills?.(tx, accountId) ?? initialLedger);
       // Consumers rebuild their in-memory watch/index strictly from this
       // durable snapshot before READY can be restored by baseline completion.
-      await this.onRecovery({ protection, daily, ledger, attempts, buyAttempts, watermarks, recovered });
-      emit(this.telemetry, { type: "recovery_loaded", protection: protection.length, daily: daily.length, fills: ledger.length, attempts: attempts.length, buyAttempts: buyAttempts.length, watermarks: watermarks.length, recovered: recovered.length });
+      await this.onRecovery({ protection, ledger, attempts, buyAttempts, watermarks, recovered });
+      emit(this.telemetry, { type: "recovery_loaded", protection: protection.length, fills: ledger.length, attempts: attempts.length, buyAttempts: buyAttempts.length, watermarks: watermarks.length, recovered: recovered.length });
       return { ready: false, reason: "BASELINES_REQUIRED", attempts, buyAttempts, recovered };
     } catch (error) {
       if (error?.code === "STARTUP_CANCELLED") this.readyGate.set("owner", false);
@@ -242,8 +254,13 @@ export class ReconciliationService {
       }
     }
     const isBuy = managed.side === "buy";
-    if (isBuy && !this.ownership.holdHoursByInst?.[managed.instId]) { if (batch) batch.ignored += 1; emit(this.telemetry, { type: "account_fill", reason: "STRATEGY_CONFIG_MISSING", instId: managed.instId }); return false; }
     const baseCcy = managed.instId.split("-")[0];
+    // The panic-rebound strategy owns only its own orders.  A manual BUY is
+    // never adopted, and a manual SELL matters only while the strategy still
+    // holds that base (it then shrinks the managed position).
+    if (isBuy && managed.source !== "SYSTEM") { if (batch) batch.ignored += 1; emit(this.telemetry, { type: "account_fill", reason: "ACCOUNT_BUY_NOT_MANAGED", instId: managed.instId }); return false; }
+    if (!isBuy && managed.source !== "SYSTEM" && this.state.hasOpenManagedBase && !await this.state.hasOpenManagedBase(tx, { accountId: this.ownership.accountId, baseCcy })) { if (batch) batch.ignored += 1; return false; }
+    const buyPlan = isBuy ? systemBuyPlan(managed, attempt) : null;
     if (managed.source === "ACCOUNT" && !isBuy) await this.orders.lockExitBase?.(tx, this.ownership.accountId, baseCcy);
     const inserted = await this.state.insertFill(tx, {
       accountId: this.ownership.accountId, instId: managed.instId, baseCcy, tradeId: managed.tradeId, billId: managed.billId,
@@ -251,7 +268,7 @@ export class ReconciliationService {
       executionMode: managed.executionMode,
       executionRoute: managed.executionRoute,
       sourceAttemptClOrdId,
-      ...(isBuy ? { holdHours: this.ownership.holdHoursByInst?.[managed.instId], maxHoldHours: this.ownership.maxHoldHoursByInst?.[managed.instId] ?? null, strategyConfigHash: this.ownership.configHash, sellTime: Number(managed.fillTime) + Number(this.ownership.holdHoursByInst?.[managed.instId] ?? 0) * 3_600_000, forceSellTime: this.ownership.maxHoldHoursByInst?.[managed.instId] ? Number(managed.fillTime) + Number(this.ownership.maxHoldHoursByInst[managed.instId]) * 3_600_000 : null, sellState: "WAITING" } : { allocationState: "PENDING" }),
+      ...(isBuy ? { holdHours: buyPlan.holdHours, maxHoldHours: null, strategyConfigHash: buyPlan.strategyConfigHash, sellTime: buyPlan.sellTime, forceSellTime: null, sellState: "WAITING" } : { allocationState: "PENDING" }),
     });
     if (inserted?.rowCount === 0) await this.state.attachFillBillId?.(tx, {
       accountId: this.ownership.accountId, instId: managed.instId, tradeId: managed.tradeId, billId: managed.billId,
@@ -267,8 +284,7 @@ export class ReconciliationService {
       else if (isBuy) batch.accountBuys += 1; else batch.accountSells += 1;
     }
     if (isBuy && inserted?.rowCount === 1 && confirmedBuys) {
-      const sellTime = Number(managed.fillTime) + Number(this.ownership.holdHoursByInst?.[managed.instId] ?? 0) * 3_600_000;
-      recordConfirmedBuy(confirmedBuys, { managed, fill, attempt, sellTime });
+      recordConfirmedBuy(confirmedBuys, { managed, fill, attempt, sellTime: buyPlan.sellTime });
     }
     if (managed.source === "ACCOUNT" && isBuy && inserted?.rowCount !== 0) {
       // Refresh the in-memory risk and exit indexes only after the durable

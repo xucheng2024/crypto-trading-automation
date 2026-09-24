@@ -2,8 +2,8 @@
 // credential-free maintenance Job: these actions use the authenticated OKX
 // read port but never the mutation transport.
 export class EngineRecurringWork {
-  constructor({ timers = globalThis, telemetry = () => {}, announcementMs = 60_000, reconcileMs = 300_000, routeMs = 3_600_000, weeklyMs = 7 * 86_400_000, metricsMs = 60_000, clockSyncMs = 300_000, candleReviewMs = 15_000, dustReviewMs = candleReviewMs, announcements = async () => {}, reconcile = async () => {}, refreshRoutes = async () => {}, weeklyReconcile = reconcile, reportMetrics = async () => {}, clockSync = async () => {}, reviewCandles = async () => {}, reviewDust = async () => {} } = {}) {
-    Object.assign(this, { timers, telemetry, announcementMs, reconcileMs, routeMs, weeklyMs, metricsMs, clockSyncMs, candleReviewMs, dustReviewMs, announcements, reconcile, refreshRoutes, weeklyReconcile, reportMetrics, clockSync, reviewCandles, reviewDust });
+  constructor({ timers = globalThis, telemetry = () => {}, announcementMs = 60_000, reconcileMs = 300_000, routeMs = 3_600_000, weeklyMs = 7 * 86_400_000, metricsMs = 60_000, clockSyncMs = 300_000, sellReviewMs = 5_000, dustReviewMs = 15_000, announcements = async () => {}, reconcile = async () => {}, refreshRoutes = async () => {}, weeklyReconcile = reconcile, reportMetrics = async () => {}, clockSync = async () => {}, reviewSells = async () => {}, reviewDust = async () => {} } = {}) {
+    Object.assign(this, { timers, telemetry, announcementMs, reconcileMs, routeMs, weeklyMs, metricsMs, clockSyncMs, sellReviewMs, dustReviewMs, announcements, reconcile, refreshRoutes, weeklyReconcile, reportMetrics, clockSync, reviewSells, reviewDust });
     this.handles = []; this.busy = false; this.independent = new Map();
   }
   _emit(event) { try { Promise.resolve(this.telemetry(event)).catch(() => {}); } catch { /* telemetry cannot alter scheduling */ } }
@@ -36,7 +36,7 @@ export class EngineRecurringWork {
     add("WEEKLY_RECONCILE", this.weeklyMs, this.weeklyReconcile);
     add("METRICS", this.metricsMs, this.reportMetrics, false);
     add("CLOCK_SYNC", this.clockSyncMs, this.clockSync, false);
-    add("CANDLE_REVIEW", this.candleReviewMs, this.reviewCandles, false);
+    add("SELL_REVIEW", this.sellReviewMs, this.reviewSells, false);
     add("DUST_REVIEW", this.dustReviewMs, this.reviewDust, false);
   }
   stop() { for (const handle of this.handles.splice(0)) this.timers.clearInterval(handle); }

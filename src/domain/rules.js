@@ -1,34 +1,6 @@
-import { compareDecimal, divideDecimal, multiplyDecimal, roundToStep } from "../decimal.js";
+import { compareDecimal, multiplyDecimal, roundToStep } from "../decimal.js";
 
 export const TRADE_FEE_RATE = "0.0005";
-export const CANDLE_INTERVAL_MS = 180_000;
-export const CANDLE_STALE_HARD_MS = 390_000;
-
-export function sellProtectionAnchorClose(sellTime) {
-  const value = Number(sellTime);
-  if (!Number.isFinite(value) || value < 0) throw new Error("sell time is required");
-  return Math.ceil(value / CANDLE_INTERVAL_MS) * CANDLE_INTERVAL_MS;
-}
-
-export function sellProtectionAnchorTs(sellTime) {
-  return sellProtectionAnchorClose(sellTime) - CANDLE_INTERVAL_MS;
-}
-
-export function expectedClosedCandleTs(exchangeTimeMs) {
-  if (!Number.isFinite(exchangeTimeMs)) throw new Error("exchange time is required");
-  return Math.floor(exchangeTimeMs / CANDLE_INTERVAL_MS) * CANDLE_INTERVAL_MS - CANDLE_INTERVAL_MS;
-}
-
-export function candleFreshness({ candle, exchangeNowMs }) {
-  if (!candle?.confirm) return { state: "MISSING" };
-  const candleTs = Number(candle.ts);
-  if (!Number.isFinite(candleTs)) return { state: "STALE", age: NaN, expectedTs: expectedClosedCandleTs(exchangeNowMs) };
-  const expectedTs = expectedClosedCandleTs(exchangeNowMs);
-  const age = exchangeNowMs - candleTs;
-  if (age < 0 || candleTs > expectedTs || age >= CANDLE_STALE_HARD_MS) return { state: "STALE", age, expectedTs };
-  if (candleTs < expectedTs) return { state: "PENDING", age, expectedTs };
-  return { state: "FRESH", age, expectedTs };
-}
 
 export function strategyDay(exchangeTimeMs) {
   if (!Number.isFinite(exchangeTimeMs)) throw new Error("exchange time is required");
@@ -44,49 +16,64 @@ export function normalizeHoldHours(value, legacyUnit) {
   return unit === "D" ? multiplyDecimal(number, "24") : number;
 }
 
-export const MA20_PERIOD = 20;
-export const MA20_CEILING_MULTIPLIER = "3";
+// Panic-rebound strategy.  Every UTC+8 day, each live USDT spot pair whose
+// last trade reaches open*0.82 is counted in exchange-time order.  The first
+// PANIC_SKIP_COUNT counted pairs are never bought; any later counted pair whose
+// last trade reaches open*0.72 is bought with owned USDT at exactly that limit.
+// Each fill is market-sold at the day close, or after the minimum hold.
+export const PANIC_COUNT_RATIO = "0.82";
+export const PANIC_BUY_RATIO = "0.72";
+export const PANIC_SKIP_COUNT = 2;
+export const PANIC_MIN_HOLD_HOURS = "3";
+export const PANIC_MIN_HOLD_MS = 3 * 3_600_000;
+export const PANIC_CLOSE_SELL_LEAD_MS = 60_000;
+export const PANIC_MIN_ORDER_USDT = "10";
+export const PANIC_STRATEGY_HASH = "panic-rebound-v1:count=0.82:buy=0.72:skip=2:hold=3h:close=23:59";
 
-// Every BUY is a limit order at the daily limit price, so comparing that price with the
-// closed-candle MA20 once per strategy day bounds every possible fill without per-tick checks.
-export function dailyLimit({ todayOpen, yesterdayOpen, yesterdayClose, bestLimit, tickSz, ma20Closes }) {
-  if ([todayOpen, yesterdayOpen, yesterdayClose, bestLimit, tickSz].some((value) => compareDecimal(value, "0") <= 0)) throw new Error("daily limit inputs must be positive");
-  if (compareDecimal(multiplyDecimal(yesterdayClose, "10"), multiplyDecimal(yesterdayOpen, "11")) > 0) return { skipped: true, reason: "SKIPPED_YESTERDAY_GAIN" };
-  if (!Array.isArray(ma20Closes) || ma20Closes.length < MA20_PERIOD) return { skipped: true, reason: "SKIPPED_MA20_UNAVAILABLE" };
-  const closes = ma20Closes.slice(0, MA20_PERIOD);
-  if (closes.some((value) => compareDecimal(value, "0") <= 0)) throw new Error("MA20 closes must be positive");
-  const sum = closes.reduce((total, value) => addDecimal(total, value), "0");
-  const ma20 = divideDecimal(sum, String(MA20_PERIOD));
-  const price = roundToStep(divideDecimal(multiplyDecimal(todayOpen, bestLimit), "100"), tickSz, "down");
-  if (compareDecimal(multiplyDecimal(price, String(MA20_PERIOD)), multiplyDecimal(sum, MA20_CEILING_MULTIPLIER)) >= 0) return { skipped: true, reason: "SKIPPED_ABOVE_MA20", ma20 };
-  return { skipped: false, price, ma20 };
+const DAY_MS = 86_400_000;
+const UTC8_OFFSET_MS = 8 * 3_600_000;
+
+// pg returns DATE columns as local-midnight Date objects; tests and JSON rows
+// carry YYYY-MM-DD strings.  Both normalize to the same strategy-day text.
+export function normalizeStrategyDay(value) {
+  if (value instanceof Date) {
+    if (!Number.isFinite(value.getTime())) throw new Error("strategy day is required");
+    return `${value.getFullYear()}-${String(value.getMonth() + 1).padStart(2, "0")}-${String(value.getDate()).padStart(2, "0")}`;
+  }
+  const text = String(value ?? "").slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(text)) throw new Error("strategy day is required");
+  return text;
 }
 
-export const BUY_BREAKOUT_MULTIPLIER = "1.003";
-export const BUY_DIP_MULTIPLIER = "0.94";
-export const SELL_BREAKDOWN_MULTIPLIER = "0.997";
-
-export function buySignal({ last, askPx, limitPrice, previousClosedHigh }) {
-  const breakoutPrice = multiplyDecimal(previousClosedHigh, BUY_BREAKOUT_MULTIPLIER);
-  const dipPrice = multiplyDecimal(limitPrice, BUY_DIP_MULTIPLIER);
-  if (compareDecimal(last, limitPrice) > 0) return { eligible: false, reason: "PRICE_OUTSIDE", breakoutPrice, dipPrice };
-  const breakoutConfirmed = compareDecimal(last, breakoutPrice) > 0;
-  const dipConfirmed = compareDecimal(last, dipPrice) <= 0;
-  if (!breakoutConfirmed && !dipConfirmed) return { eligible: false, reason: "BREAKOUT_NOT_CONFIRMED", breakoutPrice, dipPrice };
-  if (compareDecimal(askPx, limitPrice) > 0) return { eligible: false, reason: "ASK_ABOVE_LIMIT", breakoutPrice, dipPrice };
-  return { eligible: true, reason: "ELIGIBLE", breakoutPrice, dipPrice, trigger: breakoutConfirmed ? "BREAKOUT" : "DIP" };
+export function strategyDayStartMs(day) {
+  const start = Date.parse(`${normalizeStrategyDay(day)}T00:00:00.000Z`);
+  if (!Number.isFinite(start)) throw new Error("strategy day is required");
+  return start - UTC8_OFFSET_MS;
 }
 
-export function sellBreakdownPrice(previousClosedLow) {
-  if (compareDecimal(previousClosedLow, "0") <= 0) throw new Error("previous closed low must be positive");
-  return multiplyDecimal(previousClosedLow, SELL_BREAKDOWN_MULTIPLIER);
+export function previousStrategyDay(day) { return strategyDay(strategyDayStartMs(day) - 1); }
+
+export function strategyDayCloseSellMs(day) { return strategyDayStartMs(day) + DAY_MS - PANIC_CLOSE_SELL_LEAD_MS; }
+
+export function panicSellTime({ strategyDay: day, fillTime }) {
+  const fill = Number(fillTime);
+  if (!Number.isSafeInteger(fill) || fill < 0) throw new Error("fill time is required");
+  return Math.max(strategyDayCloseSellMs(day), fill + PANIC_MIN_HOLD_MS);
 }
 
-export const SELL_TAKE_PROFIT_MULTIPLIER = "1.20";
+export function panicPrices({ open, tickSz }) {
+  if (compareDecimal(open, "0") <= 0 || compareDecimal(tickSz, "0") <= 0) throw new Error("panic prices require a positive open and tick size");
+  const buyPrice = roundToStep(multiplyDecimal(open, PANIC_BUY_RATIO), tickSz, "down");
+  if (compareDecimal(buyPrice, "0") <= 0) throw new Error("panic buy price rounds to zero");
+  return { countPrice: multiplyDecimal(open, PANIC_COUNT_RATIO), buyPrice };
+}
 
-export function takeProfitPrice(fillPrice) {
-  if (compareDecimal(fillPrice, "0") <= 0) throw new Error("fill price must be positive");
-  return multiplyDecimal(fillPrice, SELL_TAKE_PROFIT_MULTIPLIER);
+// Rank is 1-based in exchange-time order of the first 82% touch; ties break by
+// instId so every process derives the same order from the same durable rows.
+export function rankCountHits(rows) {
+  const ranked = rows.filter((row) => row.countHitAt !== null && row.countHitAt !== undefined && row.countHitAt !== "" && Number.isFinite(Number(row.countHitAt)))
+    .sort((a, b) => Number(a.countHitAt) - Number(b.countHitAt) || String(a.instId).localeCompare(String(b.instId)));
+  return new Map(ranked.map((row, index) => [row.instId, index + 1]));
 }
 
 function addDecimal(left, right) {

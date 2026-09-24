@@ -1,4 +1,5 @@
 import { compareDecimal } from "../decimal.js";
+import { strategyDay } from "../domain/rules.js";
 
 function stable(value) {
   if (Array.isArray(value)) return `[${value.map(stable).join(",")}]`;
@@ -8,8 +9,31 @@ function stable(value) {
 
 /** A single process projection: callbacks only mutate memory and enqueue bounded work. */
 export class MarketProjection {
-  constructor({ clock = { nowMs: () => Date.now() } } = {}) { this.clock = clock; this.tickers = new Map(); this.candles = new Map(); this.instruments = new Map(); }
-  updateTicker(row) { return this.#update(this.tickers, row.instId, row, "ticker"); }
+  constructor({ clock = { nowMs: () => Date.now() } } = {}) { this.clock = clock; this.tickers = new Map(); this.instruments = new Map(); this.panicLevels = new Map(); this.panicTouches = new Map(); }
+  updateTicker(row) {
+    const result = this.#update(this.tickers, row.instId, row, "ticker");
+    if (result.accepted) this.#observePanicLevels(row);
+    return result;
+  }
+  // The consumer queue coalesces tickers per instrument, so a brief wick can
+  // be overwritten before the planner reads it.  First touches are therefore
+  // recorded here, synchronously on every accepted ticker, in exchange time.
+  setPanicLevels(instId, { day, countPrice, buyPrice }) {
+    const current = this.panicTouches.get(instId);
+    if (current?.day !== day) this.panicTouches.set(instId, { day, count: null, buy: null });
+    this.panicLevels.set(instId, { day, countPrice, buyPrice });
+    const quote = this.ticker(instId);
+    if (quote) this.#observePanicLevels(quote);
+  }
+  panicTouch(instId, day) { const touch = this.panicTouches.get(instId); return touch?.day === day ? touch : null; }
+  #observePanicLevels(row) {
+    const levels = this.panicLevels.get(row.instId); const ts = Number(row.ts);
+    if (!levels || !row.last || !Number.isFinite(ts) || strategyDay(ts) !== levels.day) return;
+    const touch = this.panicTouches.get(row.instId);
+    if (!touch || touch.day !== levels.day) return;
+    if (!touch.count && compareDecimal(row.last, levels.countPrice) <= 0) touch.count = { ts, price: row.last };
+    if (!touch.buy && touch.count && compareDecimal(row.last, levels.buyPrice) <= 0) touch.buy = { ts, price: row.last };
+  }
   refreshTicker(row) {
     const result = this.updateTicker(row);
     if (result.reason === "DUPLICATE") {
@@ -19,10 +43,8 @@ export class MarketProjection {
     }
     return result;
   }
-  updateCandle(row) { if (!row.confirm) return { accepted: false, reason: "UNCONFIRMED" }; return this.#update(this.candles, row.instId, row, "candle"); }
   updateInstrument(row) { return this.#update(this.instruments, row.instId, row, "instrument"); }
   ticker(instId) { return this.tickers.get(instId)?.value; }
-  candle(instId) { return this.candles.get(instId)?.value; }
   instrument(instId) { return this.instruments.get(instId)?.value; }
   quoteStatus(instId, maxAgeMs, exchangeNowMs = this.clock.nowMs()) {
     const entry = this.tickers.get(instId);
@@ -43,7 +65,6 @@ export class MarketProjection {
     const now = this.clock.nowMs(); const ages = instIds.map((instId) => this.tickers.get(instId)?.receivedAt).filter((receivedAt) => Number.isFinite(receivedAt)).map((receivedAt) => Math.max(0, now - receivedAt));
     return { market_missing_instruments: instIds.length - ages.length, market_oldest_age_ms: ages.length ? Math.max(...ages) : 0 };
   }
-  marketKey(instId) { const ticker = this.ticker(instId); const candle = this.candle(instId); return ticker && candle ? stable({ quote: ticker, candle }) : null; }
   #update(map, id, value, kind) {
     if (!id) return { accepted: false, reason: "MISSING_INST" };
     const prior = map.get(id); const ts = Number(value.ts ?? value.uTime ?? 0); const fingerprint = stable(value);
@@ -67,7 +88,7 @@ export class AccountCapitalSnapshot {
 }
 
 export class ReadyGate {
-  constructor(required = ["owner", "database", "public", "private", "business", "account", "instruments", "strategy"]) { this.required = new Set(required); this.states = new Map([...this.required].map((name) => [name, false])); }
+  constructor(required = ["owner", "database", "public", "private", "account", "instruments", "strategy"]) { this.required = new Set(required); this.states = new Map([...this.required].map((name) => [name, false])); }
   set(name, healthy) { this.states.set(name, healthy === true); }
   get ready() { return [...this.required].every((name) => this.states.get(name) === true); }
   // Exit orders use their own account/instrument guards. A stale market WS must
@@ -110,14 +131,6 @@ export class TradingEngine {
     if (Number.isFinite(Number(row.ts)) && this.clock.nowMs() >= Number(row.ts)) this.slo?.observe("market_source_lag", this.clock.nowMs() - Number(row.ts));
     return result;
   }
-  receiveCandle(row) {
-    const result = this.projection.updateCandle(row);
-    if (result.accepted) {
-      if (!this.queue.enqueue({ type: "market-recheck", instId: row.instId, priority: "normal", enqueuedAt: this.clock.nowMs() })) this.slo?.increment("queue_dropped_recheck");
-      this.enqueueSellEvents(this.sellService?.observeCandle(row.instId) ?? []);
-    }
-    return result;
-  }
   receiveOrder(row) { const accepted = this.queue.enqueue({ type: "ORDER_UPDATE", priority: "critical", order: row, enqueuedAt: this.clock.nowMs() }); if (!accepted) this.slo?.increment("queue_dropped_order"); return accepted; }
   rebuildExitWatches(fills) { this.sellService?.rebuild(fills); }
   enqueueSellEvents(events) {
@@ -151,7 +164,7 @@ export class TradingEngine {
   }
   async dispatch(event) {
     if (!event) return null;
-    if (event.type === "SELL_BREACH" || event.type === "SELL_PROTECTION" || event.type === "SELL_DEFER_LOSS") {
+    if (event.type === "SELL_BREACH") {
       try {
         const result = await this.sellService.consume(event);
         if (result?.retryable) this._retrySellEvent(event, result.reason);
@@ -162,7 +175,7 @@ export class TradingEngine {
       }
     }
     if (event.type === "ORDER_UPDATE") return this.onOrderEvent(event.order);
-    if (event.type === "ticker" || event.type === "market-recheck") return this.onMarketEvent(event);
+    if (event.type === "ticker") return this.onMarketEvent(event);
     return event;
   }
   async consumeOne() { return this.dispatch(this.takeOne()); }

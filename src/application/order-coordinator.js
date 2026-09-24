@@ -1,15 +1,27 @@
 import { compareDecimal, divideDecimal, multiplyDecimal, parseDecimal, formatDecimal, roundToStep, subtractDecimal } from "../decimal.js";
-import { TRADE_FEE_RATE, buySignal, candleFreshness, takeProfitPrice } from "../domain/rules.js";
+import { PANIC_MIN_ORDER_USDT, TRADE_FEE_RATE, normalizeStrategyDay, panicSellTime, strategyDay, strategyDayCloseSellMs } from "../domain/rules.js";
 import { CLOCK_SYNC_STALE_AFTER_MS } from "../infrastructure/okx/rest-client.js";
 import { createClOrdId, payloadHash } from "../domain/order.js";
 
 const PRIORITY = { DELIST: 3, SELL: 2, BUY: 1 };
+// After owned USDT runs out, re-read capacity only once the account stream has
+// moved on or this interval passed, so a crash with dozens of qualifying
+// symbols cannot turn every tick into two authenticated REST reads.
+const CAPITAL_RECHECK_MS = 30_000;
+const BUY_CAPACITY_RETRY_MS = 1_000;
 const terminal = new Set(["NOT_CREATED", "SETTLED"]);
 
 function min(...values) { return values.reduce((lowest, value) => compareDecimal(value, lowest) < 0 ? value : lowest); }
 function add(left, right) {
   const a = parseDecimal(left); const b = parseDecimal(right); const scale = Math.max(a.scale, b.scale);
   return formatDecimal(a.n * (10n ** BigInt(scale - a.scale)) + b.n * (10n ** BigInt(scale - b.scale)), scale);
+}
+// Owned quote currency, never borrowable capacity: the account runs with
+// autoLoan, so sizing above this balance would silently open a loan.
+export function ownedQuoteBalance(balances, ccy = "USDT") {
+  const detail = (balances ?? []).flatMap((row) => row?.details ?? []).find((row) => row?.ccy === ccy);
+  const available = detail?.availBal;
+  return available && compareDecimal(available, "0") > 0 ? String(available) : "0";
 }
 function availabilityFailure(error) {
   const diagnostic = error?.diagnostic;
@@ -18,9 +30,10 @@ function availabilityFailure(error) {
 
 /** The only component allowed to invoke an injected mutation transport. */
 export class OrderCoordinator {
-  constructor({ transaction, orders, state, transport, ownerGuard, readyGate, market, account, mode = () => "OFF", executionRoute = () => "margin", tradeQuoteCurrency = () => null, isBuyAllowed = () => true, clock = { nowMs: () => Date.now() }, config, telemetry = () => {}, onBuySettled = null, onExitSettled = null, onExitSubmitted = null, onExitDust = null, slo = null }) {
-    Object.assign(this, { transaction, orders, state, transport, ownerGuard, readyGate, market, account, mode, executionRoute, tradeQuoteCurrency, isBuyAllowed, clock, config, telemetry, onBuySettled, onExitSettled, onExitSubmitted, onExitDust, slo });
+  constructor({ transaction, orders, state, transport, ownerGuard, readyGate, market, account, mode = () => "OFF", executionRoute = () => "margin", tradeQuoteCurrency = () => null, isBuyAllowed = () => true, clock = { nowMs: () => Date.now() }, config, telemetry = () => {}, onBuySettled = null, onBuySubmitted = null, onExitSettled = null, onExitSubmitted = null, onExitDust = null, slo = null }) {
+    Object.assign(this, { transaction, orders, state, transport, ownerGuard, readyGate, market, account, mode, executionRoute, tradeQuoteCurrency, isBuyAllowed, clock, config, telemetry, onBuySettled, onBuySubmitted, onExitSettled, onExitSubmitted, onExitDust, slo });
     this.pending = { BUY: new Map(), SELL: new Map(), DELIST: new Map() }; this.submitting = false; this.accepting = true; this.isolatedBases = new Set(); this.buyBlockStates = new Map(); this.exitAvailabilityNotBefore = { SELL: 0, DELIST: 0 };
+    this.capitalBlock = null; this.buyNotBefore = 0;
   }
   enqueue(intent) {
     if (!this.accepting) return false;
@@ -37,6 +50,7 @@ export class OrderCoordinator {
     return true;
   }
   stopNewMutations() { this.accepting = false; }
+  pendingExitSources() { return new Set([...this.pending.SELL.values(), ...this.pending.DELIST.values()].map((intent) => intent.sourceBuyTradeId)); }
   async finishInFlight() { while (this.submitting) await new Promise((resolve) => setTimeout(resolve, 1)); }
   _emit(event) { try { Promise.resolve(this.telemetry(event)).catch(() => {}); } catch { /* telemetry cannot block trading */ } }
   _emitBuyBlock(intent, stage, reason, evidence = {}) {
@@ -60,6 +74,11 @@ export class OrderCoordinator {
   canCreateNextBuy({ previousAttempt, nextMarketKey }) {
     return ["SETTLED", "NOT_CREATED"].includes(previousAttempt?.state) && Boolean(nextMarketKey) && nextMarketKey !== previousAttempt.decision_market_key;
   }
+  buyCapitalBlocked(nowMs = this.clock.nowMs()) {
+    const block = this.capitalBlock; if (!block) return false;
+    if ((this.account.value?.version ?? 0) > block.version || nowMs - block.at >= CAPITAL_RECHECK_MS) { this.capitalBlock = null; return false; }
+    return true;
+  }
   async drainOnce() {
     if (this.submitting) return { submitted: false, reason: "SLOT_BUSY" };
     const kind = ["DELIST", "SELL", "BUY"].find((name) => this.pending[name].size);
@@ -74,96 +93,95 @@ export class OrderCoordinator {
       this.submitting = true;
       try { return await this.submitExits(kind, prepared); } finally { this.submitting = false; }
     }
-    const candidates = [...this.pending.BUY.values()].sort((a, b) => a.generation - b.generation || a.eligibleSince - b.eligibleSince || a.instId.localeCompare(b.instId)).slice(0, 5).map((intent) => { intent._signalStartedAt ??= Number.isFinite(intent.signalAt) ? intent.signalAt : this.clock.nowMs(); return intent; });
-    const prepared = await this.prepareBuys(candidates);
-    if (!prepared.length) return { submitted: false, reason: "NO_ELIGIBLE" };
-    if (this.pending.DELIST.size || this.pending.SELL.size) return { submitted: false, reason: "PREEMPTED" };
-    this.submitting = true;
-    try { return await this.submitBuys(prepared); } finally { this.submitting = false; }
+    return this.drainBuy();
   }
-  async prepareBuys(candidates) {
-    const riskVersion = this.account.value?.version ?? 0;
-    const eligible = [];
-    for (const intent of candidates) {
-      if (intent.waitForRiskVersion && riskVersion <= intent.waitForRiskVersion) {
-        this._emitBuyBlock(intent, "AVAILABILITY", "INSUFFICIENT_FUNDS_WAIT_RISK_VERSION", { riskVersion, waitForRiskVersion: intent.waitForRiskVersion });
-        continue;
-      }
+  // One global BUY queue, strictly serial: the earliest 72% trigger is sized
+  // from a fresh owned-USDT read, submitted as one IOC, and recorded before
+  // the next symbol is considered.  An intent that no longer qualifies is
+  // dropped; the planner re-queues it on the symbol's next qualifying tick.
+  async drainBuy() {
+    const nowMs = this.clock.nowMs();
+    if (this.buyCapitalBlocked(nowMs)) return { submitted: false, reason: "CAPITAL_EXHAUSTED" };
+    if (this.buyNotBefore > nowMs) return { submitted: false, reason: "CAPACITY_RETRY_WAIT" };
+    const ordered = [...this.pending.BUY.values()].sort((a, b) => (a.triggerAt ?? a.signalAt ?? 0) - (b.triggerAt ?? b.signalAt ?? 0) || a.instId.localeCompare(b.instId));
+    for (const intent of ordered) {
+      intent._signalStartedAt ??= Number.isFinite(intent.signalAt) ? intent.signalAt : this.clock.nowMs();
       const guard = this._buyGuard(intent);
-      if (!guard.allowed) { this._emitBuyBlock(intent, "COORDINATOR_GUARD", guard.reason, guard.evidence); continue; }
-      this._clearBuyBlock(intent, "COORDINATOR_GUARD"); eligible.push(intent);
+      if (!guard.allowed) { this._emitBuyBlock(intent, "COORDINATOR_GUARD", guard.reason, guard.evidence); this._dropBuy(intent); continue; }
+      this._clearBuyBlock(intent, "COORDINATOR_GUARD");
+      const sized = await this.sizeBuy(intent, guard);
+      if (sized.dropped) continue;
+      if (!sized.intent) return { submitted: false, reason: sized.reason };
+      if (this.pending.DELIST.size || this.pending.SELL.size) return { submitted: false, reason: "PREEMPTED" };
+      this.submitting = true;
+      try { return await this.submitBuy(sized.intent); } finally { this.submitting = false; }
     }
-    if (!eligible.length) return [];
-    const maxAvailStarted = this.clock.nowMs();
-    const routed = eligible.map((intent) => { const executionRoute = this._executionRoute(intent); const executionMode = executionRoute ? "cross" : null; const tradeQuoteCcy = intent.tradeQuoteCcy ?? this.tradeQuoteCurrency(intent.instId); const capacityCcy = tradeQuoteCcy ?? intent.instId.split("-").at(-1); return { intent, executionRoute, executionMode, tradeQuoteCcy, capacityCcy }; }).filter(({ intent, executionRoute, executionMode }) => {
-      if (executionRoute && executionMode) return true;
-      this._emitBuyBlock(intent, "ROUTING", "EXECUTION_ROUTE_UNAVAILABLE"); return false;
-    });
-    const groups = Map.groupBy(routed, (row) => `${row.executionMode}:${row.executionMode === "cross" ? row.capacityCcy : ""}`);
-    const modeByInst = new Map(routed.map(({ intent, executionMode }) => [intent.instId, executionMode]));
-    const routeByInst = new Map(routed.map(({ intent, executionRoute }) => [intent.instId, executionRoute]));
-    const quoteByInst = new Map(routed.map(({ intent, tradeQuoteCcy }) => [intent.instId, tradeQuoteCcy]));
-    const capacityCcyByInst = new Map(routed.map(({ intent, capacityCcy }) => [intent.instId, capacityCcy]));
-    let avail;
-    try { avail = (await Promise.all([...groups].map(([, rows]) => { const { executionMode: tdMode, capacityCcy } = rows[0]; return this.transport.maxAvailSize(rows.map(({ intent }) => intent.instId).join(","), tdMode === "cross" ? { tdMode, ccy: capacityCcy } : { tdMode }); }))).flat(); }
-    catch (error) {
-      for (const { intent, executionMode, executionRoute } of routed) this._emitBuyBlock({ ...intent, executionMode, executionRoute }, "AVAILABILITY", "MAX_AVAIL_FAILED", availabilityFailure(error));
-      return [];
-    } finally { this.slo?.record("signal_max_avail", maxAvailStarted); }
-    const byInst = new Map((avail ?? []).map((row) => [row.instId, row.availBuy]));
-    return eligible.flatMap((intent) => {
-      const availBuy = byInst.get(intent.instId);
-      const available = availBuy && compareDecimal(availBuy, "0") > 0;
-      if (!available) {
-        intent.waitForRiskVersion = riskVersion;
-        this._emitBuyBlock(intent, "AVAILABILITY", "INSUFFICIENT_FUNDS_WAIT_RISK_VERSION", { availBuy: availBuy ?? "0", riskVersion });
-      }
-      return available ? [{ ...intent, availBuy, capacityCcy: capacityCcyByInst.get(intent.instId), executionMode: modeByInst.get(intent.instId), executionRoute: routeByInst.get(intent.instId), tradeQuoteCcy: quoteByInst.get(intent.instId) }] : [];
-    });
+    return { submitted: false, reason: "NO_ELIGIBLE" };
   }
-  async submitBuys(candidates) {
+  // Sized and prepared intents are copies; only the exact queued object is
+  // removed, so a fresher intent enqueued meanwhile for the symbol survives.
+  _dropBuy(intent) { const queued = intent.queued ?? intent; if (this.pending.BUY.get(queued.instId) === queued) this.pending.BUY.delete(queued.instId); }
+  async sizeBuy(intent, guard) {
+    const executionRoute = this._executionRoute(intent);
+    if (!executionRoute) { this._emitBuyBlock(intent, "ROUTING", "EXECUTION_ROUTE_UNAVAILABLE"); this._dropBuy(intent); return { dropped: true }; }
+    const executionMode = "cross";
+    const tradeQuoteCcy = intent.tradeQuoteCcy ?? this.tradeQuoteCurrency(intent.instId);
+    const capacityCcy = tradeQuoteCcy ?? intent.instId.split("-").at(-1);
+    const evidenceIntent = { ...intent, executionMode, executionRoute };
+    const started = this.clock.nowMs();
+    let avail; let balances;
+    try { [avail, balances] = await Promise.all([this.transport.maxAvailSize(intent.instId, { tdMode: executionMode, ccy: capacityCcy }), this.transport.balance(capacityCcy)]); }
+    catch (error) {
+      this.buyNotBefore = this.clock.nowMs() + BUY_CAPACITY_RETRY_MS;
+      this._emitBuyBlock(evidenceIntent, "AVAILABILITY", "MAX_AVAIL_FAILED", availabilityFailure(error));
+      return { reason: "MAX_AVAIL_FAILED" };
+    } finally { this.slo?.record("signal_max_avail", started); }
+    const availBuy = (avail ?? []).find((row) => row.instId === intent.instId)?.availBuy ?? "0";
+    const ownedQuote = ownedQuoteBalance(balances, capacityCcy);
+    const notional = min(compareDecimal(availBuy, "0") > 0 ? availBuy : "0", ownedQuote);
+    const { instrument, quote } = guard;
+    const executionPrice = roundToStep(intent.limitPrice, instrument.tickSz, "down");
+    const feeMultiplier = add("1", TRADE_FEE_RATE);
+    const size = compareDecimal(executionPrice, "0") > 0 ? roundToStep(divideDecimal(notional, multiplyDecimal(executionPrice, feeMultiplier)), instrument.lotSz, "down") : "0";
+    if (compareDecimal(quote.askPx, executionPrice) > 0) { this._emitBuyBlock(evidenceIntent, "SIZING", "ASK_ABOVE_LIMIT", { askPx: quote.askPx, limitPrice: executionPrice }); this._dropBuy(intent); return { dropped: true }; }
+    if (compareDecimal(notional, PANIC_MIN_ORDER_USDT) < 0 || compareDecimal(size, instrument.minSz) < 0) {
+      this.capitalBlock = { version: this.account.value?.version ?? 0, at: this.clock.nowMs() };
+      this._emitBuyBlock(evidenceIntent, "SIZING", "CAPITAL_EXHAUSTED", { availBuy, ownedQuote, notional, minimumNotional: PANIC_MIN_ORDER_USDT, plannedSize: size, minSize: instrument.minSz, limitPrice: executionPrice });
+      return { reason: "CAPITAL_EXHAUSTED" };
+    }
+    return { intent: { ...intent, queued: intent, availBuy, ownedQuote, notional, executionPrice, plannedSize: size, capacityCcy, executionMode, executionRoute, tradeQuoteCcy } };
+  }
+  async submitBuy(intent) {
     const started = this.clock.nowMs();
     const reservationStarted = this.clock.nowMs();
     let prepared;
     try {
       prepared = await this.transaction(async (tx) => {
-      const rows = [];
-      for (const intent of candidates) {
         const guard = this._buyGuard(intent);
-        if (!guard.allowed) { this._emitBuyBlock(intent, "PREPARATION_GUARD", guard.reason, guard.evidence); continue; }
-        const { instrument, quote, candle } = guard;
-        const executionPrice = roundToStep(intent.dailyLimitPrice, instrument.tickSz, "down");
-        if (compareDecimal(quote.askPx, executionPrice) > 0) { this._emitBuyBlock(intent, "SIZING", "ASK_ABOVE_LIMIT", { askPx: quote.askPx, dailyLimitPrice: executionPrice, priceLimitGap: subtractDecimal(executionPrice, quote.askPx) }); continue; }
-        const maxNotional = intent.availBuy;
+        if (!guard.allowed) { this._emitBuyBlock(intent, "PREPARATION_GUARD", guard.reason, guard.evidence); return null; }
+        const { instrument, quote } = guard;
+        if (compareDecimal(quote.askPx, intent.executionPrice) > 0) { this._emitBuyBlock(intent, "SIZING", "ASK_ABOVE_LIMIT", { askPx: quote.askPx, limitPrice: intent.executionPrice }); return null; }
         const feeMultiplier = add("1", TRADE_FEE_RATE);
-        const size = roundToStep(divideDecimal(maxNotional, multiplyDecimal(executionPrice, feeMultiplier)), instrument.lotSz, "down");
-        if (compareDecimal(size, instrument.minSz) < 0) {
-          const minimumCapacity = multiplyDecimal(multiplyDecimal(instrument.minSz, executionPrice), feeMultiplier);
-          this._emitBuyBlock(intent, "SIZING", "MINIMUM_SIZE", { availBuy: intent.availBuy, availableCapacity: maxNotional, minimumCapacity, capacityGap: subtractDecimal(minimumCapacity, maxNotional), plannedSize: size, minSize: instrument.minSz, notional: multiplyDecimal(size, executionPrice), dailyLimitPrice: executionPrice }); continue;
-        }
-        const executionRoute = this._executionRoute(intent);
-        const executionMode = executionRoute ? "cross" : null;
-        if (!executionMode) { this._emitBuyBlock(intent, "ROUTING", "EXECUTION_ROUTE_UNAVAILABLE"); continue; }
-        const tradeQuoteCcy = intent.tradeQuoteCcy ?? this.tradeQuoteCurrency(intent.instId);
-        const payload = { instId: intent.instId, tdMode: executionMode, side: "buy", ordType: "ioc", px: executionPrice, sz: size, tag: this.config.strategyTag, ...(executionRoute === "margin" && tradeQuoteCcy ? { tradeQuoteCcy } : {}) };
+        const payload = { instId: intent.instId, tdMode: intent.executionMode, side: "buy", ordType: "ioc", px: intent.executionPrice, sz: intent.plannedSize, tag: this.config.strategyTag, ...(intent.executionRoute === "margin" && intent.tradeQuoteCcy ? { tradeQuoteCcy: intent.tradeQuoteCcy } : {}) };
         const tuple = { instId: intent.instId, strategyDay: intent.strategyDay, generation: intent.generation };
         const clOrdId = await createClOrdId(this.config.orderVersion, "BUY", tuple); payload.clOrdId = clOrdId;
-        const hash = await payloadHash(payload); const marketKey = await payloadHash({ quote, candle });
+        const hash = await payloadHash(payload); const marketKey = await payloadHash({ quote, anchor: intent.anchor });
         const attempt = {
           accountId: this.config.accountId, intent: "BUY", instId: intent.instId, baseCcy: instrument.base, decisionId: intent.decisionId, clOrdId, payloadHash: hash,
-          strategyDay: intent.strategyDay, generation: intent.generation, plannedSize: size, reservedExposureUsd: multiplyDecimal(multiplyDecimal(size, executionPrice), feeMultiplier),
-          decisionQuoteTs: quote.ts, decisionQuoteHash: await payloadHash(quote), decisionCandleTs: candle.ts, decisionCandleHash: await payloadHash(candle), decisionMarketKey: marketKey,
-          executionLimitPrice: executionPrice, instrumentVersion: String(instrument.version ?? "1"), holdHours: intent.holdHours, maxHoldHours: intent.maxHoldHours, strategyConfigHash: intent.configHash,
-          accountSnapshotVersion: String(this.account.value?.version ?? "capacity"), executionMode, executionRoute,
-          decisionTriggerPrice: quote.last, decisionReferencePrice: guard.signal.trigger === "DIP" ? guard.signal.dipPrice : guard.signal.breakoutPrice, decisionReason: guard.signal.trigger === "DIP" ? "BUY_DIP_CONFIRMED" : "BUY_BREAKOUT_CONFIRMED",
+          strategyDay: intent.strategyDay, generation: intent.generation, plannedSize: intent.plannedSize, reservedExposureUsd: multiplyDecimal(multiplyDecimal(intent.plannedSize, intent.executionPrice), feeMultiplier),
+          decisionQuoteTs: quote.ts, decisionQuoteHash: await payloadHash(quote), decisionCandleTs: intent.anchor.ts, decisionCandleHash: intent.anchor.hash, decisionMarketKey: marketKey,
+          executionLimitPrice: intent.executionPrice, instrumentVersion: String(instrument.version ?? "1"), holdHours: intent.holdHours, maxHoldHours: null, strategyConfigHash: intent.configHash,
+          accountSnapshotVersion: String(this.account.value?.version ?? "capacity"), executionMode: intent.executionMode, executionRoute: intent.executionRoute,
+          decisionTriggerPrice: quote.last, decisionReferencePrice: intent.limitPrice, decisionReason: "PANIC_BUY_72",
         };
         try {
           const reserveStarted = this.clock.nowMs();
           let reserve;
           try { reserve = await this.orders.reserveBuy(tx, attempt); }
           finally { this.slo?.record("buy_reserve_db", reserveStarted); }
-          if (reserve.authorized) rows.push({ intent: { ...intent, clOrdId }, attempt, payload });
-          else this._emitBuyBlock({ ...intent, clOrdId }, "RESERVATION", reserve.reason ?? "RESERVATION_DENIED", { availBuy: intent.availBuy, reservedExposure: attempt.reservedExposureUsd });
+          if (reserve.authorized) return { intent: { ...intent, clOrdId }, attempt, payload };
+          this._emitBuyBlock({ ...intent, clOrdId }, "RESERVATION", reserve.reason ?? "RESERVATION_DENIED", { notional: intent.notional, reservedExposure: attempt.reservedExposureUsd });
+          return null;
         } catch (error) {
           // A lost COMMIT acknowledgement is resolved by the deterministic business key.
           // Never turn that ambiguity into a second generation or a second HTTP submit.
@@ -174,11 +192,10 @@ export class OrderCoordinator {
           }
           throw error;
         }
-      }
-      return rows;
       });
     } catch (error) {
       if (error?.code !== "23505" || !error.clOrdId || typeof this.orders.findByClOrdId !== "function") throw error;
+      this._dropBuy(intent);
       const existing = await this.transaction((tx) => this.orders.findByClOrdId(tx, error.clOrdId));
       if (!existing || (existing.payload_hash ?? existing.payloadHash) !== error.expectedPayloadHash) {
         this._emit({ type: "buy_replay", reason: "HASH_COLLISION", clOrdId: error.clOrdId });
@@ -187,35 +204,35 @@ export class OrderCoordinator {
       this._emit({ type: "buy_replay", reason: "COMMIT_ACK_LOST", clOrdId: error.clOrdId, state: existing.state });
       return { submitted: false, reason: "COMMIT_ACK_LOST" };
     } finally { this.slo?.record("buy_reservation_tx", reservationStarted); }
-    if (!prepared.length) return { submitted: false, reason: "RESERVATION_DENIED" };
-    for (const row of prepared) this._emit({ type: "order_lifecycle", reason: "BUY_PREPARED", intent: "BUY", decisionId: row.intent.decisionId, instId: row.intent.instId, clOrdId: row.attempt.clOrdId, generation: row.intent.generation, executionMode: row.attempt.executionMode, executionRoute: row.attempt.executionRoute, limitPrice: row.attempt.executionLimitPrice, plannedSize: row.attempt.plannedSize, triggerPrice: row.attempt.decisionTriggerPrice, referencePrice: row.attempt.decisionReferencePrice });
-    const safe = [];
-    for (const row of prepared) {
-      const guard = this._buyGuard(row.intent);
-      if (!guard.allowed) { this._emitBuyBlock(row.intent, "FINAL_GUARD", guard.reason, guard.evidence); await this.transaction((tx) => this.orders.markNotCreated(tx, row.attempt.clOrdId, guard.reason)); }
-      else safe.push(row);
+    if (!prepared) { this._dropBuy(intent); return { submitted: false, reason: "RESERVATION_DENIED" }; }
+    const { attempt, payload } = prepared;
+    this._emit({ type: "order_lifecycle", reason: "BUY_PREPARED", intent: "BUY", decisionId: prepared.intent.decisionId, instId: intent.instId, clOrdId: attempt.clOrdId, generation: intent.generation, executionMode: attempt.executionMode, executionRoute: attempt.executionRoute, limitPrice: attempt.executionLimitPrice, plannedSize: attempt.plannedSize, notional: intent.notional, ownedQuote: intent.ownedQuote, availBuy: intent.availBuy, triggerPrice: attempt.decisionTriggerPrice, referencePrice: attempt.decisionReferencePrice, countRank: intent.countRank });
+    const guard = this._buyGuard(prepared.intent);
+    if (!guard.allowed) {
+      this._emitBuyBlock(prepared.intent, "FINAL_GUARD", guard.reason, guard.evidence);
+      await this.transaction((tx) => this.orders.markNotCreated(tx, attempt.clOrdId, guard.reason));
+      this._dropBuy(intent);
+      return { submitted: false, reason: "FINAL_GUARD" };
     }
-    if (!safe.length) return { submitted: false, reason: "FINAL_GUARD" };
     let response;
     try {
-      this.slo?.record("signal_post", Math.min(...safe.map((row) => row.intent._signalStartedAt))); this.slo?.record("prepared_post", started); this.slo?.record("prepared_submit", started); const submittedAt = this.clock.nowMs();
-      response = await this.transport.submitBatchOrders(safe.map((row) => row.payload), this.clock.nowMs() + this.config.orderExpiryMs); this.slo?.record("submit_ack", submittedAt);
+      this.slo?.record("signal_post", intent._signalStartedAt ?? started); this.slo?.record("prepared_post", started); this.slo?.record("prepared_submit", started); const submittedAt = this.clock.nowMs();
+      response = await this.transport.submitBatchOrders([payload], this.clock.nowMs() + this.config.orderExpiryMs); this.slo?.record("submit_ack", submittedAt);
     } catch (error) {
-      response = safe.map((row) => ({ clOrdId: row.attempt.clOrdId, status: "UNKNOWN", reason: error?.message ?? "TRANSPORT_FAILURE" }));
+      response = [{ clOrdId: attempt.clOrdId, status: "UNKNOWN", reason: error?.message ?? "TRANSPORT_FAILURE" }];
     }
-    const byClOrdId = new Map((response ?? []).map((item) => [item.clOrdId, item]));
-    response = safe.map((row) => byClOrdId.get(row.attempt.clOrdId) ?? ({ clOrdId: row.attempt.clOrdId, status: "UNKNOWN", reason: "MISSING_BATCH_ITEM" }));
-    await this.transaction(async (tx) => {
-      for (const item of response) {
-        const result = item.status === "SUBMITTED" ? this.orders.markSubmitted(tx, item.clOrdId, item.ordId) : item.status === "NOT_CREATED" ? this.orders.markNotCreated(tx, item.clOrdId, item.reason) : this.orders.markUnknown(tx, item.clOrdId, item.reason);
-        await result;
-      }
-    });
-    const safeByClOrdId = new Map(safe.map((row) => [row.attempt.clOrdId, row]));
-    for (const item of response) { const row = safeByClOrdId.get(item.clOrdId); this._emit({ type: "order_lifecycle", reason: `BUY_${item.status}`, intent: "BUY", decisionId: row?.intent.decisionId, instId: row?.intent.instId, executionMode: row?.attempt.executionMode, executionRoute: row?.attempt.executionRoute, clOrdId: item.clOrdId, ordId: item.ordId, exchangeReason: item.reason, okxCode: item.sCode, okxSubCode: item.subCode }); }
-    for (const row of safe) this.pending.BUY.delete(row.intent.instId);
-    const unknown = response.filter((item) => item.status === "UNKNOWN").length; this.slo?.observe("unknown_count", unknown); this.slo?.increment?.("unknown_count", unknown); this.slo?.observe("batch_size", safe.length); this.slo?.observe("mutation_concurrency", 1); this._emit({ type: "buy_batch", count: safe.length, results: response.map((item) => ({ clOrdId: item.clOrdId, status: item.status })) });
-    return { submitted: true, count: safe.length, response };
+    const item = (response ?? []).find((row) => row.clOrdId === attempt.clOrdId) ?? { clOrdId: attempt.clOrdId, status: "UNKNOWN", reason: "MISSING_BATCH_ITEM" };
+    await this.transaction((tx) => item.status === "SUBMITTED" ? this.orders.markSubmitted(tx, item.clOrdId, item.ordId) : item.status === "NOT_CREATED" ? this.orders.markNotCreated(tx, item.clOrdId, item.reason) : this.orders.markUnknown(tx, item.clOrdId, item.reason));
+    this._emit({ type: "order_lifecycle", reason: `BUY_${item.status}`, intent: "BUY", decisionId: intent.decisionId, instId: intent.instId, executionMode: attempt.executionMode, executionRoute: attempt.executionRoute, clOrdId: item.clOrdId, ordId: item.ordId, exchangeReason: item.reason, okxCode: item.sCode, okxSubCode: item.subCode });
+    this._dropBuy(intent);
+    // UNKNOWN blocks only this symbol (its active attempt); the queue moves on
+    // and the next order's fresh balance read reflects a fill if one happened.
+    if (item.status !== "NOT_CREATED" && this.onBuySubmitted) {
+      try { this.onBuySubmitted({ ...attempt, state: item.status, ordId: item.ordId }); }
+      catch (error) { this._emit({ type: "order_confirmation", reason: "SCHEDULE_FAILED", intent: "BUY", clOrdId: item.clOrdId, error: error?.message }); }
+    }
+    const unknown = item.status === "UNKNOWN" ? 1 : 0; this.slo?.observe("unknown_count", unknown); this.slo?.increment?.("unknown_count", unknown); this.slo?.observe("batch_size", 1); this.slo?.observe("mutation_concurrency", 1); this._emit({ type: "buy_batch", count: 1, results: [{ clOrdId: item.clOrdId, status: item.status }] });
+    return { submitted: true, count: 1, response: [item] };
   }
   async prepareExits(kind, candidates) {
     const eligible = [];
@@ -355,7 +372,7 @@ export class OrderCoordinator {
           const payload = { instId: intent.instId, tdMode: executionMode, side: "sell", ordType: "market", ...(executionMode === "cross" && executionRoute === "margin" ? { reduceOnly: true } : {}), sz: intent.plannedSize, tag: this.config.strategyTag };
           const tuple = { instId: intent.instId, tradeId: intent.sourceBuyTradeId, generation: intent.generation ?? 0, intent: kind };
           const clOrdId = await createClOrdId(this.config.orderVersion, kind, tuple); payload.clOrdId = clOrdId;
-          const attempt = { accountId: this.config.accountId, intent: kind, instId: intent.instId, baseCcy: intent.baseCcy ?? instrument.base, clOrdId, payloadHash: await payloadHash(payload), sourceBuyTradeId: intent.sourceBuyTradeId, generation: intent.generation ?? 0, plannedSize: intent.plannedSize, reservedBaseSize: intent.plannedSize, executionMode, executionRoute, decisionTriggerPrice: intent.triggerPrice ?? this.market.ticker(intent.instId)?.last, decisionReferencePrice: intent.referencePrice ?? intent.protection, decisionReason: kind === "DELIST" ? "DELIST_EXIT" : intent.reason === "TAKE_PROFIT" ? "SELL_TAKE_PROFIT_CONFIRMED" : intent.reason === "MAX_HOLD_EXPIRED" ? "SELL_MAX_HOLD_CONFIRMED" : "SELL_BREAKDOWN_CONFIRMED" };
+          const attempt = { accountId: this.config.accountId, intent: kind, instId: intent.instId, baseCcy: intent.baseCcy ?? instrument.base, clOrdId, payloadHash: await payloadHash(payload), sourceBuyTradeId: intent.sourceBuyTradeId, generation: intent.generation ?? 0, plannedSize: intent.plannedSize, reservedBaseSize: intent.plannedSize, executionMode, executionRoute, decisionTriggerPrice: intent.triggerPrice ?? this.market.ticker(intent.instId)?.last, decisionReferencePrice: intent.referencePrice ?? intent.protection, decisionReason: kind === "DELIST" ? "DELIST_EXIT" : "SELL_SCHEDULED_CLOSE" };
           try {
             const reserve = await this.orders.reserveExit(tx, attempt);
             if (reserve?.authorized !== false) rows.push({ intent, attempt, payload });
@@ -463,9 +480,7 @@ export class OrderCoordinator {
       // markSellTriggered, stable across every retry generation of the same exit) rather than
       // reverse-parsing the display-oriented attempt.decision_reason string.
       const reason = source?.sell_trigger_reason ?? source?.sellTriggerReason;
-      const sourceFillPrice = source?.fill_price ?? source?.fillPrice;
-      const referencePrice = reason === "TAKE_PROFIT" && sourceFillPrice ? takeProfitPrice(sourceFillPrice) : undefined;
-      this.enqueue({ intent: attempt.intent, accountId: attempt.account_id ?? attempt.accountId, instId, baseCcy: attempt.base_ccy ?? attempt.baseCcy, sourceBuyTradeId: attempt.source_buy_trade_id ?? attempt.sourceBuyTradeId, remainingSize: remaining, fillVersion: source.version, generation: Number(attempt.generation) + 1, sellTime: 0, availableBase: remaining, bidPx: quote?.bidPx ?? quote?.last, protection: source?.protection_price ?? source?.protectionPrice, referencePrice, reason, executionMode: source.execution_mode ?? source.executionMode ?? attempt.execution_mode ?? attempt.executionMode, executionRoute: source.execution_route ?? source.executionRoute ?? attempt.execution_route ?? attempt.executionRoute });
+      this.enqueue({ intent: attempt.intent, accountId: attempt.account_id ?? attempt.accountId, instId, baseCcy: attempt.base_ccy ?? attempt.baseCcy, sourceBuyTradeId: attempt.source_buy_trade_id ?? attempt.sourceBuyTradeId, remainingSize: remaining, fillVersion: source.version, generation: Number(attempt.generation) + 1, sellTime: 0, availableBase: remaining, bidPx: quote?.bidPx ?? quote?.last, protection: source?.protection_price ?? source?.protectionPrice, reason, executionMode: source.execution_mode ?? source.executionMode ?? attempt.execution_mode ?? attempt.executionMode, executionRoute: source.execution_route ?? source.executionRoute ?? attempt.execution_route ?? attempt.executionRoute });
     }
     if (settled?.rowCount === 1 && this.onExitSettled) {
       try { await this.onExitSettled({ attempt, source, remaining }); }
@@ -477,11 +492,12 @@ export class OrderCoordinator {
   async settleBuy({ attempt, fills, exchangeState, accFillSz }) {
     const filled = fills.reduce((sum, fill) => add(sum, fill.fillSz), "0");
     if (compareDecimal(filled, accFillSz) !== 0) return { settled: false, reason: "FILLS_INCOMPLETE" };
+    const day = normalizeStrategyDay(attempt.strategy_day ?? attempt.strategyDay);
     await this.transaction(async (tx) => {
-      for (const fill of fills) await this.state.insertFill(tx, { accountId: attempt.account_id, instId: attempt.inst_id, baseCcy: attempt.base_ccy, tradeId: fill.tradeId, billId: fill.billId, source: "SYSTEM", side: "BUY", fillSize: fill.fillSz, fillTime: fill.fillTime, sourceAttemptClOrdId: attempt.cl_ord_id ?? attempt.clOrdId, fillPrice: fill.fillPx, fee: fill.fee, feeCcy: fill.feeCcy, holdHours: attempt.hold_hours, maxHoldHours: attempt.max_hold_hours, strategyConfigHash: attempt.strategy_config_hash, sellTime: Number(fill.fillTime) + Number(attempt.hold_hours) * 3_600_000, forceSellTime: attempt.max_hold_hours ? Number(fill.fillTime) + Number(attempt.max_hold_hours) * 3_600_000 : null, sellState: "WAITING", executionMode: attempt.execution_mode ?? attempt.executionMode ?? "cross", executionRoute: attempt.execution_route ?? attempt.executionRoute ?? "margin" });
+      for (const fill of fills) await this.state.insertFill(tx, { accountId: attempt.account_id, instId: attempt.inst_id, baseCcy: attempt.base_ccy, tradeId: fill.tradeId, billId: fill.billId, source: "SYSTEM", side: "BUY", fillSize: fill.fillSz, fillTime: fill.fillTime, sourceAttemptClOrdId: attempt.cl_ord_id ?? attempt.clOrdId, fillPrice: fill.fillPx, fee: fill.fee, feeCcy: fill.feeCcy, holdHours: attempt.hold_hours, maxHoldHours: null, strategyConfigHash: attempt.strategy_config_hash, sellTime: panicSellTime({ strategyDay: day, fillTime: fill.fillTime }), forceSellTime: null, sellState: "WAITING", executionMode: attempt.execution_mode ?? attempt.executionMode ?? "cross", executionRoute: attempt.execution_route ?? attempt.executionRoute ?? "margin" });
       await this.orders.markSettled(tx, attempt.cl_ord_id, exchangeState, compareDecimal(accFillSz, "0") > 0 ? "CONVERTED" : "RELEASED");
     });
-    this._emit({ type: "trade_lifecycle", reason: "BUY_SETTLED", intent: "BUY", decisionId: attempt.decision_id ?? attempt.decisionId, instId: attempt.inst_id ?? attempt.instId, clOrdId: attempt.cl_ord_id ?? attempt.clOrdId, filledSize: filled, exchangeState, sellTime: fills.length ? Math.min(...fills.map((fill) => Number(fill.fillTime) + Number(attempt.hold_hours) * 3_600_000)) : undefined });
+    this._emit({ type: "trade_lifecycle", reason: "BUY_SETTLED", intent: "BUY", decisionId: attempt.decision_id ?? attempt.decisionId, instId: attempt.inst_id ?? attempt.instId, clOrdId: attempt.cl_ord_id ?? attempt.clOrdId, filledSize: filled, exchangeState, sellTime: fills.length ? Math.min(...fills.map((fill) => panicSellTime({ strategyDay: day, fillTime: fill.fillTime }))) : undefined });
     if (this.onBuySettled) await this.onBuySettled({ attempt, fills, exchangeState, accFillSz });
     return { settled: true };
   }
@@ -502,25 +518,19 @@ export class OrderCoordinator {
     if (!this.readyGate.ready || !accountFresh) return { allowed: false, reason: "NOT_READY", evidence: { ready: this.readyGate.ready, accountFresh } };
     if (!this.transport.clockFresh(CLOCK_SYNC_STALE_AFTER_MS)) return { allowed: false, reason: "CLOCK_SYNC_STALE", evidence: { clockSkewMs: this.transport.clockSkewMs } };
     const exchangeNowMs = this.clock.nowMs() + Number(this.transport.clockSkewMs ?? 0);
-    const quoteStatus = this.market.quoteStatus(intent.instId, this.config.quoteFreshMs, exchangeNowMs); const quote = quoteStatus.quote; const candle = this.market.candle(intent.instId); const instrument = this.market.instrument(intent.instId);
-    const marketEvidence = { quoteAgeMs: quoteStatus.sourceAgeMs, quoteReceiptAgeMs: quoteStatus.receiptAgeMs, quoteSourceAgeMs: quoteStatus.sourceAgeMs, quoteFreshness: quoteStatus.reason, quoteTs: quoteStatus.sourceTs, candleAgeMs: candle?.ts ? exchangeNowMs - Number(candle.ts) : undefined, instrumentState: instrument?.state, protected: intent.protected, enabled: intent.enabled, dailyReady: intent.dailyReady };
-    if (!quoteStatus.fresh || !candle || !instrument || instrument.state !== "live" || intent.protected || intent.enabled === false || intent.dailyReady === false || !this.isBuyAllowed(intent.instId)) return { allowed: false, reason: "MARKET", evidence: marketEvidence };
-    const candleState = candleFreshness({ candle, exchangeNowMs }).state;
-    if (candleState !== "FRESH") return { allowed: false, reason: "MARKET", evidence: { ...marketEvidence, candleState } };
-    // Signal eligibility (breakout/DIP thresholds, PRICE_OUTSIDE/ASK_ABOVE_LIMIT) is evaluated
-    // against the cached daily_limit_price, matching the planner's evaluation exactly — tickSz
-    // can change intraday, and rounding it here first would make the DIP/breakout thresholds
-    // drift from what the planner already queued against. The tick-rounded execution price is
-    // computed independently in submitBuys() and used only for the ask check, sizing, and payload.
-    const signal = buySignal({ last: quote.last, askPx: quote.askPx, limitPrice: intent.dailyLimitPrice, previousClosedHigh: candle.high });
-    const generationValue = Number(intent.generation);
-    const isFirstGeneration = intent.generation !== null && intent.generation !== undefined && Number.isInteger(generationValue) && generationValue === 0;
-    if (signal.eligible && signal.trigger === "DIP" && !isFirstGeneration) {
-      return { allowed: false, reason: "DIP_FIRST_ENTRY_ONLY", evidence: { last: quote.last, askPx: quote.askPx, dailyLimitPrice: intent.dailyLimitPrice, generation: intent.generation, breakoutPrice: signal.breakoutPrice, dipPrice: signal.dipPrice, trigger: signal.trigger, ...marketEvidence } };
-    }
-    // The same snapshot backs both the allow/deny decision and attempt construction in
-    // submitBuys, so a quote/candle read can never drift from the freshness check that gated it.
-    return signal.eligible ? { allowed: true, quote, candle, instrument, signal } : { allowed: false, reason: signal.reason, evidence: { last: quote.last, askPx: quote.askPx, dailyLimitPrice: intent.dailyLimitPrice, breakoutPrice: signal.breakoutPrice, dipPrice: signal.dipPrice, breakoutGap: subtractDecimal(quote.last, signal.breakoutPrice), priceLimitGap: subtractDecimal(intent.dailyLimitPrice, quote.askPx), ...marketEvidence } };
+    if (!intent.strategyDay || strategyDay(exchangeNowMs) !== intent.strategyDay) return { allowed: false, reason: "STRATEGY_DAY_CHANGED", evidence: { currentDay: strategyDay(exchangeNowMs) } };
+    // From the close-sell minute on, the day's capital is being returned by
+    // its own exits; buying again would recycle it into an overnight position.
+    if (exchangeNowMs >= strategyDayCloseSellMs(intent.strategyDay)) return { allowed: false, reason: "DAY_CLOSED", evidence: { closeSellAt: strategyDayCloseSellMs(intent.strategyDay) } };
+    const quoteStatus = this.market.quoteStatus(intent.instId, this.config.quoteFreshMs, exchangeNowMs); const quote = quoteStatus.quote; const instrument = this.market.instrument(intent.instId);
+    const marketEvidence = { quoteAgeMs: quoteStatus.sourceAgeMs, quoteReceiptAgeMs: quoteStatus.receiptAgeMs, quoteSourceAgeMs: quoteStatus.sourceAgeMs, quoteFreshness: quoteStatus.reason, quoteTs: quoteStatus.sourceTs, instrumentState: instrument?.state };
+    if (!quoteStatus.fresh || !instrument || instrument.state !== "live" || !intent.limitPrice || !this.isBuyAllowed(intent.instId)) return { allowed: false, reason: "MARKET", evidence: marketEvidence };
+    // The limit is the frozen 72% price: never chase above it.  A bounce above
+    // the limit drops this intent until the symbol's next qualifying tick.
+    const priceEvidence = { last: quote.last, askPx: quote.askPx, limitPrice: intent.limitPrice, priceLimitGap: quote.askPx ? subtractDecimal(intent.limitPrice, quote.askPx) : undefined, ...marketEvidence };
+    if (compareDecimal(quote.last, intent.limitPrice) > 0) return { allowed: false, reason: "ABOVE_BUY_PRICE", evidence: priceEvidence };
+    if (!quote.askPx || compareDecimal(quote.askPx, intent.limitPrice) > 0) return { allowed: false, reason: "ASK_ABOVE_LIMIT", evidence: priceEvidence };
+    return { allowed: true, quote, instrument };
   }
   _exitGuard(intent, kind) {
     if (!this.ownerGuard.isHeld()) return { allowed: false, reason: "OWNER" };

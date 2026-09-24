@@ -21,7 +21,7 @@ test("Azure ops summary fixes one API window and keeps aggregate totals outside 
   const detail = boundedTelemetryRows([{ timestamp: "3" }, { timestamp: "2" }, { timestamp: "1" }], 2);
   assert.deepEqual(detail, { rows: [{ timestamp: "3" }, { timestamp: "2" }], truncated: true, latest: "3", earliest: "2", limit: 2 });
   assert.deepEqual(summarizeBlockAggregates(
-    [{ reason: "QUOTE_STALE", decisions: 7 }, { reason: "STRATEGY_POSITION_EXISTS", decisions: 9 }],
+    [{ reason: "QUOTE_STALE", decisions: 7 }, { reason: "PRIOR_POSITION_OPEN", decisions: 9 }],
     [{ reason: "MAX_AVAIL_FAILED", stage: "AVAILABILITY", eventCount: 5 }, { reason: "ACTIVE_BUY_ATTEMPT", stage: "POLICY", eventCount: 3 }],
   ), {
     total: 12,
@@ -195,17 +195,16 @@ test("Azure ops summary compacts workflow failures, approvals, and runner readin
 });
 
 test("Azure ops summary separates waiting, policy, opportunity, and safety blocks", () => {
-  assert.equal(classifyDecision("PRICE_OUTSIDE"), "waiting");
-  assert.equal(classifyDecision("SKIPPED_YESTERDAY_GAIN"), "policy");
-  assert.equal(classifyDecision("SKIPPED_ABOVE_MA20"), "policy"); assert.equal(classifyDecision("SKIPPED_MA20_UNAVAILABLE"), "policy");
-  assert.equal(classifyDecision("BUY_QUEUED"), "opportunity");
-  assert.equal(classifyDecision("QUOTE_STALE"), "blocked");
-  assert.equal(classifyBlock("QUOTE_STALE"), "LIKELY_RECOVERABLE"); assert.equal(classifyBlock("BREAKOUT_NOT_CONFIRMED"), "MARKET_MOVED"); assert.equal(classifyBlock("HARD_STOP"), "SAFETY_BOUNDARY");
+  for (const reason of ["ABOVE_COUNT_PRICE", "ABOVE_BUY_PRICE", "ASK_ABOVE_LIMIT", "DAILY_OPEN_PENDING"]) assert.equal(classifyDecision(reason), "waiting", reason);
+  for (const reason of ["SKIPPED_FIRST_TWO", "PRIOR_POSITION_OPEN", "CAPITAL_EXHAUSTED", "ACTIVE_BUY_ATTEMPT"]) assert.equal(classifyDecision(reason), "policy", reason);
+  assert.equal(classifyDecision("BUY_QUEUED"), "opportunity"); assert.equal(classifyDecision("BUY_PRICE_REACHED"), "opportunity");
+  assert.equal(classifyDecision("QUOTE_STALE"), "blocked"); assert.equal(classifyDecision("INSTRUMENT_PROTECTED"), "blocked");
+  assert.equal(classifyBlock("QUOTE_STALE"), "LIKELY_RECOVERABLE"); assert.equal(classifyBlock("ABOVE_BUY_PRICE"), "MARKET_MOVED"); assert.equal(classifyBlock("HARD_STOP"), "SAFETY_BOUNDARY");
   const decisions = traceEvents([
     { timestamp: "2", message: "trading_decision QUOTE_STALE", customDimensions: JSON.stringify({ instId: "BTC-USDT", reason: "QUOTE_STALE", last: "1", breakoutPrice: "0.9" }) },
-    { timestamp: "1", message: "trading_decision PRICE_OUTSIDE", customDimensions: { instId: "ETH-USDT", reason: "PRICE_OUTSIDE" } },
+    { timestamp: "1", message: "trading_decision ABOVE_BUY_PRICE", customDimensions: { instId: "ETH-USDT", reason: "ABOVE_BUY_PRICE" } },
   ]);
-  const trading = summarizeTrading(decisions, [{ timestamp: "3", reason: "BUY_PREPARED", decisionId: "D1", instId: "ETH-USDT", clOrdId: "one" }], new Map([["BTC-USDT", "margin"], ["ETH-USDT", "spot"]]), decisions, [{ timestamp: "4", type: "block_evidence", stage: "AVAILABILITY", reason: "INSUFFICIENT_FUNDS_WAIT_RISK_VERSION", decisionId: "D2", instId: "SOL-USDT", availBuy: "0" }]);
+  const trading = summarizeTrading(decisions, [{ timestamp: "3", reason: "BUY_PREPARED", decisionId: "D1", instId: "ETH-USDT", clOrdId: "one" }], new Map([["BTC-USDT", "margin"], ["ETH-USDT", "spot"]]), decisions, [{ timestamp: "4", type: "block_evidence", stage: "AVAILABILITY", reason: "MAX_AVAIL_FAILED", decisionId: "D2", instId: "SOL-USDT", availBuy: "0" }]);
   assert.deepEqual(trading.currentStates, { waiting: 1, policy: 0, blocked: 1, opportunity: 0 });
   assert.equal(trading.currentStateCoverage, 2);
   assert.equal(trading.blocked[0].route, "margin"); assert.equal(trading.blocked[1].stage, "AVAILABILITY"); assert.equal(trading.blocked[1].availBuy, "0"); assert.equal(trading.events.prepared, 1); assert.equal(trading.executions[0].route, "spot");
@@ -215,15 +214,15 @@ test("Azure ops summary separates waiting, policy, opportunity, and safety block
   assert.deepEqual(trading.blockClasses, { LIKELY_RECOVERABLE: 2, MARKET_MOVED: 0, SAFETY_BOUNDARY: 0 }); assert.deepEqual(trading.blockStages, { PLANNER: 1, AVAILABILITY: 1 });
 });
 
-test("Azure ops summary classifies a DIP_FIRST_ENTRY_ONLY block as policy, not a safety block", () => {
-  assert.equal(classifyDecision("DIP_FIRST_ENTRY_ONLY"), "policy");
-  const blockEvents = [{ timestamp: "1", type: "block_evidence", stage: "COORDINATOR_GUARD", reason: "DIP_FIRST_ENTRY_ONLY", decisionId: "D1", instId: "BTC-USDT", generation: 1, dipPrice: "94" }];
+test("Azure ops summary classifies spent capital as policy, not a safety block", () => {
+  assert.equal(classifyDecision("CAPITAL_EXHAUSTED"), "policy");
+  const blockEvents = [{ timestamp: "1", type: "block_evidence", stage: "SIZING", reason: "CAPITAL_EXHAUSTED", decisionId: "D1", instId: "BTC-USDT", generation: 1, ownedQuote: "3" }];
   const trading = summarizeTrading([], [], new Map(), [], blockEvents);
   assert.equal(trading.blocked.length, 0);
   assert.deepEqual(trading.blockedReasons, {});
   assert.deepEqual(trading.blockClasses, { LIKELY_RECOVERABLE: 0, MARKET_MOVED: 0, SAFETY_BOUNDARY: 0 });
   assert.equal(trading.policy.length, 1);
-  assert.equal(trading.policy[0].reason, "DIP_FIRST_ENTRY_ONLY");
+  assert.equal(trading.policy[0].reason, "CAPITAL_EXHAUSTED");
   assert.equal(trading.policy[0].optimizationClass, undefined);
   const timeline = trading.attemptTimelines.find((row) => row.decisionId === "D1").timeline[0];
   assert.equal(timeline.evidence.optimizationClass, undefined, "the attempt timeline must not label a policy skip as a safety-boundary block");
@@ -274,11 +273,10 @@ test("Azure ops summary exposes a post-commit recovery fill as durable ledger co
 test("Azure ops summary prints pipeline coverage counts without instrument names", () => {
   assert.equal(formatPipelineCoverageLine(null), "Pipeline coverage: unavailable");
   const row = parsePipelineCoverageRow({
-    runtime: "3", quote_ready: "2", candle_ready: "2", strategy_row: "3", daily_state: "2",
-    evaluator_seen: "1", decision_emit: "1", no_market_data: "1", candle_not_initialized: "0",
-    no_strategy_row: "0", strategy_state_never_created: "0", filtered_before_evaluator: "1", unknown: "0",
+    runtime: "3", quote_ready: "2", open_ready: "3", count_hit: "2", candidate: "0", buy_hit: "0",
+    evaluator_seen: "1", no_market_data: "1", open_missing: "0",
   });
-  assert.equal(formatPipelineCoverageLine(row), "Pipeline coverage: runtime=3 quote_ready=2 candle_ready=2 strategy_row=3 daily_state=2 evaluator_seen=1 decision_emit=1 | drop no_market_data=1 candle_not_initialized=0 no_strategy_row=0 strategy_state_never_created=0 filtered_before_evaluator=1 unknown=0");
+  assert.equal(formatPipelineCoverageLine(row), "Pipeline coverage: runtime=3 quote_ready=2 open_ready=3 count_hit=2 candidate=0 buy_hit=0 evaluator_seen=1 | missing no_market_data=1 open_missing=0");
   assert.equal(formatPipelineCoverageLine(row).includes("BTC"), false);
 });
 

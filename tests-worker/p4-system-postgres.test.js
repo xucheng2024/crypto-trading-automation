@@ -12,7 +12,7 @@ import { OrderRepository } from "../src/infrastructure/postgres/repositories.js"
 import { PostgresOwnerGuard } from "../src/infrastructure/postgres/owner-guard.js";
 import { composeProductionRuntime } from "../src/application/production-composition.js";
 import { postgresMigrations } from "../scripts/postgres-migration-manifest.mjs";
-import { expectedClosedCandleTs } from "../src/domain/rules.js";
+import { PANIC_STRATEGY_HASH, strategyDay, strategyDayStartMs } from "../src/domain/rules.js";
 
 const run = promisify(execFile);
 async function port() { return new Promise((resolve, reject) => { const s = net.createServer(); s.once("error", reject); s.listen(0, "127.0.0.1", () => { const value = s.address().port; s.close((error) => error ? reject(error) : resolve(value)); }); }); }
@@ -39,7 +39,7 @@ test("P4 system harness persists a real PostgreSQL lifecycle across restart", { 
   } finally { try { await stop(); } finally { await rm(dir, { recursive: true, force: true }); } }
 });
 
-test("P4 full runtime uses one PostgreSQL, fake OKX WS/REST, five-order Coordinator batch, SLO, coalescing and exit preemption", { timeout: 60_000 }, async () => {
+test("P4 full runtime ranks 82% touches in PostgreSQL and submits one owned-USDT IOC per drain", { timeout: 60_000 }, async () => {
   const dir = await mkdtemp(join(tmpdir(), "crypto-p4-runtime-")); const pgPort = await port(); const log = join(dir, "postgres.log"); let client; let running = false;
   const connect = async () => { client = new Client({ host: "127.0.0.1", port: pgPort, user: process.env.USER, database: "postgres" }); await client.connect(); };
   const start = async () => { await run("pg_ctl", ["-D", dir, "-l", log, "-o", `-p ${pgPort} -h 127.0.0.1`, "-w", "start"]); running = true; await connect(); };
@@ -52,45 +52,51 @@ test("P4 full runtime uses one PostgreSQL, fake OKX WS/REST, five-order Coordina
     await run("initdb", ["-D", dir, "--no-locale", "-E", "UTF8", "-A", "trust"]); await start();
     for (const name of postgresMigrations) await client.query(await readFile(new URL(`../migrations/postgres/${name}`, import.meta.url), "utf8"));
     const ids = Array.from({ length: 50 }, (_, index) => `Q${index}-USDT`); const owner = new PostgresOwnerGuard(client, "p4-real-runtime");
-    const day = new Date(Date.now() + 8 * 3_600_000).toISOString().slice(0, 10); const dayStart = Date.parse(`${day}T00:00:00+08:00`); const priorStart = dayStart - 86_400_000;
-    let submitted = []; const rest = {
+    const day = strategyDay(Date.now()); const dayStart = strategyDayStartMs(day); const baselineTs = Math.max(dayStart, Date.now() - 5_000);
+    let owned = "1000"; const submitted = []; const rest = {
       clockSkewMs: 0, clockFresh: () => true, syncServerTime: async () => 1, systemStatus: async () => [],
-      publicInstruments: async () => ids.map((instId) => ({ instId, state: "live", tickSz: "0.1", lotSz: "0.001", minSz: "0.001", baseCcy: instId.split("-")[0], quoteCcy: "USDT", uTime: "1" })),
-      tickers: async () => ids.map((instId) => ({ instId, ts: String(Date.now()), last: "100", askPx: "101", bidPx: "99" })),
+      publicInstruments: async () => [...ids, "Q0-BTC"].map((instId) => ({ instId, state: "live", tickSz: "0.1", lotSz: "0.001", minSz: "0.001", baseCcy: instId.split("-")[0], quoteCcy: instId.split("-")[1], uTime: "1" })),
+      tickers: async () => ids.map((instId) => ({ instId, ts: String(baselineTs), last: "100", askPx: "101", bidPx: "99", sodUtc8: "100", low24h: "99" })),
       accountConfig: async () => [{ acctLv: "3", autoLoan: "true" }],
       accountInstruments: async (type) => ids.map((instId) => ({ instId, state: "live", tradeQuoteCcyList: type === "MARGIN" ? "USDT" : "" })),
-      leverageInfo: async () => ids.map((instId) => ({ instId, lever: "3" })), balance: async () => [{ totalEq: "100", adjEq: "100", uTime: "1" }],
-      maxAvailSize: async (joined) => joined.split(",").map((instId) => ({ instId, availBuy: "10", availSell: "100" })),
-      candles: async (_instId, options) => options.bar === "1D" ? [[String(dayStart), "100", "101", "90", "95", "1", "1", "1", "0"], ...Array.from({ length: 20 }, (_, index) => [String(priorStart - index * 86_400_000), "100", "101", "90", "100", "1", "1", "1", "1"])] : [[String(expectedClosedCandleTs(Date.now())), "94", "94.5", "93", "94.4", "1", "1", "1", "1"]],
-      submitBatchOrders: async (payloads) => { submitted.push(...payloads); return payloads.map((payload, index) => ({ clOrdId: payload.clOrdId, status: "SUBMITTED", ordId: `p4-${index}` })); },
+      leverageInfo: async () => ids.map((instId) => ({ instId, lever: "3" })),
+      balance: async (ccy) => ccy ? [{ details: [{ ccy, availBal: owned, cashBal: owned }] }] : [{ totalEq: "1000", adjEq: "1000", uTime: "1" }],
+      maxAvailSize: async (joined) => joined.split(",").map((instId) => ({ instId, availBuy: "5000", availSell: "100" })),
+      candles: async () => [],
+      submitBatchOrders: async (payloads) => { submitted.push(...payloads); owned = "5"; return payloads.map((payload, index) => ({ clOrdId: payload.clOrdId, status: "SUBMITTED", ordId: `p4-${index}` })); },
     };
-    const composed = await composeProductionRuntime({ TRADING_MODE: "FULL", OKX_INSTRUMENTS: ids.join(","), STRATEGY_CONFIG_JSON: JSON.stringify({ content_hash: "a".repeat(64), config: ids.map((inst_id) => ({ inst_id, best_limit: "95", hold_hours: "24" })) }), KEY_VAULT_URI: "https://vault.example", POSTGRES_URL: "postgresql://local/postgres" }, {
+    const composed = await composeProductionRuntime({ TRADING_MODE: "FULL", OKX_INSTRUMENTS: "LEGACY-USDT", KEY_VAULT_URI: "https://vault.example", POSTGRES_URL: "postgresql://local/postgres" }, {
       socketFactory, ownerGuard: owner, ownerClient: client,
       keyVault: { readOkxCredentials: async () => ({ apiKey: "a", secretKey: "b", passphrase: "c" }) },
       pool: { query: (...args) => client.query(...args), transaction: (fn) => transaction(client, fn), end: async () => {} },
-      rest, workLoop: { start() {}, stop() {} }, orderConfig: { accountId: "default", strategyTag: "azure", orderVersion: "v1", accountFreshMs: 5000, quoteFreshMs: 1500, orderExpiryMs: 3000 },
+      rest, workLoop: { start() {}, stop() {} }, recurring: { start() {}, stop() {} }, orderConfig: { accountId: "default", strategyTag: "azure", orderVersion: "v1", accountFreshMs: 5000, quoteFreshMs: 1500, orderExpiryMs: 3000 },
     });
     try {
       await composed.start(); sockets.forEach((socket) => socket.emit("open")); await new Promise((resolve) => setImmediate(resolve));
+      assert.equal(sockets.length, 2, "public and private only; no candle socket");
+      assert.deepEqual(composed.buyPlanner.instIds, [...ids].sort(), "the universe is every live USDT spot pair from OKX, not OKX_INSTRUMENTS");
       for (const arg of [...ids.map((instId) => ({ channel: "tickers", instId })), { channel: "instruments", instType: "SPOT" }, { channel: "status" }]) sockets[0].emit("message", { event: "subscribe", code: "0", arg });
       sockets[1].emit("message", { event: "login", code: "0" }); for (const arg of [{ channel: "account" }, { channel: "balance_and_position" }, { channel: "orders", instType: "ANY" }]) sockets[1].emit("message", { event: "subscribe", code: "0", arg });
-      for (const arg of ids.map((instId) => ({ channel: "candle3m", instId }))) sockets[2].emit("message", { event: "subscribe", code: "0", arg });
-      sockets[1].emit("message", { arg: { channel: "account" }, data: [{ totalEq: "100", adjEq: "100", uTime: "1" }] });
+      sockets[1].emit("message", { arg: { channel: "account" }, data: [{ totalEq: "1000", adjEq: "1000", uTime: "1" }] });
+      const base = Date.now() - 200;
       for (const [index, instId] of ids.entries()) {
-        sockets[0].emit("message", { arg: { channel: "instruments", instType: "SPOT" }, data: [{ instId, uTime: "1", state: "live", tickSz: "0.1", lotSz: "0.001", minSz: "0.001" }] });
-        sockets[0].emit("message", { arg: { channel: "tickers", instId }, data: [{ instId, ts: String(Date.now()), last: index < 5 ? "94.9" : "100", askPx: index < 5 ? "94.9" : "101", bidPx: index < 5 ? "94.8" : "99" }] });
-        if (index < 5) sockets[2].emit("message", { arg: { channel: "candle3m", instId }, data: [[String(expectedClosedCandleTs(Date.now())), "94", "94.5", "93", "94.4", "1", "1", "1", "1"]] });
-        assert.equal(composed.market.ticker(instId).instId, instId, `ticker ${index}`);
+        // Q0 and Q1 are the first two 82% touches; Q2..Q6 then gap below 72%.
+        const last = index < 2 ? "81" : index < 7 ? "71" : "100";
+        sockets[0].emit("message", { arg: { channel: "tickers", instId }, data: [{ instId, ts: String(base + index), last, askPx: last, bidPx: last }] });
       }
-      composed.engine.queue.enqueue({ type: "SELL_BREACH", priority: "critical", instId: ids[0] });
-      const first = composed.engine.queue.take();
-      assert.equal(first.type, "SELL_BREACH"); assert.equal(composed.engine.queue.size, 55); assert.equal(composed.readyGate.ready, true, JSON.stringify(composed.readyGate.snapshot()));
-      assert.equal(composed.slo.samples.get("event_enqueue").length, 50);
+      assert.equal(composed.readyGate.ready, true, JSON.stringify(composed.readyGate.snapshot()));
       while (composed.engine.queue.size) await composed.engine.consumeOne();
-      assert.equal(composed.coordinator.pending.BUY.size, 5, "production market events create five BUY intents without test injection");
-      const batch = await composed.coordinator.drainOnce(); assert.equal(batch.count, 5); assert.equal(submitted.length, 5); assert.ok(submitted.every((row) => row.side === "buy" && row.tdMode === "cross"));
-      assert.equal((await client.query("SELECT count(*)::int AS count FROM order_attempts WHERE account_id='default' AND intent='BUY' AND state='SUBMITTED'")).rows[0].count, 5);
-      assert.deepEqual(composed.slo.assertInvariants(), { maxBatchSize: 5, maxMutationConcurrency: 1, unknownCount: 0 });
+      const hits = (await client.query("SELECT inst_id, count_hit_source FROM panic_daily_instruments WHERE strategy_day=$1 AND count_hit_at IS NOT NULL ORDER BY count_hit_at, inst_id", [day])).rows;
+      assert.deepEqual(hits.map((row) => row.inst_id), ids.slice(0, 7)); assert.ok(hits.every((row) => row.count_hit_source === "LIVE"));
+      assert.deepEqual([...composed.coordinator.pending.BUY.keys()].sort(), ids.slice(2, 7).sort(), "every candidate from the 3rd touch on is queued; the first two never are");
+      const first = await composed.coordinator.drainOnce();
+      assert.equal(first.count, 1); assert.equal(submitted.length, 1);
+      assert.deepEqual([submitted[0].instId, submitted[0].side, submitted[0].ordType, submitted[0].tdMode, submitted[0].px, submitted[0].sz], ["Q2-USDT", "buy", "ioc", "cross", "72", "13.881"], "the earliest trigger buys at the 72% limit with owned USDT (1000), not borrowable capacity (5000)");
+      assert.equal((await composed.coordinator.drainOnce()).reason, "CAPITAL_EXHAUSTED", "once owned USDT is spent the queue stops without borrowing");
+      assert.equal(submitted.length, 1);
+      const attempt = (await client.query("SELECT state, decision_reason, strategy_config_hash, hold_hours::text, execution_limit_price::text, decision_candle_ts FROM order_attempts WHERE account_id='default' AND intent='BUY'")).rows;
+      assert.deepEqual(attempt, [{ state: "SUBMITTED", decision_reason: "PANIC_BUY_72", strategy_config_hash: PANIC_STRATEGY_HASH, hold_hours: "3", execution_limit_price: "72", decision_candle_ts: String(dayStart) }]);
+      assert.deepEqual(composed.slo.assertInvariants(), { maxBatchSize: 1, maxMutationConcurrency: 1, unknownCount: 0 });
     } finally { await composed.stopTimers(); await composed.closeWebSockets(); await composed.releaseOwner(); await composed.closeDatabase(); }
   } finally { try { await stop(); } finally { await rm(dir, { recursive: true, force: true }); } }
 });

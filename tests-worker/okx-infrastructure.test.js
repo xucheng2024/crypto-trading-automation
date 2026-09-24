@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { OkxRestClient, assertOkxResponse, classifyBatchResponse, classifyCrossFill, safeOkxFailure, safeOkxSummary, validateAccountProfile } from "../src/infrastructure/okx/rest-client.js";
-import { OkxBusinessWsClient, OkxPrivateWsClient, OkxPublicWsClient, OkxWsReconnectBudget } from "../src/infrastructure/okx/ws-client.js";
+import { OkxPrivateWsClient, OkxPublicWsClient, OkxWsReconnectBudget } from "../src/infrastructure/okx/ws-client.js";
 
 const credentials = { apiKey: "key", secretKey: "secret", passphrase: "pass" };
 const ok = (data = []) => new Response(JSON.stringify({ code: "0", data }));
@@ -177,8 +177,8 @@ test("P1 WS freshness expires at idleMs and the idle timer actively reconnects",
   assert.equal(sockets.length, 2, "idle close enters the reconnect flow");
 });
 
-test("P1 Private WS keeps exponential backoff until 60 seconds stable; Business emits only confirmed candles", async () => {
-  const sockets = []; const candles = []; const privateEvents = []; const timers = fakeTimers();
+test("P1 Private WS keeps exponential backoff until 60 seconds stable", async () => {
+  const sockets = []; const privateEvents = []; const timers = fakeTimers();
   const privateClient = new OkxPrivateWsClient({ credentials, socketFactory: () => { const socket = new FakeSocket(); sockets.push(socket); return socket; }, clock: { nowMs: () => 10_000 }, clockSkewMs: () => 5_000, timers, random: () => 0.5, onObservation: (event) => privateEvents.push(event) });
   let signed; const signingClient = new OkxPrivateWsClient({ credentials: { sign: async (text) => { signed = text; return "signature"; } }, socketFactory: () => new FakeSocket() });
   assert.equal(await signingClient.loginSignature("123"), "signature"); assert.equal(signed, "123GET/users/self/verify");
@@ -188,12 +188,27 @@ test("P1 Private WS keeps exponential backoff until 60 seconds stable; Business 
   for (const arg of [{ channel: "account" }, { channel: "balance_and_position" }, { channel: "orders", instType: "ANY" }]) sockets[2].emit("message", JSON.stringify({ event: "subscribe", arg }));
   sockets[2].emit("message", JSON.stringify({ arg: { channel: "balance_and_position" }, data: [{ pTime: "41", uTime: "99", ccy: "USDT" }] }));
   assert.equal(privateClient.retry, 2); assert.equal(privateEvents[0].ts, 41); assert.equal(typeof privateEvents[0].ts, "number");
-  const businessSockets = [];
-  const business = new OkxBusinessWsClient({ instIds: ["BTC-USDT"], socketFactory: () => { const socket = new FakeSocket(); businessSockets.push(socket); return socket; }, timers, onObservation: (event) => candles.push(event) });
-  business.connect(); businessSockets[0].emit("open"); businessSockets[0].emit("message", JSON.stringify({ event: "subscribe", code: "0", arg: { channel: "candle3m", instId: "BTC-USDT" } }));
-  businessSockets[0].emit("message", JSON.stringify({ arg: { channel: "candle3m", instId: "BTC-USDT" }, data: [["10", "1", "2", "0.5", "1.5", "0", "0", "0", "0"], ["11", "1", "2", "0.5", "1.5", "0", "0", "0", "1"]] }));
-  business.reconnect(); timers.runTimeouts(); businessSockets[0].emit("message", JSON.stringify({ arg: { channel: "candle3m", instId: "BTC-USDT" }, data: [["12", "1", "2", "0.5", "1.5", "0", "0", "0", "1"]] }));
-  assert.equal(candles.length, 1); assert.equal(candles[0].confirm, true);
+});
+
+test("P1 Public WS follows the daily universe with incremental ticker subscriptions", () => {
+  const sockets = []; const timers = fakeTimers();
+  const client = new OkxPublicWsClient({ instIds: ["BTC-USDT", "OLD-USDT"], socketFactory: () => { const socket = new FakeSocket(); sockets.push(socket); return socket; }, timers });
+  assert.deepEqual(client.updateInstIds(["BTC-USDT", "OLD-USDT"]), { added: 0, removed: 0 }, "an offline client only records the next set");
+  client.connect(); sockets[0].emit("open");
+  const ack = (arg) => sockets[0].emit("message", JSON.stringify({ event: "subscribe", code: "0", arg }));
+  for (const instId of ["BTC-USDT", "OLD-USDT"]) ack({ channel: "tickers", instId });
+  ack({ channel: "instruments", instType: "SPOT" }); ack({ channel: "status" });
+  assert.equal(client.snapshot().baseline, true);
+  assert.deepEqual(client.updateInstIds(["BTC-USDT", "NEW-USDT"]), { added: 1, removed: 1 });
+  const [unsubscribe, subscribe] = sockets[0].sent.slice(-2).map((text) => JSON.parse(text));
+  assert.deepEqual(unsubscribe, { op: "unsubscribe", args: [{ channel: "tickers", instId: "OLD-USDT" }] });
+  assert.deepEqual(subscribe, { op: "subscribe", args: [{ channel: "tickers", instId: "NEW-USDT" }] });
+  sockets[0].emit("message", JSON.stringify({ event: "unsubscribe", arg: { channel: "tickers", instId: "OLD-USDT" } }));
+  ack({ channel: "tickers", instId: "NEW-USDT" });
+  assert.equal(sockets.length, 1, "incremental ACKs never force a reconnect");
+  assert.equal(client.snapshot().baseline, true);
+  client.reconnect(); timers.runTimeouts(); sockets[1].emit("open");
+  assert.deepEqual(JSON.parse(sockets[1].sent[0]).args.filter((arg) => arg.channel === "tickers").map((arg) => arg.instId), ["BTC-USDT", "NEW-USDT"], "a reconnect subscribes the current universe");
 });
 
 test("P1 Private WS signature failure closes the half-open socket and schedules reconnect", async () => {

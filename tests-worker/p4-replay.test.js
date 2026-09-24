@@ -13,7 +13,7 @@ test('P4 replay matrix maps every T8 row to a concrete executed test', async () 
   }
 });
 test('P4 watchdog reports every fail-closed operational reason', () => {
-  assert.deepEqual(evaluateWatchdog({ ws: {}, unknownCount: 1, riskHalt: true, exitBacklog: 1, watermarkStalled: true }).reasons.sort(), ['BUY_RISK_HALT','EXIT_BACKLOG','OWNER_LOST','READY_FALSE','UNKNOWN_ORDER','WATERMARK_STALLED','WS_BUSINESS_STALE','WS_PRIVATE_STALE','WS_PUBLIC_STALE'].sort());
+  assert.deepEqual(evaluateWatchdog({ ws: {}, unknownCount: 1, riskHalt: true, exitBacklog: 1, watermarkStalled: true }).reasons.sort(), ['BUY_RISK_HALT','EXIT_BACKLOG','OWNER_LOST','READY_FALSE','UNKNOWN_ORDER','WATERMARK_STALLED','WS_PRIVATE_STALE','WS_PUBLIC_STALE'].sort());
 });
 test('P4 maintenance composition remains separated from Engine-only OKX responsibilities', async () => {
   const source = await readFile('src/application/maintenance-composition.js', 'utf8');

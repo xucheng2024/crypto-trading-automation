@@ -11,7 +11,7 @@ import { promisify } from "node:util";
 import { pathToFileURL } from "node:url";
 import { resolve } from "node:path";
 import { AzureKeyVaultSecretPort } from "../src/infrastructure/azure/keyvault-port.js";
-import { composeProductionRuntime, createCancellableSleep, reconcileAndRestoreDatabase, refreshExecutionRoutes, runRestBaseline } from "../src/application/production-composition.js";
+import { composeProductionRuntime, createCancellableSleep, liveUsdtSpotUniverse, reconcileAndRestoreDatabase, refreshExecutionRoutes, runRestBaseline } from "../src/application/production-composition.js";
 import { EntraPostgresPool, AZURE_POSTGRES_SCOPE } from "../src/infrastructure/postgres/entra-pool.js";
 import { createApplicationInsightsTelemetry, isImportantTelemetry } from "../src/infrastructure/azure/application-insights-telemetry.js";
 import { EngineRecurringWork } from "../src/application/engine-recurring-work.js";
@@ -41,6 +41,21 @@ test("P4 REST baseline validates server, account, leverage and configured instru
   const result = await runRestBaseline({ rest, instIds: ["BTC-USDT", "SPOT-USDT"], market: { updateInstrument: (row) => instruments.set(row.instId, row), updateTicker: () => {} }, account: { update: (row) => Boolean(capital = row) }, readyGate: { set: (name, value) => ready.set(name, value) }, clock: { nowMs: () => 3 } });
   assert.equal(result.quoteCurrency.get("BTC-USDT"), "USDT"); assert.equal(result.executionRoutes.get("BTC-USDT"), "margin"); assert.equal(result.executionRoutes.get("SPOT-USDT"), "spot"); assert.equal(instruments.get("BTC-USDT").base, "BTC"); assert.equal(capital.totalEq, "100"); assert.equal(ready.get("account"), true); assert.equal(ready.get("instruments"), true);
   await assert.rejects(runRestBaseline({ rest: { ...rest, systemStatus: async () => [{ state: "ongoing" }] }, instIds: ["BTC-USDT"], market: {}, account: {}, readyGate: {}, clock: { nowMs: () => 3 } }), /OKX_SERVICE_UNAVAILABLE/);
+});
+
+test("P5 REST baseline discovers every live USDT spot pair and counts untradable routes without buying them", async () => {
+  const rows = [
+    { instId: "BTC-USDT", state: "live", quoteCcy: "USDT" }, { instId: "NOACCT-USDT", state: "live", quoteCcy: "USDT" }, { instId: "ETH-BTC", state: "live", quoteCcy: "BTC" },
+    { instId: "HALT-USDT", state: "suspend", quoteCcy: "USDT" }, { instId: "PRE-USDT", state: "live", quoteCcy: "USDT", ruleType: "pre_market" },
+  ].map((row) => ({ tickSz: "0.1", lotSz: "0.001", minSz: "0.001", baseCcy: row.instId.split("-")[0], uTime: "1", ...row }));
+  assert.deepEqual(liveUsdtSpotUniverse(rows), ["BTC-USDT", "NOACCT-USDT"]);
+  const instruments = new Map();
+  const rest = { syncServerTime: async () => {}, systemStatus: async () => [], publicInstruments: async () => rows, tickers: async () => [], accountConfig: async () => [{ acctLv: "3", autoLoan: "true" }], accountInstruments: async (type) => type === "SPOT" ? rows.filter((row) => row.instId === "BTC-USDT") : [], leverageInfo: async () => [], balance: async () => [{ totalEq: "100", adjEq: "100" }] };
+  const result = await runRestBaseline({ rest, market: { updateInstrument: (row) => instruments.set(row.instId, row), updateTicker: () => {} }, account: { update: () => true }, readyGate: { set: () => {} }, clock: { nowMs: () => 3 } });
+  assert.deepEqual(result.instIds, ["BTC-USDT", "NOACCT-USDT"], "the count universe includes pairs this account cannot trade");
+  assert.deepEqual(result.unavailable, ["NOACCT-USDT"]); assert.equal(result.executionRoutes.has("NOACCT-USDT"), false, "no route means the Coordinator never buys it");
+  assert.ok(instruments.has("NOACCT-USDT"));
+  await assert.rejects(runRestBaseline({ rest: { ...rest, publicInstruments: async () => rows.filter((row) => row.quoteCcy !== "USDT") }, market: {}, account: {}, readyGate: {}, clock: { nowMs: () => 3 } }), /OKX_UNIVERSE_EMPTY/);
 });
 
 test("P5 route refresh atomically changes only future routing and removes unavailable instruments", async () => {
@@ -374,20 +389,20 @@ test("P5 telemetry bounds repeated waiting states without hiding transitions", (
   const traces = []; let now = 1_000;
   const client = { config: {}, commonProperties: {}, trackTrace: (trace) => traces.push(trace) };
   const telemetry = createApplicationInsightsTelemetry({ client, now: () => now, repeatWindowMs: 900_000 });
-  telemetry({ type: "trading_decision", reason: "PRICE_OUTSIDE", instId: "BTC-USDT" });
-  telemetry({ type: "trading_decision", reason: "PRICE_OUTSIDE", instId: "BTC-USDT" });
-  telemetry({ type: "trading_decision", reason: "PRICE_OUTSIDE", instId: "ETH-USDT" });
+  telemetry({ type: "trading_decision", reason: "ABOVE_BUY_PRICE", instId: "BTC-USDT" });
+  telemetry({ type: "trading_decision", reason: "ABOVE_BUY_PRICE", instId: "BTC-USDT" });
+  telemetry({ type: "trading_decision", reason: "ABOVE_BUY_PRICE", instId: "ETH-USDT" });
   telemetry({ type: "trading_decision", reason: "READY", instId: "BTC-USDT" });
-  telemetry({ type: "trading_decision", reason: "PRICE_OUTSIDE", instId: "BTC-USDT" });
+  telemetry({ type: "trading_decision", reason: "ABOVE_BUY_PRICE", instId: "BTC-USDT" });
   telemetry({ type: "sell_protection", reason: "SELL_QUOTE_STALE", instId: "BTC-USDT" });
   telemetry({ type: "sell_protection", reason: "SELL_QUOTE_STALE", instId: "BTC-USDT" });
   telemetry({ type: "sell_protection", reason: "SELL_PROTECTION_MISSING", instId: "BTC-USDT" });
   telemetry({ type: "sell_protection", reason: "SELL_QUOTE_STALE", instId: "BTC-USDT" });
   now += 900_000;
-  telemetry({ type: "trading_decision", reason: "PRICE_OUTSIDE", instId: "BTC-USDT" });
+  telemetry({ type: "trading_decision", reason: "ABOVE_BUY_PRICE", instId: "BTC-USDT" });
   assert.deepEqual(traces.map((trace) => trace.message), [
-    "trading_decision PRICE_OUTSIDE", "trading_decision PRICE_OUTSIDE", "trading_decision READY", "trading_decision PRICE_OUTSIDE",
-    "sell_protection SELL_QUOTE_STALE", "sell_protection SELL_PROTECTION_MISSING", "sell_protection SELL_QUOTE_STALE", "trading_decision PRICE_OUTSIDE",
+    "trading_decision ABOVE_BUY_PRICE", "trading_decision ABOVE_BUY_PRICE", "trading_decision READY", "trading_decision ABOVE_BUY_PRICE",
+    "sell_protection SELL_QUOTE_STALE", "sell_protection SELL_PROTECTION_MISSING", "sell_protection SELL_QUOTE_STALE", "trading_decision ABOVE_BUY_PRICE",
   ]);
 });
 
@@ -636,8 +651,8 @@ test("P4 production composition routes fake WS baselines into projections and ke
     sockets.push(socket); return socket;
   };
   const ownerGuard = { held: false, isHeld() { return this.held; }, onLost: () => () => {}, acquire: async () => (ownerGuard.held = true), release: async () => { ownerGuard.held = false; } };
-  const composed = await composeProductionRuntime({ TRADING_MODE: 'OFF', OKX_INSTRUMENTS: 'BTC-USDT', KEY_VAULT_URI: 'https://vault.example', POSTGRES_URL: 'postgresql://host/db' }, {
-    socketFactory, ownerGuard, ownerClient: {}, readyGate, buyPlanner, keyVault: { readOkxCredentials: async () => ({ apiKey: 'a', secretKey: 'b', passphrase: 'c' }) },
+  const composed = await composeProductionRuntime({ TRADING_MODE: 'OFF', KEY_VAULT_URI: 'https://vault.example', POSTGRES_URL: 'postgresql://host/db' }, {
+    instIds: ['BTC-USDT'], socketFactory, ownerGuard, ownerClient: {}, readyGate, buyPlanner, keyVault: { readOkxCredentials: async () => ({ apiKey: 'a', secretKey: 'b', passphrase: 'c' }) },
     pool: { query: async () => ({ rows: [{ attempts: 'order_attempts', fills: 'filled_orders', watermarks: 'sync_watermarks' }] }), transaction: async (fn) => fn({}), end: async () => {} },
     reconciliation: { recover: async () => ({ ready: false }) }, baseline: async () => readyGate.set('instruments', true), orderConfig: { strategyTag: 'azure', orderVersion: 'v1' },
     protection: { confirm: async (row) => expTimeConfirmations.push(row), scanAnnouncements: async () => {} },
@@ -646,20 +661,19 @@ test("P4 production composition routes fake WS baselines into projections and ke
     await composed.start(); sockets.forEach((socket) => socket.emit('open'));
     await new Promise((resolve) => setImmediate(resolve));
     assert.equal(composed.readyGate.snapshot().dependencies.instruments, true);
-    // public ACKs: ticker, instruments and status; business has one candle ACK.
+    assert.equal(sockets.length, 2, 'only the public and private sockets exist');
+    // public ACKs: ticker, instruments and status.
     for (const arg of [{ channel: 'tickers', instId: 'BTC-USDT' }, { channel: 'instruments', instType: 'SPOT' }, { channel: 'status' }]) sockets[0].emit('message', { event: 'subscribe', code: '0', arg });
     sockets[1].emit('message', { event: 'login', code: '0' });
     for (const arg of [{ channel: 'account' }, { channel: 'balance_and_position' }, { channel: 'orders', instType: 'ANY' }]) sockets[1].emit('message', { event: 'subscribe', code: '0', arg });
-    sockets[2].emit('message', { event: 'subscribe', code: '0', arg: { channel: 'candle3m', instId: 'BTC-USDT' } });
     sockets[0].emit('message', { arg: { channel: 'tickers', instId: 'BTC-USDT' }, data: [{ instId: 'BTC-USDT', ts: '1', last: '100', askPx: '101', bidPx: '99' }] });
     sockets[0].emit('message', { arg: { channel: 'instruments', instType: 'SPOT' }, data: [{ instId: 'BTC-USDT', uTime: '1', state: 'live', tickSz: '0.1', lotSz: '0.001', minSz: '0.001' }] });
     sockets[0].emit('message', { arg: { channel: 'instruments', instType: 'SPOT' }, data: [{ instId: 'OTHER-USDT', uTime: '2', state: 'live', tickSz: '0.1', lotSz: '0.001', minSz: '0.001', expTime: '9' }] });
     sockets[0].emit('message', { arg: { channel: 'instruments', instType: 'SPOT' }, data: [{ instId: 'BTC-USDT', uTime: '2', state: 'live', tickSz: '0.1', lotSz: '0.001', minSz: '0.001', expTime: '9' }] });
     sockets[0].emit('message', { arg: { channel: 'instruments', instType: 'SPOT' }, data: [{ instId: 'BTC-USDT', uTime: '3', state: 'live', tickSz: '0.1', lotSz: '0.001', minSz: '0.001', expTime: '9' }] });
-    sockets[2].emit('message', { arg: { channel: 'candle3m', instId: 'BTC-USDT' }, data: [['1', '100', '101', '99', '100', '1', '1', '1', '1']] });
     await new Promise((resolve) => setTimeout(resolve, 20));
-    assert.equal(composed.market.ticker('BTC-USDT').last, '100'); assert.equal(composed.market.instrument('BTC-USDT').state, 'live'); assert.equal(composed.market.candle('BTC-USDT').open, '100');
-    assert.ok(marketEvents.some((event) => event.type === 'ticker')); assert.ok(marketEvents.some((event) => event.type === 'market-recheck'));
+    assert.equal(composed.market.ticker('BTC-USDT').last, '100'); assert.equal(composed.market.instrument('BTC-USDT').state, 'live');
+    assert.ok(marketEvents.some((event) => event.type === 'ticker'));
     assert.equal(composed.readyGate.snapshot().dependencies.account, false);
     assert.deepEqual(expTimeConfirmations, [{ instId: 'BTC-USDT', baseCcy: 'BTC', reason: 'EXP_TIME' }], 'only configured instruments are confirmed, and duplicate WS updates share one in-flight confirmation');
     sockets[1].emit('message', { arg: { channel: 'account' }, data: [{ totalEq: '10', adjEq: '9', uTime: '2' }] });
@@ -667,20 +681,22 @@ test("P4 production composition routes fake WS baselines into projections and ke
   } finally { await composed.closeWebSockets(); await composed.stopTimers(); await composed.releaseOwner(); }
 });
 
-test("P4 default WS composition refuses an empty instrument baseline", async () => {
-  await assert.rejects(composeProductionRuntime({ TRADING_MODE: 'OFF', KEY_VAULT_URI: 'https://vault.example', POSTGRES_URL: 'postgresql://host/db' }, {
+test("P4 default composition takes its universe from the REST baseline, not OKX_INSTRUMENTS", async () => {
+  const composed = await composeProductionRuntime({ TRADING_MODE: 'OFF', OKX_INSTRUMENTS: 'LEGACY-USDT', KEY_VAULT_URI: 'https://vault.example', POSTGRES_URL: 'postgresql://host/db' }, {
     keyVault: { readOkxCredentials: async () => ({ apiKey: 'a', secretKey: 'b', passphrase: 'c' }) }, pool: { transaction: async (fn) => fn({}), end: async () => {} }, ownerClient: {}, ownerGuard: { onLost: () => () => {} },
-  }), /OKX_INSTRUMENTS_REQUIRED/);
+  });
+  assert.deepEqual(composed.buyPlanner.instIds, [], 'the legacy configured list no longer drives trading');
+  assert.equal(composed.ws.business, undefined);
 });
 
 test("P4 Engine recurring work serializes remote timers but never phase-starves metrics", async () => {
   const intervals = new Map(); let next = 0; const timers = { setInterval(fn, delay) { const id = ++next; intervals.set(id, { fn, delay }); return id; }, clearInterval(id) { intervals.delete(id); } };
   const events = []; let release; const blocked = new Promise((resolve) => { release = resolve; });
-  let metricReports = 0; let clockSyncs = 0; let candleReviews = 0; let dustReviews = 0; const work = new EngineRecurringWork({ timers, telemetry: (event) => events.push(event), announcementMs: 11, reconcileMs: 13, routeMs: 15, weeklyMs: 17, clockSyncMs: 19, candleReviewMs: 21, announcements: async () => blocked, reportMetrics: async () => { metricReports += 1; }, clockSync: async () => { clockSyncs += 1; }, reviewCandles: async () => { candleReviews += 1; }, reviewDust: async () => { dustReviews += 1; } });
+  let metricReports = 0; let clockSyncs = 0; let sellReviews = 0; let dustReviews = 0; const work = new EngineRecurringWork({ timers, telemetry: (event) => events.push(event), announcementMs: 11, reconcileMs: 13, routeMs: 15, weeklyMs: 17, clockSyncMs: 19, sellReviewMs: 21, dustReviewMs: 21, announcements: async () => blocked, reportMetrics: async () => { metricReports += 1; }, clockSync: async () => { clockSyncs += 1; }, reviewSells: async () => { sellReviews += 1; }, reviewDust: async () => { dustReviews += 1; } });
   work.start(); assert.deepEqual([...intervals.values()].map((row) => row.delay).sort((a, b) => a - b), [11, 13, 15, 17, 19, 21, 21, 60_000]);
   const first = work.run('ANNOUNCEMENT', work.announcements); assert.deepEqual(await work.run('RECONCILE', async () => { throw new Error('must not run'); }), { skipped: true, reason: 'RECURRING_WORK_BUSY' });
   const metricTimer = [...intervals.values()].find((row) => row.delay === 60_000); assert.deepEqual(await metricTimer.fn(), { ok: true }); assert.equal(metricReports, 1);
-  assert.deepEqual(await [...intervals.values()].find((row) => row.delay === 19).fn(), { ok: true }); const reviews = [...intervals.values()].filter((row) => row.delay === 21); assert.deepEqual(await reviews[0].fn(), { ok: true }); assert.deepEqual(await reviews[1].fn(), { ok: true }); assert.equal(clockSyncs, 1); assert.equal(candleReviews, 1); assert.equal(dustReviews, 1);
+  assert.deepEqual(await [...intervals.values()].find((row) => row.delay === 19).fn(), { ok: true }); const reviews = [...intervals.values()].filter((row) => row.delay === 21); assert.deepEqual(await reviews[0].fn(), { ok: true }); assert.deepEqual(await reviews[1].fn(), { ok: true }); assert.equal(clockSyncs, 1); assert.equal(sellReviews, 1); assert.equal(dustReviews, 1);
   let concurrent = 0; let executions = 0; let releaseDust; const slowDust = new Promise((resolve) => { releaseDust = resolve; }); const one = work.runIndependent("DUST_REVIEW", async () => { executions += 1; concurrent += 1; await slowDust; concurrent -= 1; }); const two = work.runIndependent("DUST_REVIEW", async () => { executions += 1; }); assert.equal(executions, 1); releaseDust(); await Promise.all([one, two]); assert.equal(concurrent, 0); assert.equal(executions, 1);
   release(); assert.deepEqual(await first, { ok: true }); assert.deepEqual(await work.run('WEEKLY_RECONCILE', async () => { throw new Error('offline'); }), { ok: false });
   assert.equal(events[0].reason, 'WEEKLY_RECONCILE_FAILED'); work.stop(); assert.equal(intervals.size, 0);

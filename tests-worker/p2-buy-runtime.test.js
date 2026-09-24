@@ -2,25 +2,44 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { AccountCapitalSnapshot, BoundedPriorityQueue, MarketProjection, ReadyGate } from "../src/application/trading-engine.js";
-import { OrderCoordinator } from "../src/application/order-coordinator.js";
+import { OrderCoordinator, ownedQuoteBalance } from "../src/application/order-coordinator.js";
 import { ReconciliationService } from "../src/application/reconciliation-service.js";
 import { createCancellableSleep } from "../src/application/production-composition.js";
 import { VirtualSloMetrics } from "../src/application/slo-metrics.js";
-import { payloadHash } from "../src/domain/order.js";
-import { dailyLimit, expectedClosedCandleTs } from "../src/domain/rules.js";
+import { panicSellTime, strategyDay, strategyDayStartMs } from "../src/domain/rules.js";
 
 const clock = (value = 0) => ({ value, nowMs() { return this.value; } });
 const config = { accountId: "account", orderVersion: "P2", strategyTag: "STRAT", orderExpiryMs: 1_000, quoteFreshMs: 100, accountFreshMs: 100 };
 const clockReady = { clockFresh: () => true, clockSkewMs: 0 };
+const DAY = "2026-09-24";
+const NOON = strategyDayStartMs(DAY) + 12 * 3_600_000;
+const anchor = { ts: strategyDayStartMs(DAY), hash: "anchor-hash" };
 
 function ready() { const gate = new ReadyGate(); for (const key of gate.required) gate.set(key, true); return gate; }
-function freshStatus(quote) { return { quote, fresh: true, reason: "FRESH", receiptAgeMs: 0, sourceAgeMs: 0, sourceTs: Number(quote.ts) }; }
-function setupMarket(now) {
+function setupMarket(now, quotes = { "BTC-USDT": "95" }) {
   const market = new MarketProjection({ clock: now });
-  market.updateInstrument({ instId: "BTC-USDT", ts: 1, state: "live", tickSz: "0.1", lotSz: "0.001", minSz: "0.001", base: "BTC", version: 1 });
-  market.updateTicker({ instId: "BTC-USDT", ts: 2, last: "95", askPx: "95", bidPx: "94" });
-  market.updateCandle({ instId: "BTC-USDT", ts: expectedClosedCandleTs(now.nowMs()), open: "90", high: "90", low: "89", confirm: true });
+  for (const [instId, last] of Object.entries(quotes)) {
+    market.updateInstrument({ instId, ts: 1, state: "live", tickSz: "0.1", lotSz: "0.001", minSz: "0.001", base: instId.split("-")[0], version: 1 });
+    market.updateTicker({ instId, ts: now.nowMs(), last, askPx: last, bidPx: last });
+  }
   return market;
+}
+function freshAccount(now, version = 1) { const account = new AccountCapitalSnapshot({ clock: now }); for (let index = 1; index <= version; index += 1) account.update({ ts: index, totalEq: "1000", adjEq: "1000" }); return account; }
+function usdt(availBal) { return [{ details: [{ ccy: "USDT", availBal, cashBal: availBal }] }]; }
+function buyIntent(instId, overrides = {}) { return { intent: "BUY", decisionId: `decision-${instId}`, instId, generation: 0, triggerAt: 1, signalAt: 1, strategyDay: DAY, limitPrice: "100", countRank: 3, anchor, holdHours: "3", configHash: "panic", tradeQuoteCcy: "USDT", ...overrides }; }
+function memoryOrders() {
+  const attempts = new Map();
+  return {
+    attempts,
+    async reserveBuy(_tx, attempt) { attempts.set(attempt.clOrdId, { ...attempt, state: "PREPARED", reservationState: "ACTIVE" }); return { authorized: true }; },
+    async markSubmitted(_tx, id, ordId) { Object.assign(attempts.get(id), { state: "SUBMITTED", ordId }); },
+    async markUnknown(_tx, id, reason) { Object.assign(attempts.get(id), { state: "UNKNOWN", reason }); },
+    async markNotCreated(_tx, id, reason) { Object.assign(attempts.get(id), { state: "NOT_CREATED", reservationState: "RELEASED", reason }); },
+    async markSettled(_tx, id) { Object.assign(attempts.get(id), { state: "SETTLED" }); },
+  };
+}
+function panicCoordinator({ now, market, account = freshAccount(now), orders = memoryOrders(), transport = {}, mode = "FULL", ...options }) {
+  return new OrderCoordinator({ transaction: async (fn) => fn({}), orders, state: {}, ownerGuard: { isHeld: () => true }, readyGate: ready(), market, account, mode: () => mode, executionRoute: () => "margin", tradeQuoteCurrency: () => "USDT", clock: now, config, transport: { ...clockReady, ...transport }, ...options });
 }
 
 test("P2 runtime coalesces ticker pressure and accepts same-ms corrections", () => {
@@ -70,223 +89,6 @@ test("P2 recovery cancel during owner safety wait does not load snapshots", asyn
   assert.equal(listed, 0);
 });
 
-test("P2 BUY coordinator uses one fake batch, persists item-independent outcomes, and does not resend UNKNOWN", async () => {
-  const now = clock(10); const market = setupMarket(now); const account = new AccountCapitalSnapshot({ clock: now }); account.update({ ts: 1, totalEq: "150", adjEq: "150", mgnRatio: "2" });
-  const attempts = new Map(); const events = []; const slo = new VirtualSloMetrics(now); let sends = 0;
-  const orders = {
-    async reserveBuy(_tx, attempt) { attempts.set(attempt.clOrdId, { ...attempt, state: "PREPARED", reservationState: "ACTIVE" }); return { authorized: true }; },
-    async markSubmitted(_tx, id, ordId) { Object.assign(attempts.get(id), { state: "SUBMITTED", ordId }); },
-    async markUnknown(_tx, id) { Object.assign(attempts.get(id), { state: "UNKNOWN" }); },
-    async markNotCreated(_tx, id) { Object.assign(attempts.get(id), { state: "NOT_CREATED", reservationState: "RELEASED" }); },
-    async markSettled(_tx, id) { Object.assign(attempts.get(id), { state: "SETTLED" }); },
-  };
-  const coordinator = new OrderCoordinator({ transaction: async (fn) => fn({}), orders, state: { insertFill: async () => {} }, ownerGuard: { isHeld: () => true }, readyGate: ready(), market, account, mode: () => "FULL", executionRoute: (instId) => instId === "SOL-USDT" ? "spot" : "margin", clock: now, config, slo, telemetry: (event) => events.push(event), transport: {
-    ...clockReady,
-    maxAvailSize: async (ids, options) => { assert.equal(options.tdMode, "cross"); assert.equal(options.ccy, "USDT"); return ids.split(",").map((instId) => ({ instId, availBuy: "100" })); },
-    submitBatchOrders: async (payload) => { sends += 1; assert.equal(payload.length, 3); assert.ok(payload.filter((item) => item.instId !== "SOL-USDT").every((item) => item.tdMode === "cross" && item.ordType === "ioc" && item.tradeQuoteCcy === "USDT")); const spotOrder = payload.find((item) => item.instId === "SOL-USDT"); assert.equal(spotOrder.tdMode, "cross"); assert.equal("tradeQuoteCcy" in spotOrder, false); return [{ clOrdId: payload[0].clOrdId, status: "SUBMITTED", ordId: "1" }, { clOrdId: payload[1].clOrdId, status: "NOT_CREATED", reason: "rejected" }, { clOrdId: payload[2].clOrdId, status: "UNKNOWN", reason: "timeout" }]; },
-  } });
-  for (const instId of ["BTC-USDT", "ETH-USDT", "SOL-USDT"]) {
-    if (instId !== "BTC-USDT") { market.updateInstrument({ instId, ts: 1, state: "live", tickSz: "0.1", lotSz: "0.001", minSz: "0.001", base: instId.split("-")[0], version: 1 }); market.updateTicker({ instId, ts: 2, last: "95", askPx: "95", bidPx: "94" }); market.updateCandle({ instId, ts: expectedClosedCandleTs(now.nowMs()), open: "90", high: "90", low: "89", confirm: true }); }
-    coordinator.enqueue({ intent: "BUY", decisionId: `decision-${instId}`, instId, generation: 0, eligibleSince: 1, strategyDay: "2026-08-14", dailyLimitPrice: "100", holdHours: "24", configHash: "cfg", tradeQuoteCcy: "USDT" });
-  }
-  const result = await coordinator.drainOnce();
-  assert.equal(result.count, 3); assert.equal(sends, 1); assert.deepEqual([...attempts.values()].map((row) => row.state).sort(), ["NOT_CREATED", "SUBMITTED", "UNKNOWN"]);
-  assert.deepEqual(slo.assertInvariants(), { maxBatchSize: 3, maxMutationConcurrency: 1, unknownCount: 1 }); assert.equal(slo.samples.get("signal_post")[0], 0);
-  assert.ok([...attempts.values()].every((row) => row.decisionId === `decision-${row.instId}`)); assert.ok(events.filter((event) => event.type === "order_lifecycle").every((event) => event.decisionId));
-  assert.equal(slo.samples.get("buy_reserve_db").length, 3); assert.deepEqual(slo.samples.get("buy_reservation_tx"), [0]);
-  assert.equal(events.at(-1).count, 3); await coordinator.drainOnce(); assert.equal(sends, 1, "UNKNOWN is never blindly resent");
-});
-
-test("P5 BUY coordinator emits one structured block per unchanged decision stage", async () => {
-  const now = clock(10); const events = [];
-  const coordinator = new OrderCoordinator({ transaction: async (fn) => fn({}), orders: {}, state: {}, ownerGuard: { isHeld: () => true }, readyGate: ready(), market: setupMarket(now), account: new AccountCapitalSnapshot({ clock: now }), mode: () => "OFF", clock: now, config, telemetry: (event) => events.push(event), transport: clockReady });
-  const intent = { intent: "BUY", decisionId: "D-BLOCK", instId: "BTC-USDT", generation: 0, strategyDay: "2026-08-14" };
-  await coordinator.prepareBuys([intent]); await coordinator.prepareBuys([intent]);
-  assert.deepEqual(events, [{ type: "block_evidence", side: "BUY", stage: "COORDINATOR_GUARD", reason: "MODE", reasonCode: "MODE", decisionId: "D-BLOCK", clOrdId: undefined, instId: "BTC-USDT", strategyDay: "2026-08-14", generation: 0, executionMode: undefined, executionRoute: undefined, currentMode: "OFF" }]);
-});
-
-test("P5 BUY availability failure emits bounded structured evidence and remains retryable", async () => {
-  const now = clock(10); const events = []; const account = new AccountCapitalSnapshot({ clock: now }); account.update({ ts: 1, totalEq: "150", adjEq: "150" });
-  const coordinator = new OrderCoordinator({ transaction: async (fn) => fn({}), orders: {}, state: {}, ownerGuard: { isHeld: () => true }, readyGate: ready(), market: setupMarket(now), account, mode: () => "FULL", executionRoute: () => "margin", clock: now, config, telemetry: (event) => events.push(event), transport: { ...clockReady, maxAvailSize: async () => { throw new Error("temporary unavailable"); } } });
-  const intent = { intent: "BUY", decisionId: "D-AVAIL", instId: "BTC-USDT", generation: 0, strategyDay: "2026-08-14", dailyLimitPrice: "100" };
-  assert.deepEqual(await coordinator.prepareBuys([intent]), []); assert.deepEqual(await coordinator.prepareBuys([intent]), []);
-  const blocks = events.filter((event) => event.type === "block_evidence"); assert.equal(blocks.length, 1); assert.equal(blocks[0].reason, "MAX_AVAIL_FAILED"); assert.equal(blocks[0].executionRoute, "margin");
-});
-
-test("P2 BUY final guard releases PREPARED reservation when owner, mode, READY, or freshness is lost", async () => {
-  const now = clock(10); const market = setupMarket(now); const account = new AccountCapitalSnapshot({ clock: now }); account.update({ ts: 1, totalEq: "150", adjEq: "150" });
-  let held = true; const attempts = new Map(); let sends = 0;
-  const coordinator = new OrderCoordinator({ transaction: async (fn) => fn({}), state: {}, market, account, readyGate: ready(), ownerGuard: { isHeld: () => held }, mode: () => "FULL", clock: now, config,
-    orders: { reserveBuy: async (_tx, a) => { attempts.set(a.clOrdId, { ...a, state: "PREPARED" }); held = false; return { authorized: true }; }, markNotCreated: async (_tx, id) => Object.assign(attempts.get(id), { state: "NOT_CREATED", reservationState: "RELEASED" }) },
-    transport: { ...clockReady, maxAvailSize: async () => [{ instId: "BTC-USDT", availBuy: "100" }], submitBatchOrders: async () => { sends += 1; return []; } },
-  });
-  coordinator.enqueue({ intent: "BUY", instId: "BTC-USDT", generation: 0, eligibleSince: 1, strategyDay: "2026-08-14", dailyLimitPrice: "100", holdHours: "24", configHash: "cfg" });
-  assert.equal((await coordinator.drainOnce()).reason, "FINAL_GUARD"); assert.equal(sends, 0); assert.equal([...attempts.values()][0].reservationState, "RELEASED");
-});
-
-test("P2 BUY attempt uses the exact market snapshot admitted by its construction guard", async () => {
-  const now = clock(720_000); const account = new AccountCapitalSnapshot({ clock: now }); account.update({ ts: 1, totalEq: "150", adjEq: "150" });
-  const quoteA = { instId: "BTC-USDT", ts: 719_999, last: "95", askPx: "95", bidPx: "94" };
-  const quoteB = { instId: "BTC-USDT", ts: 720_000, last: "96", askPx: "96", bidPx: "95" };
-  const candleA = { instId: "BTC-USDT", ts: expectedClosedCandleTs(now.nowMs()), high: "90", low: "89", confirm: true };
-  const candleB = { instId: "BTC-USDT", ts: expectedClosedCandleTs(now.nowMs()), high: "91", low: "90", confirm: true };
-  const instrumentA = { instId: "BTC-USDT", state: "live", tickSz: "0.3", lotSz: "0.001", minSz: "0.001", base: "BTC", version: "A" };
-  const instrumentB = { ...instrumentA, tickSz: "0.2", version: "B" };
-  let quoteReads = 0; let candleReads = 0; let instrumentReads = 0; let tickerReads = 0; let attempt;
-  const market = {
-    quoteStatus: () => freshStatus(quoteReads++ === 0 ? quoteA : quoteB),
-    ticker: () => { tickerReads += 1; return quoteB; },
-    candle: () => candleReads++ === 0 ? candleA : candleB,
-    instrument: () => instrumentReads++ === 0 ? instrumentA : instrumentB,
-  };
-  const coordinator = new OrderCoordinator({ transaction: async (fn) => fn({}), state: {}, market, account, readyGate: ready(), ownerGuard: { isHeld: () => true }, mode: () => "FULL", executionRoute: () => "margin", tradeQuoteCurrency: () => "USDT", clock: now, config,
-    orders: { reserveBuy: async (_tx, row) => { attempt = row; return { authorized: true }; }, markSubmitted: async () => {} },
-    transport: { ...clockReady, submitBatchOrders: async (rows) => rows.map((row) => ({ clOrdId: row.clOrdId, status: "SUBMITTED", ordId: "snapshot" })) },
-  });
-  const result = await coordinator.submitBuys([{ intent: "BUY", instId: "BTC-USDT", generation: 0, strategyDay: "2026-08-14", dailyLimitPrice: "100.1", breakoutPrice: "1", holdHours: "24", configHash: "cfg", availBuy: "100" }]);
-  assert.equal(result.submitted, true);
-  assert.equal(tickerReads, 0, "attempt construction must not re-read the raw ticker");
-  assert.equal(attempt.decisionQuoteHash, await payloadHash(quoteA));
-  assert.equal(attempt.decisionCandleHash, await payloadHash(candleA));
-  assert.equal(attempt.executionLimitPrice, "99.9");
-  assert.equal(attempt.instrumentVersion, "A");
-  assert.equal(attempt.decisionReferencePrice, "90.27", "reference price comes from the guard's candle, not the queued intent");
-  assert.equal(attempt.decisionReason, "BUY_BREAKOUT_CONFIRMED");
-});
-
-test("P2 BUY attempt records BUY_DIP_CONFIRMED and the dip price as reference at generation 0", async () => {
-  const now = clock(10); const market = setupMarket(now); const account = new AccountCapitalSnapshot({ clock: now }); account.update({ ts: 1, totalEq: "150", adjEq: "150" });
-  market.updateTicker({ instId: "BTC-USDT", ts: 3, last: "85", askPx: "85", bidPx: "84" });
-  let attempt;
-  const coordinator = new OrderCoordinator({ transaction: async (fn) => fn({}), state: {}, market, account, readyGate: ready(), ownerGuard: { isHeld: () => true }, mode: () => "FULL", executionRoute: () => "margin", tradeQuoteCurrency: () => "USDT", clock: now, config,
-    orders: { reserveBuy: async (_tx, row) => { attempt = row; return { authorized: true }; }, markSubmitted: async () => {} },
-    transport: { ...clockReady, submitBatchOrders: async (rows) => rows.map((row) => ({ clOrdId: row.clOrdId, status: "SUBMITTED", ordId: "dip" })) },
-  });
-  const result = await coordinator.submitBuys([{ intent: "BUY", instId: "BTC-USDT", generation: 0, strategyDay: "2026-08-14", dailyLimitPrice: "100", holdHours: "24", configHash: "cfg", availBuy: "100" }]);
-  assert.equal(result.submitted, true);
-  assert.equal(attempt.decisionReason, "BUY_DIP_CONFIRMED");
-  assert.equal(attempt.decisionReferencePrice, "94");
-});
-
-test("P2 BUY guard blocks a DIP-only trigger once generation is no longer zero", async () => {
-  const now = clock(10); const market = setupMarket(now); const account = new AccountCapitalSnapshot({ clock: now }); account.update({ ts: 1, totalEq: "150", adjEq: "150" });
-  market.updateTicker({ instId: "BTC-USDT", ts: 3, last: "85", askPx: "85", bidPx: "84" });
-  const events = [];
-  const coordinator = new OrderCoordinator({ transaction: async (fn) => fn({}), orders: {}, state: {}, ownerGuard: { isHeld: () => true }, readyGate: ready(), market, account, mode: () => "FULL", executionRoute: () => "margin", clock: now, config, telemetry: (event) => events.push(event), transport: clockReady });
-  const previousAttempt = { state: "SETTLED", decision_market_key: "old" };
-  assert.deepEqual(await coordinator.prepareBuys([{ intent: "BUY", instId: "BTC-USDT", generation: 1, strategyDay: "2026-08-14", dailyLimitPrice: "100", previousAttempt, nextMarketKey: "new" }]), []);
-  const block = events.find((event) => event.type === "block_evidence");
-  assert.equal(block.reason, "DIP_FIRST_ENTRY_ONLY");
-  assert.equal(block.dipPrice, "94");
-});
-
-test("P2 BUY guard fails closed on a DIP trigger when generation is missing or null", async () => {
-  const now = clock(10); const market = setupMarket(now); const account = new AccountCapitalSnapshot({ clock: now }); account.update({ ts: 1, totalEq: "150", adjEq: "150" });
-  market.updateTicker({ instId: "BTC-USDT", ts: 3, last: "85", askPx: "85", bidPx: "84" });
-  const eventsA = [];
-  const coordinatorA = new OrderCoordinator({ transaction: async (fn) => fn({}), orders: {}, state: {}, ownerGuard: { isHeld: () => true }, readyGate: ready(), market, account, mode: () => "FULL", executionRoute: () => "margin", clock: now, config, telemetry: (event) => eventsA.push(event), transport: clockReady });
-  assert.deepEqual(await coordinatorA.prepareBuys([{ intent: "BUY", instId: "BTC-USDT", strategyDay: "2026-08-14", dailyLimitPrice: "100" }]), []);
-  assert.equal(eventsA.find((event) => event.type === "block_evidence").reason, "DIP_FIRST_ENTRY_ONLY");
-  const eventsB = [];
-  const coordinatorB = new OrderCoordinator({ transaction: async (fn) => fn({}), orders: {}, state: {}, ownerGuard: { isHeld: () => true }, readyGate: ready(), market, account, mode: () => "FULL", executionRoute: () => "margin", clock: now, config, telemetry: (event) => eventsB.push(event), transport: clockReady });
-  assert.deepEqual(await coordinatorB.prepareBuys([{ intent: "BUY", instId: "BTC-USDT", generation: null, strategyDay: "2026-08-14", dailyLimitPrice: "100" }]), []);
-  assert.equal(eventsB.find((event) => event.type === "block_evidence").reason, "DIP_FIRST_ENTRY_ONLY");
-});
-
-test("P2 BUY guard allows a generation 1 buy when BREAKOUT confirms even inside the DIP zone", async () => {
-  const now = clock(10); const market = setupMarket(now); const account = new AccountCapitalSnapshot({ clock: now }); account.update({ ts: 1, totalEq: "150", adjEq: "150" });
-  market.updateTicker({ instId: "BTC-USDT", ts: 3, last: "92", askPx: "92", bidPx: "91" });
-  const coordinator = new OrderCoordinator({ transaction: async (fn) => fn({}), orders: {}, state: {}, ownerGuard: { isHeld: () => true }, readyGate: ready(), market, account, mode: () => "FULL", executionRoute: () => "margin", clock: now, config, transport: { ...clockReady, maxAvailSize: async () => [{ instId: "BTC-USDT", availBuy: "100" }] } });
-  const previousAttempt = { state: "SETTLED", decision_market_key: "old" };
-  const prepared = await coordinator.prepareBuys([{ intent: "BUY", instId: "BTC-USDT", generation: 1, strategyDay: "2026-08-14", dailyLimitPrice: "100", previousAttempt, nextMarketKey: "new" }]);
-  assert.equal(prepared.length, 1);
-});
-
-test("P2 BUY guard evidence does not throw when price is outside the daily limit", async () => {
-  const now = clock(10); const market = setupMarket(now); const account = new AccountCapitalSnapshot({ clock: now }); account.update({ ts: 1, totalEq: "150", adjEq: "150" });
-  market.updateTicker({ instId: "BTC-USDT", ts: 3, last: "101", askPx: "101", bidPx: "100" });
-  const events = [];
-  const coordinator = new OrderCoordinator({ transaction: async (fn) => fn({}), orders: {}, state: {}, ownerGuard: { isHeld: () => true }, readyGate: ready(), market, account, mode: () => "FULL", executionRoute: () => "margin", clock: now, config, telemetry: (event) => events.push(event), transport: clockReady });
-  await assert.doesNotReject(coordinator.prepareBuys([{ intent: "BUY", instId: "BTC-USDT", generation: 0, strategyDay: "2026-08-14", dailyLimitPrice: "100" }]));
-  const block = events.find((event) => event.type === "block_evidence");
-  assert.equal(block.reason, "PRICE_OUTSIDE");
-  assert.equal(block.breakoutPrice, "90.27");
-  assert.equal(block.dipPrice, "94");
-});
-
-test("P2 BUY submit trusts the fresh guard signal over a stale queued DIP trigger", async () => {
-  const now = clock(720_000); const account = new AccountCapitalSnapshot({ clock: now }); account.update({ ts: 1, totalEq: "150", adjEq: "150" });
-  const quote = { instId: "BTC-USDT", ts: 720_000, last: "92", askPx: "92", bidPx: "91" };
-  const candle = { instId: "BTC-USDT", ts: expectedClosedCandleTs(now.nowMs()), high: "90", low: "89", confirm: true };
-  const instrument = { instId: "BTC-USDT", state: "live", tickSz: "0.1", lotSz: "0.001", minSz: "0.001", base: "BTC", version: "A" };
-  const market = { quoteStatus: () => freshStatus(quote), ticker: () => quote, candle: () => candle, instrument: () => instrument };
-  let attempt;
-  const coordinator = new OrderCoordinator({ transaction: async (fn) => fn({}), state: {}, market, account, readyGate: ready(), ownerGuard: { isHeld: () => true }, mode: () => "FULL", executionRoute: () => "margin", tradeQuoteCurrency: () => "USDT", clock: now, config,
-    orders: { reserveBuy: async (_tx, row) => { attempt = row; return { authorized: true }; }, markSubmitted: async () => {} },
-    transport: { ...clockReady, submitBatchOrders: async (rows) => rows.map((row) => ({ clOrdId: row.clOrdId, status: "SUBMITTED", ordId: "stale-trigger" })) },
-  });
-  const result = await coordinator.submitBuys([{ intent: "BUY", instId: "BTC-USDT", generation: 0, strategyDay: "2026-08-14", dailyLimitPrice: "100", trigger: "DIP", breakoutPrice: "1", dipPrice: "1", holdHours: "24", configHash: "cfg", availBuy: "100" }]);
-  assert.equal(result.submitted, true);
-  assert.equal(attempt.decisionReason, "BUY_BREAKOUT_CONFIRMED");
-  assert.equal(attempt.decisionReferencePrice, "90.27");
-});
-
-test("P2 BUY guard evaluates DIP against the cached daily limit, not a tickSz-rounded execution price", async () => {
-  const now = clock(10); const market = setupMarket(now); const account = new AccountCapitalSnapshot({ clock: now }); account.update({ ts: 1, totalEq: "150", adjEq: "150" });
-  // tickSz changed intraday from what the planner originally saw (e.g. "0.1") to "1": rounding
-  // dailyLimitPrice="99.9" down to tickSz=1 gives limitPrice=99 -> dipPrice=93.06, while the
-  // planner (which never tick-rounds) computed dipPrice=99.9*0.94=93.906 from the cached daily
-  // limit. last=93.5 falls between the two thresholds and must be judged consistently.
-  market.updateInstrument({ instId: "BTC-USDT", ts: 2, state: "live", tickSz: "1", lotSz: "0.001", minSz: "0.001", base: "BTC", version: 2 });
-  market.updateTicker({ instId: "BTC-USDT", ts: 3, last: "93.5", askPx: "93.5", bidPx: "93.4" });
-  market.updateCandle({ instId: "BTC-USDT", ts: expectedClosedCandleTs(now.nowMs()), high: "200", low: "199", confirm: true });
-  const coordinator = new OrderCoordinator({ transaction: async (fn) => fn({}), orders: {}, state: {}, ownerGuard: { isHeld: () => true }, readyGate: ready(), market, account, mode: () => "FULL", executionRoute: () => "margin", clock: now, config, transport: { ...clockReady, maxAvailSize: async () => [{ instId: "BTC-USDT", availBuy: "100" }] } });
-  const prepared = await coordinator.prepareBuys([{ intent: "BUY", instId: "BTC-USDT", generation: 0, strategyDay: "2026-08-14", dailyLimitPrice: "99.9" }]);
-  assert.equal(prepared.length, 1, "93.5 must clear the DIP line computed from the cached 99.9 daily limit (93.906), matching what the planner already queued against");
-});
-
-test("P2 BUY enqueue dedupes pending DIP intents per instId so a second tick cannot open a second generation 0 attempt", async () => {
-  const now = clock(10); const market = setupMarket(now); const account = new AccountCapitalSnapshot({ clock: now }); account.update({ ts: 1, totalEq: "150", adjEq: "150" });
-  const coordinator = new OrderCoordinator({ transaction: async (fn) => fn({}), orders: {}, state: {}, ownerGuard: { isHeld: () => true }, readyGate: ready(), market, account, mode: () => "FULL", executionRoute: () => "margin", clock: now, config, transport: clockReady });
-  coordinator.enqueue({ intent: "BUY", instId: "BTC-USDT", decisionId: "D-DIP-1", generation: 0, eligibleSince: 1, strategyDay: "2026-08-14", dailyLimitPrice: "100", trigger: "DIP" });
-  coordinator.enqueue({ intent: "BUY", instId: "BTC-USDT", decisionId: "D-DIP-2", generation: 0, eligibleSince: 2, strategyDay: "2026-08-14", dailyLimitPrice: "100", trigger: "DIP" });
-  assert.equal(coordinator.pending.BUY.size, 1);
-  assert.equal(coordinator.pending.BUY.get("BTC-USDT").decisionId, "D-DIP-2", "the latest market snapshot replaces the earlier pending intent, never adds a second one");
-});
-
-test("P5 route refresh cannot change a BUY route between availability and submission", async () => {
-  const now = clock(10); const market = setupMarket(now); const account = new AccountCapitalSnapshot({ clock: now }); account.update({ ts: 1, totalEq: "150", adjEq: "150" });
-  let route = "margin"; let quote = "USDT";
-  const coordinator = new OrderCoordinator({ transaction: async (fn) => fn({}), orders: {}, state: {}, ownerGuard: { isHeld: () => true }, readyGate: ready(), market, account, mode: () => "FULL", executionRoute: () => route, tradeQuoteCurrency: () => quote, clock: now, config,
-    transport: { ...clockReady, maxAvailSize: async () => { route = "spot"; quote = null; return [{ instId: "BTC-USDT", availBuy: "100" }]; } },
-  });
-  const prepared = await coordinator.prepareBuys([{ intent: "BUY", instId: "BTC-USDT", generation: 0, eligibleSince: 1, strategyDay: "2026-08-14", dailyLimitPrice: "100", holdHours: "24", configHash: "cfg", executionMode: "cash" }]);
-  assert.equal(prepared[0].executionMode, "cross"); assert.equal(prepared[0].executionRoute, "margin"); assert.equal(prepared[0].tradeQuoteCcy, "USDT"); assert.equal(route, "spot");
-});
-
-test("P5 zero margin-route availability never retries the same instrument as a spot route", async () => {
-  const now = clock(10); const market = setupMarket(now); const account = new AccountCapitalSnapshot({ clock: now }); account.update({ ts: 1, totalEq: "150", adjEq: "150" });
-  const modes = []; let submissions = 0;
-  const coordinator = new OrderCoordinator({ transaction: async (fn) => fn({}), orders: {}, state: {}, ownerGuard: { isHeld: () => true }, readyGate: ready(), market, account, mode: () => "FULL", executionRoute: () => "margin", clock: now, config,
-    transport: { ...clockReady, maxAvailSize: async (_ids, options) => { modes.push(options.tdMode); return [{ instId: "BTC-USDT", availBuy: "0" }]; }, submitBatchOrders: async () => { submissions += 1; return []; } },
-  });
-  coordinator.enqueue({ intent: "BUY", instId: "BTC-USDT", generation: 0, eligibleSince: 1, strategyDay: "2026-08-14", dailyLimitPrice: "100", holdHours: "24", configHash: "cfg" });
-  assert.equal((await coordinator.drainOnce()).reason, "NO_ELIGIBLE"); assert.deepEqual(modes, ["cross"]); assert.equal(submissions, 0);
-});
-
-test("P5 BUY sizing uses the full fresh OKX capacity without an equity cap", async () => {
-  const now = clock(10); const market = setupMarket(now); const account = new AccountCapitalSnapshot({ clock: now }); account.update({ ts: 1, totalEq: "100", adjEq: "100" });
-  let attempt;
-  const coordinator = new OrderCoordinator({ transaction: async (fn) => fn({}), state: {}, ownerGuard: { isHeld: () => true }, readyGate: ready(), market, account, mode: () => "FULL", executionRoute: () => "margin", tradeQuoteCurrency: () => "USDT", clock: now, config,
-    orders: { reserveBuy: async (_tx, row) => { attempt = row; return { authorized: true }; }, markSubmitted: async () => {} },
-    transport: { ...clockReady, maxAvailSize: async () => [{ instId: "BTC-USDT", availBuy: "1000" }], submitBatchOrders: async (rows) => rows.map((row) => ({ clOrdId: row.clOrdId, status: "SUBMITTED", ordId: "one" })) },
-  });
-  coordinator.enqueue({ intent: "BUY", instId: "BTC-USDT", generation: 0, eligibleSince: 1, strategyDay: "2026-08-14", dailyLimitPrice: "100", holdHours: "24", configHash: "cfg" });
-  assert.equal((await coordinator.drainOnce()).submitted, true);
-  assert.equal(attempt.plannedSize, "9.995");
-  assert.equal(attempt.reservedExposureUsd, "999.99975");
-});
-
 test("P2 recovery paginates fills/history, deduplicates tradeId, persists watermarks, and keeps a lone NOT_FOUND UNKNOWN", async () => {
   const stored = []; const watermarks = []; const calls = [];
   const page = (name) => async (instType, params = {}) => {
@@ -294,10 +96,10 @@ test("P2 recovery paginates fills/history, deduplicates tradeId, persists waterm
     if (params.after) return { data: [] };
     return { data: [{ instId: "BTC-USDT", instType, side: "buy", tradeId: `${instType}-2`, ordId: "o", fillTime: "20", billId: "2", fillSz: "1" }, { instId: "BTC-USDT", instType, side: "buy", tradeId: `${instType}-1`, ordId: "o", fillTime: "10", billId: "1", fillSz: "1" }], next: "next" };
   };
-  const service = new ReconciliationService({ ownerGuard: { isHeld: () => true }, readyGate: new ReadyGate(), safetyWaitMs: 0, ownership: { accountId: "a", managedAfter: 0, enabledInstIds: ["BTC-USDT"], holdHoursByInst: { "BTC-USDT": "24" }, configHash: "cfg" },
+  const service = new ReconciliationService({ ownerGuard: { isHeld: () => true }, readyGate: new ReadyGate(), safetyWaitMs: 0, ownership: { accountId: "a", managedAfter: 0, enabledInstIds: ["BTC-USDT"], systemClOrdIdPrefix: "P2", strategyTag: "STRAT" },
     clock: { nowMs: () => 300_020 },
     transaction: async (fn) => fn({}), state: { insertFill: async (_tx, row) => stored.push(row) }, orders: { upsertWatermark: async (_tx, row) => watermarks.push(row) },
-    transport: { fills: page("fills"), fillsHistory: page("history"), order: async () => ({ tdMode: "cross", clOrdId: "external", tag: "other" }), ordersPending: async () => [], ordersHistory: async () => [], ordersHistoryArchive: async () => [] },
+    transport: { fills: page("fills"), fillsHistory: page("history"), order: async () => ({ tdMode: "cross", clOrdId: "P2owned", tag: "STRAT" }), ordersPending: async () => [], ordersHistory: async () => [], ordersHistoryArchive: async () => [] },
   });
   const fills = await service.recoverFills({ accountId: "a", overlapBegin: 5 });
   assert.equal(fills.length, 4); assert.deepEqual(stored.map((row) => row.tradeId), ["MARGIN-1", "SPOT-1", "MARGIN-2", "SPOT-2"]); assert.equal(watermarks.length, 2); assert.ok(calls.some((value) => value.endsWith(":next")));
@@ -340,7 +142,7 @@ test("P3 fill recovery advances an empty instType only to a lagged successful-re
 test("P2 recovery links a matched SYSTEM fill and emits only post-commit aggregate evidence", async () => {
   const stored = []; const telemetry = []; let committed = false;
   const service = new ReconciliationService({ ownerGuard: { isHeld: () => true }, readyGate: new ReadyGate(), safetyWaitMs: 0,
-    ownership: { accountId: "a", managedAfter: 0, enabledInstIds: ["BTC-USDT"], holdHoursByInst: { "BTC-USDT": "24" }, configHash: "cfg" }, telemetry: (event) => { assert.equal(committed, true, "recovery evidence is emitted after commit"); telemetry.push(event); },
+    ownership: { accountId: "a", managedAfter: 0, enabledInstIds: ["BTC-USDT"] }, telemetry: (event) => { assert.equal(committed, true, "recovery evidence is emitted after commit"); telemetry.push(event); },
     transaction: async (fn) => { const result = await fn({}); committed = true; return result; },
     state: { insertFill: async (_tx, row) => { if (stored.some((existing) => existing.tradeId === row.tradeId)) return { rowCount: 0 }; stored.push(row); return { rowCount: 1 }; }, attachSystemFillAttempt: async () => ({ rowCount: 0 }) },
     orders: { findByClOrdId: async () => ({ cl_ord_id: "system-buy", execution_mode: "cross", execution_route: "margin" }), upsertWatermark: async () => {} },
@@ -350,28 +152,10 @@ test("P2 recovery links a matched SYSTEM fill and emits only post-commit aggrega
   assert.equal(stored[0].source, "SYSTEM"); assert.equal(stored[0].sourceAttemptClOrdId, "system-buy");
   assert.deepEqual(telemetry.filter((event) => event.type === "fill_reconciliation").map((event) => [event.inserted, event.linked, event.systemBuys]), [[1, 0, 1]]);
   assert.doesNotMatch(JSON.stringify(telemetry.find((event) => event.type === "fill_reconciliation")), /system-buy|recovered/);
-  assert.deepEqual(telemetry.filter((event) => event.reason === "BUY_LEDGER_CONFIRMED").map((event) => ({ source: event.source, instId: event.instId, clOrdId: event.clOrdId, fillCount: event.fillCount, filledSize: event.filledSize, fillNotional: event.fillNotional, weightedAvgPrice: event.weightedAvgPrice, firstFillTime: event.firstFillTime, lastFillTime: event.lastFillTime, sellTime: event.sellTime, sellState: event.sellState })), [{ source: "SYSTEM", instId: "BTC-USDT", clOrdId: "system-buy", fillCount: 1, filledSize: "1", fillNotional: "2", weightedAvgPrice: "2", firstFillTime: 10, lastFillTime: 10, sellTime: 86_400_010, sellState: "WAITING" }]);
+  assert.deepEqual(telemetry.filter((event) => event.reason === "BUY_LEDGER_CONFIRMED").map((event) => ({ source: event.source, instId: event.instId, clOrdId: event.clOrdId, fillCount: event.fillCount, filledSize: event.filledSize, fillNotional: event.fillNotional, weightedAvgPrice: event.weightedAvgPrice, firstFillTime: event.firstFillTime, lastFillTime: event.lastFillTime, sellTime: event.sellTime, sellState: event.sellState })), [{ source: "SYSTEM", instId: "BTC-USDT", clOrdId: "system-buy", fillCount: 1, filledSize: "1", fillNotional: "2", weightedAvgPrice: "2", firstFillTime: 10, lastFillTime: 10, sellTime: panicSellTime({ strategyDay: strategyDay(10), fillTime: 10 }), sellState: "WAITING" }]);
+  assert.equal(stored[0].sellTime, panicSellTime({ strategyDay: strategyDay(10), fillTime: 10 }), "an attempt-less SYSTEM fill uses its own fill day"); assert.equal(stored[0].holdHours, "3");
   await service.recoverFills({ accountId: "a" });
   assert.equal(telemetry.filter((event) => event.reason === "BUY_LEDGER_CONFIRMED").length, 1, "overlap replay does not announce an existing ledger fill again");
-});
-
-test("P2 ACCOUNT ledger preserves confirmed mode and derives spot/margin route before stopping later SYSTEM BUY", async () => {
-  const stored = []; const stopped = []; const service = new ReconciliationService({ ownerGuard: { isHeld: () => true }, readyGate: new ReadyGate(), safetyWaitMs: 0, ownership: { accountId: "a", managedAfter: 100, enabledInstIds: ["BTC-USDT"], holdHoursByInst: { "BTC-USDT": "24" }, configHash: "cfg" }, onAccountBuy: (instId) => stopped.push(instId), state: { insertFill: async (_tx, row) => stored.push(row) }, orders: {}, transport: {} });
-  const crossBuy = { instType: "SPOT", instId: "BTC-USDT", side: "buy", tradeId: "a", fillTime: "101", billId: "1", fillSz: "1" };
-  assert.equal(await service.ingestFill({}, crossBuy, { tdMode: "cross", clOrdId: "manual", tag: "other" }), true);
-  assert.equal(await service.ingestFill({}, { ...crossBuy, tradeId: "cash" }, { tdMode: "cash" }), true);
-  assert.equal(await service.ingestFill({}, { ...crossBuy, tradeId: "old", fillTime: "99" }, { tdMode: "cross" }), false);
-  assert.equal(await service.ingestFill({}, { ...crossBuy, tradeId: "swap", instType: "SWAP" }, { tdMode: "cross" }), false);
-  assert.equal(await service.ingestFill({}, { ...crossBuy, tradeId: "other", instId: "ETH-USDT" }, { tdMode: "cross" }), false);
-  assert.deepEqual(stopped, ["BTC-USDT", "BTC-USDT"]); assert.deepEqual(stored.map((row) => [row.source, row.side, row.tradeId, row.executionMode, row.executionRoute]), [["ACCOUNT", "BUY", "a", "cross", "spot"], ["ACCOUNT", "BUY", "cash", "cash", "spot"]]);
-});
-
-test("P2 boundaries retain fee reservation, daily-gain edge, and tick changes", () => {
-  const ma20Closes = Array(20).fill("100");
-  assert.deepEqual(dailyLimit({ todayOpen: "100", yesterdayOpen: "100", yesterdayClose: "110", bestLimit: "95", tickSz: "0.1", ma20Closes }), { skipped: false, price: "95", ma20: "100" });
-  assert.equal(dailyLimit({ todayOpen: "100", yesterdayOpen: "100", yesterdayClose: "110.0001", bestLimit: "95", tickSz: "0.1", ma20Closes }).reason, "SKIPPED_YESTERDAY_GAIN");
-  const market = setupMarket(clock(0)); market.updateInstrument({ instId: "BTC-USDT", ts: 3, state: "live", tickSz: "0.3", lotSz: "0.001", minSz: "0.001", base: "BTC", version: 2 });
-  assert.equal(market.instrument("BTC-USDT").tickSz, "0.3", "daily cache is not rewritten by the new rule");
 });
 
 test("P2 50-asset replay keeps only latest ticker per asset", () => {
@@ -385,7 +169,7 @@ test("P2 50-asset replay keeps only latest ticker per asset", () => {
 
 test("P2 BUY settlement records fills with reservation conversion atomically and gates next generation by a new key", async () => {
   const fills = []; const settled = []; const coordinator = new OrderCoordinator({ transaction: async (fn) => fn({}), state: { insertFill: async (_tx, fill) => fills.push(fill) }, orders: { markSettled: async (_tx, id, exchange, reservation) => settled.push({ id, exchange, reservation }) }, config, market: {}, account: {}, ownerGuard: {}, readyGate: {}, transport: {} });
-  const attempt = { account_id: "a", inst_id: "BTC-USDT", base_ccy: "BTC", cl_ord_id: "p", hold_hours: "24", strategy_config_hash: "cfg", state: "SUBMITTED", decision_market_key: "q1" };
+  const attempt = { account_id: "a", inst_id: "BTC-USDT", base_ccy: "BTC", cl_ord_id: "p", strategy_day: "2026-08-14", hold_hours: "3", strategy_config_hash: "cfg", state: "SUBMITTED", decision_market_key: "q1" };
   assert.deepEqual(await coordinator.settleBuy({ attempt, fills: [{ tradeId: "late", fillSz: "0.5", fillTime: "5" }], exchangeState: "canceled", accFillSz: "1" }), { settled: false, reason: "FILLS_INCOMPLETE" });
   assert.equal(fills.length, 0); assert.deepEqual(await coordinator.settleBuy({ attempt, fills: [], exchangeState: "canceled", accFillSz: "0" }), { settled: true });
   assert.equal(settled.at(-1).reservation, "RELEASED");
@@ -396,57 +180,143 @@ test("P2 BUY settlement records fills with reservation conversion atomically and
   assert.equal(coordinator.canCreateNextBuy({ previousAttempt: { state: "SETTLED", decision_market_key: "q1" }, nextMarketKey: "q2" }), true);
 });
 
-test("P2 commit-ack-loss reads the PREPARED business key and missing batch items become UNKNOWN", async () => {
-  const now = clock(10); const market = setupMarket(now); const account = new AccountCapitalSnapshot({ clock: now }); account.update({ ts: 1, totalEq: "150", adjEq: "150", mgnRatio: "2" });
-  const events = []; let sends = 0; let existing;
-  const coordinator = new OrderCoordinator({ transaction: async (fn) => fn({}), market, account, readyGate: ready(), ownerGuard: { isHeld: () => true }, mode: () => "FULL", clock: now, config, telemetry: (event) => events.push(event), state: {},
-    orders: {
-      reserveBuy: async (_tx, attempt) => { existing = { ...attempt, state: "PREPARED", payload_hash: attempt.payloadHash }; const error = new Error("connection reset after commit"); error.code = "23505"; throw error; },
-      findByClOrdId: async () => existing,
-      markUnknown: async () => {}, markNotCreated: async () => {}, markSubmitted: async () => {},
-    },
-    transport: { ...clockReady, maxAvailSize: async () => [{ instId: "BTC-USDT", availBuy: "100" }], submitBatchOrders: async () => { sends += 1; return []; } },
-  });
-  coordinator.enqueue({ intent: "BUY", instId: "BTC-USDT", generation: 0, eligibleSince: 1, strategyDay: "2026-08-14", dailyLimitPrice: "100", holdHours: "24", configHash: "cfg" });
-  assert.equal((await coordinator.drainOnce()).reason, "COMMIT_ACK_LOST");
-  assert.equal(sends, 0); assert.equal(events.at(-1).reason, "COMMIT_ACK_LOST");
-
-  const attempts = new Map();
-  const missing = new OrderCoordinator({ transaction: async (fn) => fn({}), market, account, readyGate: ready(), ownerGuard: { isHeld: () => true }, mode: () => "FULL", clock: now, config, state: {},
-    orders: { reserveBuy: async (_tx, attempt) => { attempts.set(attempt.clOrdId, { state: "PREPARED" }); return { authorized: true }; }, markUnknown: async (_tx, id, reason) => Object.assign(attempts.get(id), { state: "UNKNOWN", reason }), markNotCreated: async () => {}, markSubmitted: async () => {} },
-    transport: { ...clockReady, maxAvailSize: async () => [{ instId: "BTC-USDT", availBuy: "100" }], submitBatchOrders: async () => [] },
-  });
-  missing.enqueue({ intent: "BUY", instId: "BTC-USDT", generation: 0, eligibleSince: 1, strategyDay: "2026-08-14", dailyLimitPrice: "100", holdHours: "24", configHash: "cfg" });
-  await missing.drainOnce();
-  assert.equal([...attempts.values()][0].state, "UNKNOWN"); assert.equal([...attempts.values()][0].reason, "MISSING_BATCH_ITEM");
-});
-
-test("P2 insufficient funds waits for a newer safe risk version, while protection blocks before and after PREPARED", async () => {
-  const now = clock(10); const market = setupMarket(now); const account = new AccountCapitalSnapshot({ clock: now }); account.update({ ts: 1, totalEq: "150", adjEq: "150", mgnRatio: "2" });
-  let maxAvailReads = 0; let submits = 0; let protectedAtReserve = false; let removed = false; const events = [];
-  const attempts = new Map(); const intent = { intent: "BUY", instId: "BTC-USDT", generation: 0, eligibleSince: 1, strategyDay: "2026-08-14", dailyLimitPrice: "100", holdHours: "24", configHash: "cfg" };
-  const coordinator = new OrderCoordinator({ transaction: async (fn) => fn({}), market, account, readyGate: ready(), ownerGuard: { isHeld: () => true }, mode: () => "FULL", isBuyAllowed: () => !removed, clock: now, config, telemetry: (event) => events.push(event), state: {},
-    orders: { reserveBuy: async (_tx, attempt) => { attempts.set(attempt.clOrdId, { state: "PREPARED" }); protectedAtReserve = true; removed = true; return { authorized: true }; }, markNotCreated: async (_tx, id, reason) => Object.assign(attempts.get(id), { state: "NOT_CREATED", reservationState: "RELEASED", reason }), markUnknown: async () => {}, markSubmitted: async () => {} },
-    transport: { ...clockReady, maxAvailSize: async () => { maxAvailReads += 1; return maxAvailReads === 1 ? [{ instId: "BTC-USDT", availBuy: "0" }] : [{ instId: "BTC-USDT", availBuy: "10" }]; }, submitBatchOrders: async () => { submits += 1; return []; } },
-  });
-  coordinator.enqueue(intent);
-  assert.equal((await coordinator.drainOnce()).reason, "NO_ELIGIBLE");
-  assert.equal((await coordinator.drainOnce()).reason, "NO_ELIGIBLE");
-  assert.equal(maxAvailReads, 1, "new ticker/self-spin cannot retry an insufficient-funds candidate");
-  account.update({ ts: 2, totalEq: "150", adjEq: "150", mgnRatio: "2" });
-  assert.equal((await coordinator.drainOnce()).reason, "FINAL_GUARD");
-  assert.equal(maxAvailReads, 2); assert.equal(submits, 0); assert.equal(protectedAtReserve, true);
-  assert.equal([...attempts.values()][0].reservationState, "RELEASED");
-  assert.ok(events.some((event) => event.reason === "INSUFFICIENT_FUNDS_WAIT_RISK_VERSION"));
-});
-
 test("P2 frozen fields survive late fill across Singapore midnight and terminal regressions cannot revive a reservation", async () => {
   const fills = []; const transitions = [];
   const coordinator = new OrderCoordinator({ transaction: async (fn) => fn({}), state: { insertFill: async (_tx, fill) => fills.push(fill) }, orders: { markSettled: async (_tx, id, exchange, reservation) => transitions.push({ id, exchange, reservation }) }, config, market: {}, account: {}, ownerGuard: {}, readyGate: {}, transport: {} });
   const attempt = { account_id: "a", inst_id: "BTC-USDT", base_ccy: "BTC", cl_ord_id: "midnight", strategy_day: "2026-08-14", hold_hours: "36", strategy_config_hash: "frozen-cfg", state: "UNKNOWN", decision_market_key: "q1" };
   assert.equal((await coordinator.settleBuy({ attempt, fills: [{ tradeId: "late-midnight", fillSz: "0.5", fillTime: "1723651200000" }], exchangeState: "filled", accFillSz: "0.5" })).settled, true);
-  assert.deepEqual(fills.map((fill) => [fill.tradeId, fill.holdHours, fill.strategyConfigHash]), [["late-midnight", "36", "frozen-cfg"]]);
+  assert.deepEqual(fills.map((fill) => [fill.tradeId, fill.holdHours, fill.strategyConfigHash, fill.sellTime, fill.forceSellTime]), [["late-midnight", "36", "frozen-cfg", panicSellTime({ strategyDay: "2026-08-14", fillTime: 1723651200000 }), null]], "the sell schedule uses the attempt's frozen strategy day");
+  assert.equal((await coordinator.settleBuy({ attempt: { ...attempt, cl_ord_id: "pg-date", strategy_day: new Date(2026, 7, 14) }, fills: [{ tradeId: "pg", fillSz: "1", fillTime: String(strategyDayStartMs("2026-08-14") + 22 * 3_600_000) }], exchangeState: "filled", accFillSz: "1" })).settled, true);
+  assert.equal(fills.at(-1).sellTime, strategyDayStartMs("2026-08-14") + 25 * 3_600_000, "a pg DATE strategy day and a 22:00 fill sell at 01:00");
   assert.equal(transitions[0].reservation, "CONVERTED");
   assert.equal(coordinator.canCreateNextBuy({ previousAttempt: { state: "SETTLED", decision_market_key: "q1" }, nextMarketKey: "q2" }), true);
   assert.equal(coordinator.canCreateNextBuy({ previousAttempt: { state: "UNKNOWN", decision_market_key: "q1" }, nextMarketKey: "q2" }), false, "late live observation must not revive terminal attempt state");
+});
+test("P5 BUY queue submits one IOC at a time in 72% trigger order, sized from fresh owned USDT", async () => {
+  const now = clock(NOON); const market = setupMarket(now, { "BTC-USDT": "95", "ETH-USDT": "95" });
+  const orders = memoryOrders(); const payloads = []; const reads = []; const slo = new VirtualSloMetrics(now); let owned = "500";
+  const coordinator = panicCoordinator({ now, market, orders, slo, transport: {
+    maxAvailSize: async (instId, options) => { reads.push(["max", instId, options.tdMode, options.ccy]); return [{ instId, availBuy: "5000" }]; },
+    balance: async (ccy) => { reads.push(["balance", ccy]); return usdt(owned); },
+    submitBatchOrders: async (payload) => { payloads.push(payload); owned = "100"; return payload.map((item) => ({ clOrdId: item.clOrdId, status: "SUBMITTED", ordId: "1" })); },
+  } });
+  coordinator.enqueue(buyIntent("ETH-USDT", { triggerAt: 20 }));
+  coordinator.enqueue(buyIntent("BTC-USDT", { triggerAt: 10 }));
+  const first = await coordinator.drainOnce();
+  assert.equal(first.count, 1); assert.equal(payloads.length, 1); assert.equal(payloads[0].length, 1, "exactly one order per submission");
+  assert.deepEqual({ ...payloads[0][0], clOrdId: undefined }, { instId: "BTC-USDT", tdMode: "cross", side: "buy", ordType: "ioc", px: "100", sz: "4.997", tag: "STRAT", tradeQuoteCcy: "USDT", clOrdId: undefined }, "the earliest 72% trigger buys first, at the frozen limit, with owned USDT (500) not borrowable capacity (5000)");
+  assert.deepEqual(reads, [["max", "BTC-USDT", "cross", "USDT"], ["balance", "USDT"]]);
+  assert.equal(coordinator.pending.BUY.has("BTC-USDT"), false); assert.equal(coordinator.pending.BUY.has("ETH-USDT"), true);
+  const second = await coordinator.drainOnce();
+  assert.equal(second.count, 1); assert.equal(payloads[1][0].instId, "ETH-USDT"); assert.equal(payloads[1][0].sz, "0.999", "the next symbol re-reads the remaining owned USDT");
+  const attempt = [...orders.attempts.values()][0];
+  assert.deepEqual([attempt.decisionReason, attempt.decisionReferencePrice, attempt.executionLimitPrice, attempt.holdHours, attempt.maxHoldHours, attempt.decisionCandleTs, attempt.decisionCandleHash], ["PANIC_BUY_72", "100", "100", "3", null, anchor.ts, "anchor-hash"]);
+  assert.deepEqual(slo.assertInvariants(), { maxBatchSize: 1, maxMutationConcurrency: 1, unknownCount: 0 });
+  assert.equal((await coordinator.drainOnce()).reason, "EMPTY");
+});
+
+test("P5 BUY queue never borrows: owned USDT caps the order and an exhausted balance pauses capacity reads", async () => {
+  assert.equal(ownedQuoteBalance(usdt("12.5")), "12.5"); assert.equal(ownedQuoteBalance(usdt("-3")), "0"); assert.equal(ownedQuoteBalance([{ details: [{ ccy: "BTC", availBal: "1" }] }]), "0");
+  const now = clock(NOON); const market = setupMarket(now); const events = []; let reads = 0; let submits = 0; const account = freshAccount(now);
+  const coordinator = panicCoordinator({ now, market, account, telemetry: (event) => events.push(event), transport: {
+    maxAvailSize: async (instId) => { reads += 1; return [{ instId, availBuy: "5000" }]; }, balance: async () => usdt("9.99"), submitBatchOrders: async () => { submits += 1; return []; },
+  } });
+  coordinator.enqueue(buyIntent("BTC-USDT"));
+  assert.equal((await coordinator.drainOnce()).reason, "CAPITAL_EXHAUSTED");
+  assert.equal(coordinator.buyCapitalBlocked(), true); assert.equal(submits, 0);
+  assert.deepEqual(events.filter((event) => event.type === "block_evidence").map((event) => [event.stage, event.reason, event.ownedQuote, event.notional]), [["SIZING", "CAPITAL_EXHAUSTED", "9.99", "9.99"]]);
+  coordinator.enqueue(buyIntent("BTC-USDT", { decisionId: "again" }));
+  assert.equal((await coordinator.drainOnce()).reason, "CAPITAL_EXHAUSTED"); assert.equal(reads, 1, "no REST storm while capital is spent");
+  account.update({ ts: 99, totalEq: "1000", adjEq: "1000" });
+  assert.equal(coordinator.buyCapitalBlocked(), false, "a newer account snapshot re-opens capacity reads");
+  now.value += 30_000; coordinator.capitalBlock = { version: account.value.version, at: NOON };
+  assert.equal(coordinator.buyCapitalBlocked(), false, "and so does the recheck interval");
+});
+
+test("P5 BUY queue drops symbols that bounced above the limit and continues with the next trigger", async () => {
+  const now = clock(NOON); const market = setupMarket(now, { "BTC-USDT": "101", "ETH-USDT": "95", "SOL-USDT": "95" }); const events = []; const payloads = [];
+  market.updateTicker({ instId: "ETH-USDT", ts: NOON, last: "99", askPx: "100.1", bidPx: "99" });
+  const coordinator = panicCoordinator({ now, market, telemetry: (event) => events.push(event), transport: {
+    maxAvailSize: async (instId) => [{ instId, availBuy: "500" }], balance: async () => usdt("500"),
+    submitBatchOrders: async (payload) => { payloads.push(...payload); return payload.map((item) => ({ clOrdId: item.clOrdId, status: "SUBMITTED" })); },
+  } });
+  coordinator.enqueue(buyIntent("BTC-USDT", { triggerAt: 1 })); coordinator.enqueue(buyIntent("ETH-USDT", { triggerAt: 2 })); coordinator.enqueue(buyIntent("SOL-USDT", { triggerAt: 3 }));
+  assert.equal((await coordinator.drainOnce()).count, 1);
+  assert.deepEqual(payloads.map((item) => item.instId), ["SOL-USDT"], "no chase above the 72% limit");
+  assert.deepEqual(events.filter((event) => event.type === "block_evidence").map((event) => [event.instId, event.reason]), [["BTC-USDT", "ABOVE_BUY_PRICE"], ["ETH-USDT", "ASK_ABOVE_LIMIT"]]);
+  assert.equal(coordinator.pending.BUY.size, 0, "dropped symbols wait for their next qualifying tick");
+});
+
+test("P5 BUY UNKNOWN blocks only its own symbol and is chased immediately while the queue moves on", async () => {
+  const now = clock(NOON); const market = setupMarket(now, { "BTC-USDT": "95", "ETH-USDT": "95" }); const orders = memoryOrders(); const chased = [];
+  const results = ["UNKNOWN", "SUBMITTED"];
+  const coordinator = panicCoordinator({ now, market, orders, onBuySubmitted: (attempt) => chased.push([attempt.instId, attempt.state]), transport: {
+    maxAvailSize: async (instId) => [{ instId, availBuy: "500" }], balance: async () => usdt("500"),
+    submitBatchOrders: async (payload) => payload.map((item) => ({ clOrdId: item.clOrdId, status: results.shift(), reason: "timeout" })),
+  } });
+  coordinator.enqueue(buyIntent("BTC-USDT", { triggerAt: 1 })); coordinator.enqueue(buyIntent("ETH-USDT", { triggerAt: 2 }));
+  await coordinator.drainOnce(); await coordinator.drainOnce();
+  assert.deepEqual([...orders.attempts.values()].map((row) => [row.instId, row.state]), [["BTC-USDT", "UNKNOWN"], ["ETH-USDT", "SUBMITTED"]]);
+  assert.deepEqual(chased, [["BTC-USDT", "UNKNOWN"], ["ETH-USDT", "SUBMITTED"]]);
+});
+
+test("P5 BUY guard fails closed on mode, day change and availability errors without touching capital", async () => {
+  const now = clock(NOON); const events = []; let reads = 0;
+  const off = panicCoordinator({ now, market: setupMarket(now), mode: "OFF", telemetry: (event) => events.push(event), transport: { maxAvailSize: async () => { reads += 1; return []; }, balance: async () => usdt("500") } });
+  off.enqueue(buyIntent("BTC-USDT")); off.enqueue(buyIntent("BTC-USDT"));
+  assert.equal((await off.drainOnce()).reason, "NO_ELIGIBLE"); assert.equal(reads, 0); assert.equal(off.pending.BUY.size, 0);
+  assert.deepEqual(events.map((event) => [event.stage, event.reason, event.currentMode]), [["COORDINATOR_GUARD", "MODE", "OFF"]]);
+  const stale = panicCoordinator({ now, market: setupMarket(now), telemetry: (event) => events.push(event), transport: { maxAvailSize: async () => { reads += 1; return []; } } });
+  stale.enqueue(buyIntent("BTC-USDT", { strategyDay: "2026-09-23", decisionId: "yesterday" }));
+  assert.equal((await stale.drainOnce()).reason, "NO_ELIGIBLE"); assert.equal(events.at(-1).reason, "STRATEGY_DAY_CHANGED"); assert.equal(reads, 0);
+  const failing = panicCoordinator({ now, market: setupMarket(now), telemetry: (event) => events.push(event), transport: { maxAvailSize: async () => { throw new Error("temporary unavailable"); }, balance: async () => usdt("500") } });
+  failing.enqueue(buyIntent("BTC-USDT", { decisionId: "avail" }));
+  assert.equal((await failing.drainOnce()).reason, "MAX_AVAIL_FAILED");
+  assert.equal((await failing.drainOnce()).reason, "CAPACITY_RETRY_WAIT", "a transient read failure backs off instead of spinning");
+  assert.equal(failing.pending.BUY.size, 1, "and keeps the intent for the retry");
+  assert.equal(events.at(-1).reason, "MAX_AVAIL_FAILED"); assert.equal(events.at(-1).executionRoute, "margin");
+});
+
+test("P5 BUY final guard releases the PREPARED reservation when protection or ownership changes before HTTP", async () => {
+  const now = clock(NOON); const market = setupMarket(now); let protectedNow = false; let sends = 0;
+  const orders = memoryOrders(); const reserve = orders.reserveBuy; orders.reserveBuy = async (tx, attempt) => { protectedNow = true; return reserve(tx, attempt); };
+  const coordinator = panicCoordinator({ now, market, orders, isBuyAllowed: () => !protectedNow, transport: { maxAvailSize: async (instId) => [{ instId, availBuy: "500" }], balance: async () => usdt("500"), submitBatchOrders: async () => { sends += 1; return []; } } });
+  coordinator.enqueue(buyIntent("BTC-USDT"));
+  assert.equal((await coordinator.drainOnce()).reason, "FINAL_GUARD");
+  assert.equal(sends, 0); assert.deepEqual([...orders.attempts.values()].map((row) => [row.state, row.reservationState]), [["NOT_CREATED", "RELEASED"]]);
+});
+
+test("P2 commit-ack-loss reads the PREPARED business key and a missing batch item becomes UNKNOWN", async () => {
+  const now = clock(NOON); const market = setupMarket(now); const events = []; let sends = 0; let existing;
+  const transport = { maxAvailSize: async (instId) => [{ instId, availBuy: "100" }], balance: async () => usdt("100") };
+  const coordinator = panicCoordinator({ now, market, telemetry: (event) => events.push(event),
+    orders: {
+      reserveBuy: async (_tx, attempt) => { existing = { ...attempt, state: "PREPARED", payload_hash: attempt.payloadHash }; const error = new Error("connection reset after commit"); error.code = "23505"; throw error; },
+      findByClOrdId: async () => existing, markUnknown: async () => {}, markNotCreated: async () => {}, markSubmitted: async () => {},
+    },
+    transport: { ...transport, submitBatchOrders: async () => { sends += 1; return []; } },
+  });
+  coordinator.enqueue(buyIntent("BTC-USDT"));
+  assert.equal((await coordinator.drainOnce()).reason, "COMMIT_ACK_LOST");
+  assert.equal(sends, 0); assert.equal(events.at(-1).reason, "COMMIT_ACK_LOST");
+  const orders = memoryOrders();
+  const missing = panicCoordinator({ now, market, orders, transport: { ...transport, submitBatchOrders: async () => [] } });
+  missing.enqueue(buyIntent("BTC-USDT"));
+  await missing.drainOnce();
+  assert.equal([...orders.attempts.values()][0].state, "UNKNOWN"); assert.equal([...orders.attempts.values()][0].reason, "MISSING_BATCH_ITEM");
+});
+
+test("P5 reconciliation never adopts a manual BUY and applies a manual SELL only while the strategy holds that base", async () => {
+  const stored = []; let heldBases = new Set(["BTC"]); const refreshed = [];
+  const service = new ReconciliationService({ ownerGuard: { isHeld: () => true }, readyGate: new ReadyGate(), safetyWaitMs: 0, ownership: { accountId: "a", managedAfter: 100, enabledInstIds: ["BTC-USDT", "ETH-USDT"], systemClOrdIdPrefix: "P2", strategyTag: "STRAT" },
+    onAccountBuy: (instId) => refreshed.push(instId), state: { insertFill: async (_tx, row) => { stored.push(row); return { rowCount: 1 }; }, hasOpenManagedBase: async (_tx, { baseCcy }) => heldBases.has(baseCcy) },
+    orders: { findByClOrdId: async (_tx, id) => id === "P2system" ? { cl_ord_id: id, intent: "BUY", strategy_day: DAY, hold_hours: "3", strategy_config_hash: "panic", execution_mode: "cross", execution_route: "margin" } : null, lockExitBase: async () => {}, releasePreparedExitsForBase: async () => ({ rowCount: 0 }) }, transport: {} });
+  const fill = { instType: "SPOT", instId: "BTC-USDT", side: "buy", tradeId: "a", fillTime: String(NOON), billId: "1", fillSz: "1" };
+  assert.equal(await service.ingestFill({}, fill, { tdMode: "cross", clOrdId: "manual", tag: "other" }), false, "manual BUY is not adopted");
+  assert.equal(await service.ingestFill({}, { ...fill, tradeId: "sys" }, { tdMode: "cross", clOrdId: "P2system", tag: "STRAT" }), true);
+  assert.equal(await service.ingestFill({}, { ...fill, tradeId: "sell-held", side: "sell" }, { tdMode: "cross", clOrdId: "manual" }), true);
+  assert.equal(await service.ingestFill({}, { ...fill, instId: "ETH-USDT", tradeId: "sell-unheld", side: "sell" }, { tdMode: "cross", clOrdId: "manual" }), false, "a manual SELL of a base the strategy never held cannot quarantine future exits");
+  assert.equal(await service.ingestFill({}, { ...fill, tradeId: "old", fillTime: "99" }, { tdMode: "cross", clOrdId: "P2system", tag: "STRAT" }), false);
+  assert.deepEqual(stored.map((row) => [row.source, row.side, row.tradeId, row.sellTime ?? row.allocationState]), [["SYSTEM", "BUY", "sys", panicSellTime({ strategyDay: DAY, fillTime: NOON })], ["ACCOUNT", "SELL", "sell-held", "PENDING"]]);
+  assert.deepEqual(refreshed, []);
 });

@@ -19,7 +19,7 @@ import { P3_DELETE_TERMINAL_ATTEMPTS_SQL, P3_RETENTION_VERSION, retainTerminalAt
 import { importOfflineProtection } from "../src/infrastructure/postgres/offline-import.js";
 import { convertD1Export } from "../tools/convert-d1-export.mjs";
 import { postgresMigrations } from "../scripts/postgres-migration-manifest.mjs";
-import { expectedClosedCandleTs } from "../src/domain/rules.js";
+import { PANIC_STRATEGY_HASH, panicPrices, panicSellTime, strategyDayStartMs } from "../src/domain/rules.js";
 
 const run = promisify(execFile);
 
@@ -132,15 +132,12 @@ test("temporary PostgreSQL enforces P1-B invariants", { timeout: 60_000 }, async
       const tables = await db.admin.query("SELECT table_name FROM information_schema.tables WHERE table_schema='public'");
       assert.equal(tables.rows.some((row) => row.table_name === "deployment_config"), false);
       const names = new Set(tables.rows.map((row) => row.table_name));
-      for (const required of ["daily_limit_cache", "filled_orders", "instrument_protection", "order_attempts", "sync_watermarks"]) assert.equal(names.has(required), true);
+      for (const required of ["daily_limit_cache", "panic_daily_instruments", "filled_orders", "instrument_protection", "order_attempts", "sync_watermarks"]) assert.equal(names.has(required), true);
       for (const forbidden of ["system_control", "crypto_limits", "buy_cycles", "managed_positions", "sell_groups", "sell_items"]) assert.equal(names.has(forbidden), false);
       const columns = await db.admin.query("SELECT column_name FROM information_schema.columns WHERE table_name IN ('filled_orders','order_attempts')");
       const columnNames = new Set(columns.rows.map((row) => row.column_name));
       for (const forbidden of ["active_attempt_id", "remaining_size", "sell_generation", "breach_latched", "exit_mode", "confirmed_sold_size", "external_disposed_size", "interest", "debt"]) assert.equal(columnNames.has(forbidden), false);
       for (const required of ["reservation_state", "decision_market_key", "decision_id", "failure_fingerprint", "account_snapshot_version", "execution_mode", "execution_route", "fill_price", "fee", "fee_ccy", "max_adverse_pct", "decision_trigger_price", "decision_reference_price", "max_hold_hours", "force_sell_time", "sell_trigger_reason"]) assert.equal(columnNames.has(required), true);
-      const daily = { instId: "MA-USDT", strategyDay: "2026-08-14", status: "SKIPPED_ABOVE_MA20", inputHash: "h", todayCandleTs: 1, todayOpen: "100", yesterdayCandleTs: 0, yesterdayOpen: "100", yesterdayClose: "100", bestLimit: "90", tickSz: "0.1", strategyConfigHash: "cfg", ma20: "29.5" };
-      assert.equal(Number((await tx(db.admin, (client) => state.claimDaily(client, daily))).ma20), 29.5);
-      assert.equal(Number((await tx(db.admin, (client) => state.claimDaily(client, { ...daily, ma20: "1", status: "READY", dailyLimitPrice: "90" }))).ma20), 29.5, "first daily claim wins");
       await tx(db.admin, (client) => orders.reserveBuy(client, buy("cash-mode", { accountId: "mode", executionMode: "cash", executionRoute: "spot", decisionId: "decision-cash" })));
       await tx(db.admin, (client) => state.insertFill(client, { accountId: "mode", instId: "BTC-USDT", baseCcy: "BTC", tradeId: "cash-fill", source: "SYSTEM", side: "BUY", fillSize: "1", fillTime: 1, holdHours: "24", strategyConfigHash: "cfg", sellTime: 2, sellState: "WAITING", executionMode: "cash", executionRoute: "spot" }));
       assert.equal((await db.admin.query("SELECT execution_mode FROM order_attempts WHERE cl_ord_id='cash-mode'")).rows[0].execution_mode, "cash");
@@ -211,31 +208,28 @@ test("temporary PostgreSQL enforces P1-B invariants", { timeout: 60_000 }, async
       assert.equal((await tx(db.admin, (client) => orders.listBuyCycle(client, "recovery", "BTC-USDT", "2026-08-14"))).consumedUsd, "10.0050");
     });
 
-    await t.test("latest confirmed 3m SELL threshold only ratchets upward and keeps CAS versions current", async () => {
-      await tx(db.admin, (client) => state.insertFill(client, { accountId: "threshold", instId: "BTC-USDT", baseCcy: "BTC", tradeId: "threshold-buy", source: "SYSTEM", side: "BUY", fillSize: "1", fillTime: 1, holdHours: "24", strategyConfigHash: "cfg", sellTime: 2, sellState: "WAITING", protectionPrice: "90" }));
-      const first = await tx(db.admin, (client) => state.raiseProtection(client, { accountId: "threshold", instId: "BTC-USDT", tradeId: "threshold-buy", version: 1, protectionPrice: "94.715" }));
-      assert.equal(first.rowCount, 1); assert.equal(first.rows[0].protection_price, "94.715");
-      const second = await tx(db.admin, (client) => state.raiseProtection(client, { accountId: "threshold", instId: "BTC-USDT", tradeId: "threshold-buy", version: first.rows[0].version, protectionPrice: "79.76" }));
-      assert.equal(second.rowCount, 1); assert.equal(second.rows[0].protection_price, "94.715"); assert.equal(BigInt(second.rows[0].version), 3n);
+    await t.test("panic day state keeps the first open, write-once touches, and pg DATE text", async () => {
+      const day = "2026-09-24"; const open = (instId, openPrice) => ({ strategyDay: day, instId, openPrice, openTs: strategyDayStartMs(day), openSource: "TICKER_SOD_UTC8", tickSz: "0.01", ...panicPrices({ open: openPrice, tickSz: "0.01" }) });
+      await tx(db.admin, (client) => state.claimDailyOpens(client, [open("A-USDT", "100"), open("B-USDT", "2.5")]));
+      await tx(db.admin, (client) => state.claimDailyOpens(client, [open("A-USDT", "999"), open("C-USDT", "10")]));
+      const rows = await tx(db.admin, (client) => state.listPanicDay(client, day));
+      assert.deepEqual(rows.map((row) => [row.strategy_day, row.inst_id, row.open_price, row.count_price, row.buy_price]), [[day, "A-USDT", "100", "82", "72"], [day, "B-USDT", "2.5", "2.05", "1.8"], [day, "C-USDT", "10", "8.2", "7.2"]], "a later snapshot never re-seeds an open");
+      assert.equal((await tx(db.admin, (client) => state.recordBuyHit(client, { strategyDay: day, instId: "A-USDT", hitAt: 5, price: "71" }))).rowCount, 0, "a buy touch needs a ranked count touch");
+      const hit = await tx(db.admin, (client) => state.recordCountHit(client, { strategyDay: day, instId: "A-USDT", hitAt: 7, price: "81", source: "LIVE" }));
+      assert.deepEqual([hit.rowCount, hit.rows[0].strategy_day, hit.rows[0].count_hit_at], [1, day, "7"]);
+      assert.equal((await tx(db.admin, (client) => state.recordCountHit(client, { strategyDay: day, instId: "A-USDT", hitAt: 3, price: "80", source: "BACKFILL" }))).rowCount, 0, "first touch is write-once");
+      assert.equal((await tx(db.admin, (client) => state.recordBuyHit(client, { strategyDay: day, instId: "A-USDT", hitAt: 9, price: "71" }))).rowCount, 1);
+      assert.deepEqual((await tx(db.admin, (client) => state.findPanicDayRow(client, day, "A-USDT"))).count_hit_source, "LIVE");
+      await assert.rejects(tx(db.admin, (client) => client.query("INSERT INTO panic_daily_instruments(strategy_day,inst_id,open_price,open_ts,open_source,tick_sz,count_price,buy_price) VALUES($1,'BAD-USDT',100,0,'TICKER_SOD_UTC8',0.01,70,72)", [day])), (error) => error.code === "23514");
+      await assert.rejects(tx(db.admin, (client) => client.query("UPDATE panic_daily_instruments SET count_hit_at=1 WHERE inst_id='B-USDT'")), (error) => error.code === "23514", "touch evidence is all-or-nothing");
     });
 
-    await t.test("loss-making sell window can be deferred only once", async () => {
-      const originalSellTime = 3_601_000;
-      await tx(db.admin, (client) => state.insertFill(client, { accountId: "defer-once", instId: "BTC-USDT", baseCcy: "BTC", tradeId: "defer-once-buy", source: "SYSTEM", side: "BUY", fillSize: "1", fillTime: 1_000, fillPrice: "100", holdHours: "1", strategyConfigHash: "cfg", sellTime: originalSellTime, sellState: "WAITING", protectionPrice: "90" }));
-      const first = await tx(db.admin, (client) => state.deferSellWindow(client, { accountId: "defer-once", instId: "BTC-USDT", tradeId: "defer-once-buy", version: 1, sellTime: originalSellTime + 86_400_000, bidPx: "89" }));
-      assert.equal(first.rowCount, 1);
-      const second = await tx(db.admin, (client) => state.deferSellWindow(client, { accountId: "defer-once", instId: "BTC-USDT", tradeId: "defer-once-buy", version: first.rows[0].version, sellTime: originalSellTime + 2 * 86_400_000, bidPx: "89" }));
-      assert.equal(second.rowCount, 0);
-      assert.equal((await db.admin.query("SELECT sell_time FROM filled_orders WHERE account_id='defer-once'")).rows[0].sell_time, String(originalSellTime + 86_400_000));
-    });
-
-    await t.test("take-profit trigger atomically preserves a protection ratchet that advanced after observation", async () => {
-      await tx(db.admin, (client) => state.insertFill(client, { accountId: "take-profit", instId: "BTC-USDT", baseCcy: "BTC", tradeId: "take-profit-buy", source: "SYSTEM", side: "BUY", fillSize: "1", fillTime: 1, fillPrice: "100", holdHours: "24", strategyConfigHash: "cfg", sellTime: 2, sellState: "WAITING", protectionPrice: "90" }));
-      const ratcheted = await tx(db.admin, (client) => state.raiseProtection(client, { accountId: "take-profit", instId: "BTC-USDT", tradeId: "take-profit-buy", version: 1, protectionPrice: "95" }));
-      const triggered = await tx(db.admin, (client) => state.markSellTriggered(client, { accountId: "take-profit", instId: "BTC-USDT", tradeId: "take-profit-buy", version: ratcheted.rows[0].version, protectionPrice: "90", sellTriggerReason: "TAKE_PROFIT" }));
-      assert.equal(triggered.rowCount, 1);
-      assert.equal(triggered.rows[0].protection_price, "95", "a stale take-profit event must not overwrite the newer durable downside floor");
-      assert.equal(triggered.rows[0].sell_trigger_reason, "TAKE_PROFIT");
+    await t.test("scheduled close trigger persists its reason and open managed bases are visible to manual-sell reconciliation", async () => {
+      await tx(db.admin, (client) => state.insertFill(client, { accountId: "close", instId: "BTC-USDT", baseCcy: "BTC", tradeId: "close-buy", source: "SYSTEM", side: "BUY", fillSize: "1", fillTime: 1, fillPrice: "100", holdHours: "3", strategyConfigHash: PANIC_STRATEGY_HASH, sellTime: 2, sellState: "WAITING" }));
+      assert.equal(await tx(db.admin, (client) => state.hasOpenManagedBase(client, { accountId: "close", baseCcy: "BTC" })), true);
+      assert.equal(await tx(db.admin, (client) => state.hasOpenManagedBase(client, { accountId: "close", baseCcy: "ETH" })), false);
+      const triggered = await tx(db.admin, (client) => state.markSellTriggered(client, { accountId: "close", instId: "BTC-USDT", tradeId: "close-buy", version: 1, protectionPrice: null, sellTriggerReason: "SCHEDULED_CLOSE" }));
+      assert.deepEqual([triggered.rowCount, triggered.rows[0].sell_state, triggered.rows[0].sell_trigger_reason, triggered.rows[0].protection_price], [1, "SELL_TRIGGERED", "SCHEDULED_CLOSE", null]);
     });
 
     await t.test("attempt and reservation roll back together", async () => {
@@ -385,9 +379,9 @@ test("temporary PostgreSQL enforces P1-B invariants", { timeout: 60_000 }, async
       };
       const service = new ReconciliationService({ ownerGuard: { isHeld: () => true }, readyGate: new ReadyGate(), safetyWaitMs: 0,
         clock: { nowMs: () => 300_020 },
-        ownership: { accountId: "pages", managedAfter: 0, enabledInstIds: ["BTC-USDT"], holdHoursByInst: { "BTC-USDT": "24" }, configHash: "page-cfg" },
+        ownership: { accountId: "pages", managedAfter: 0, enabledInstIds: ["BTC-USDT"], systemClOrdIdPrefix: "P2", strategyTag: "STRAT" },
         transaction: (fn) => tx(db.admin, fn), state, orders,
-        transport: { fills: pages("fills"), fillsHistory: pages("history"), order: async () => ({ tdMode: "cross", clOrdId: "manual", tag: "external" }), ordersPending: async () => [], ordersHistory: async () => [], ordersHistoryArchive: async () => [] },
+        transport: { fills: pages("fills"), fillsHistory: pages("history"), order: async () => ({ tdMode: "cross", clOrdId: "P2page", tag: "STRAT" }), ordersPending: async () => [], ordersHistory: async () => [], ordersHistoryArchive: async () => [] },
       });
       await assert.rejects(service.recoverFills({ accountId: "pages", overlapBegin: 5 }), /injected page failure/);
       assert.equal((await db.admin.query("SELECT count(*)::int AS count FROM sync_watermarks WHERE account_id='pages'")).rows[0].count, 0);
@@ -407,35 +401,38 @@ test("temporary PostgreSQL enforces P1-B invariants", { timeout: 60_000 }, async
       assert.equal((await db.admin.query("SELECT watermark FROM sync_watermarks WHERE account_id='pages' AND inst_type='SPOT'")).rows[0].watermark, "20", "a replayed older read cannot regress a continuous watermark");
     });
 
-    await t.test("P2 real coordinator drains fifty candidates in immediate five-order batches with fee-inclusive aggregate reservations", async () => {
-      const now = { nowMs: () => 10 }; const market = new MarketProjection({ clock: now }); const account = new AccountCapitalSnapshot({ clock: now });
-      account.update({ ts: 1, totalEq: "150", adjEq: "150", mgnRatio: "2" });
+    await t.test("P5 real coordinator buys one IOC per drain from fresh owned USDT and an UNKNOWN never blocks the queue", async () => {
+      const day = "2026-09-24"; const noon = strategyDayStartMs(day) + 12 * 3_600_000;
+      const now = { nowMs: () => noon }; const market = new MarketProjection({ clock: now }); const account = new AccountCapitalSnapshot({ clock: now });
+      account.update({ ts: 1, totalEq: "150", adjEq: "150" });
       const gate = new ReadyGate(); for (const key of gate.required) gate.set(key, true);
-      for (let index = 1; index <= 50; index += 1) {
-        const instId = `C${String(index).padStart(2, "0")}-USDT`; const base = `C${String(index).padStart(2, "0")}`;
-        market.updateInstrument({ instId, ts: 1, state: "live", tickSz: "0.1", lotSz: "0.001", minSz: "0.001", base, version: 1 });
-        market.updateTicker({ instId, ts: 2, last: "95", askPx: "95", bidPx: "94" }); market.updateCandle({ instId, ts: expectedClosedCandleTs(now.nowMs()), open: "90", high: "90", low: "89", confirm: true });
+      const ids = Array.from({ length: 10 }, (_, index) => `C${String(index + 1).padStart(2, "0")}-USDT`);
+      for (const instId of ids) {
+        market.updateInstrument({ instId, ts: 1, state: "live", tickSz: "0.1", lotSz: "0.001", minSz: "0.001", base: instId.split("-")[0], version: 1 });
+        market.updateTicker({ instId, ts: noon, last: "71", askPx: "71.9", bidPx: "70" });
       }
-      const batches = []; let batchNo = 0;
-      const coordinator = new OrderCoordinator({ transaction: (fn) => tx(db.admin, fn), orders, state, market, account, readyGate: gate, ownerGuard: { isHeld: () => true }, mode: () => "FULL", clock: now,
-        config: { accountId: "coord50", orderVersion: "P2", strategyTag: "STRAT", orderExpiryMs: 1_000, quoteFreshMs: 100, accountFreshMs: 100 },
+      const payloads = []; let owned = "40"; let submission = 0;
+      const coordinator = new OrderCoordinator({ transaction: (fn) => tx(db.admin, fn), orders, state, market, account, readyGate: gate, ownerGuard: { isHeld: () => true }, mode: () => "FULL", clock: now, executionRoute: () => "margin", tradeQuoteCurrency: () => "USDT",
+        config: { accountId: "coord-serial", orderVersion: "P2", strategyTag: "STRAT", orderExpiryMs: 1_000, quoteFreshMs: 100, accountFreshMs: 100 },
         transport: {
           clockFresh: () => true, clockSkewMs: 0,
-          maxAvailSize: async (ids) => ids.split(",").map((instId) => ({ instId, availBuy: "5" })),
-          submitBatchOrders: async (payload) => { batches.push(payload); batchNo += 1; return payload.map((item, index) => batchNo === 1 && index === 0 ? { clOrdId: item.clOrdId, status: "UNKNOWN", reason: "timeout" } : batchNo === 2 && index === 0 ? { clOrdId: item.clOrdId, status: "NOT_CREATED", reason: "rejected" } : { clOrdId: item.clOrdId, status: "SUBMITTED", ordId: `o-${item.clOrdId}` }); },
+          maxAvailSize: async (instId) => [{ instId, availBuy: "5000" }], balance: async (ccy) => [{ details: [{ ccy, availBal: owned }] }],
+          submitBatchOrders: async (payload) => { payloads.push(...payload); submission += 1; owned = String(Number(owned) - 12); return payload.map((item) => submission === 1 ? { clOrdId: item.clOrdId, status: "UNKNOWN", reason: "timeout" } : submission === 2 ? { clOrdId: item.clOrdId, status: "NOT_CREATED", reason: "rejected" } : { clOrdId: item.clOrdId, status: "SUBMITTED", ordId: `o-${item.clOrdId}` }); },
         },
       });
-      for (let index = 1; index <= 50; index += 1) coordinator.enqueue({ intent: "BUY", instId: `C${String(index).padStart(2, "0")}-USDT`, generation: 0, eligibleSince: index, strategyDay: "2026-08-14", dailyLimitPrice: "100", holdHours: "24", configHash: "cfg" });
-      for (let batch = 0; batch < 10; batch += 1) assert.equal((await coordinator.drainOnce()).count, 5);
-      assert.equal(batches.length, 10); assert.deepEqual(batches[0].map((row) => row.instId), ["C01-USDT", "C02-USDT", "C03-USDT", "C04-USDT", "C05-USDT"]);
-      assert.ok(batches.every((batch) => batch.length >= 1 && batch.length <= 5));
-      const states = await db.admin.query("SELECT state,reservation_state,count(*)::int AS count FROM order_attempts WHERE account_id='coord50' GROUP BY state,reservation_state ORDER BY state");
-      assert.deepEqual(states.rows, [{ state: "NOT_CREATED", reservation_state: "RELEASED", count: 1 }, { state: "SUBMITTED", reservation_state: "ACTIVE", count: 48 }, { state: "UNKNOWN", reservation_state: "ACTIVE", count: 1 }]);
-      const total = (await db.admin.query("SELECT sum(reserved_exposure_usd)::text AS exposure FROM order_attempts WHERE account_id='coord50' AND reservation_state='ACTIVE'")).rows[0].exposure;
-      assert.ok(Number(total) <= 442.5, `fee-inclusive ACTIVE reservation ${total} must remain under 2.95x`);
-      const unknown = (await db.admin.query("SELECT * FROM order_attempts WHERE account_id='coord50' AND state='UNKNOWN'")).rows[0];
-      await coordinator.settleBuy({ attempt: unknown, fills: [{ tradeId: "coord50-partial", fillSz: "0.01", fillTime: "30" }], exchangeState: "canceled", accFillSz: "0.01" });
+      for (const [index, instId] of ids.entries()) coordinator.enqueue({ intent: "BUY", instId, decisionId: `D-${instId}`, generation: 0, triggerAt: index, signalAt: index, strategyDay: day, limitPrice: "72", anchor: { ts: strategyDayStartMs(day), hash: "anchor" }, holdHours: "3", configHash: PANIC_STRATEGY_HASH });
+      const results = [];
+      for (let drain = 0; drain < 5; drain += 1) results.push((await coordinator.drainOnce()).reason ?? "SUBMITTED");
+      assert.deepEqual(results, ["SUBMITTED", "SUBMITTED", "SUBMITTED", "CAPITAL_EXHAUSTED", "CAPITAL_EXHAUSTED"], "40 USDT funds three ~12 USDT IOCs, then the queue stops without borrowing");
+      assert.deepEqual(payloads.map((row) => [row.instId, row.px, row.ordType]), [["C01-USDT", "72", "ioc"], ["C02-USDT", "72", "ioc"], ["C03-USDT", "72", "ioc"]]);
+      assert.deepEqual(payloads.map((row) => row.sz), ["0.555", "0.388", "0.222"], "each order is sized from the owned USDT read just before it");
+      const states = await db.admin.query("SELECT inst_id,state,reservation_state,decision_reason FROM order_attempts WHERE account_id='coord-serial' ORDER BY inst_id");
+      assert.deepEqual(states.rows.map((row) => [row.inst_id, row.state, row.reservation_state, row.decision_reason]), [["C01-USDT", "UNKNOWN", "ACTIVE", "PANIC_BUY_72"], ["C02-USDT", "NOT_CREATED", "RELEASED", "PANIC_BUY_72"], ["C03-USDT", "SUBMITTED", "ACTIVE", "PANIC_BUY_72"]]);
+      const unknown = (await db.admin.query("SELECT * FROM order_attempts WHERE account_id='coord-serial' AND state='UNKNOWN'")).rows[0];
+      const fillTime = strategyDayStartMs(day) + 22 * 3_600_000;
+      await coordinator.settleBuy({ attempt: unknown, fills: [{ tradeId: "coord-serial-partial", fillSz: "0.2", fillPx: "72", fillTime: String(fillTime) }], exchangeState: "canceled", accFillSz: "0.2" });
       assert.deepEqual((await db.admin.query("SELECT state,reservation_state FROM order_attempts WHERE id=$1", [unknown.id])).rows[0], { state: "SETTLED", reservation_state: "CONVERTED" });
+      assert.deepEqual((await db.admin.query("SELECT sell_time,hold_hours::text,force_sell_time FROM filled_orders WHERE trade_id='coord-serial-partial'")).rows[0], { sell_time: String(panicSellTime({ strategyDay: day, fillTime })), hold_hours: "3", force_sell_time: null }, "a real pg DATE strategy day schedules the 3h-minimum close");
     });
 
     await t.test("P3 account SELL allocation uses bigint bill keys and SYSTEM SELL replay is idempotent", async () => {
@@ -561,7 +558,7 @@ test("temporary PostgreSQL enforces P1-B invariants", { timeout: 60_000 }, async
           fills: async (instType) => instType === "MARGIN" ? [{ instType, instId, side: "buy", tradeId: "auto-buy", billId: "1", fillTime: "10", fillSz: "1" }] : [],
           fillsHistory: async () => [], order: async () => ({ tdMode: "cross", clOrdId: "auto-cl" }),
         },
-        ownership: { accountId, managedAfter: 0, enabledInstIds: [instId], attemptClOrdIds: new Set(["auto-cl"]), holdHoursByInst: { [instId]: "24" }, configHash: "cfg" } });
+        ownership: { accountId, managedAfter: 0, enabledInstIds: [instId], attemptClOrdIds: new Set(["auto-cl"]) } });
       // Neither this test nor production-composition.js's reconcile()/recover() ever calls
       // allocateSafeAccountSells directly — reconcileAll must sweep every base with a PENDING
       // ACCOUNT SELL on its own, or a manual sell permanently blocks that base's SYSTEM exits.
