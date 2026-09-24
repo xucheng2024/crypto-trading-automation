@@ -13,8 +13,9 @@ test("P5 daily selection and production planner create a BUY only above the stri
   const rows = [
     [String(today), "100", "105", "90", "94", "1", "1", "1", "0"],
     [String(yesterday), "100", "101", "90", "100", "1", "1", "1", "1"],
+    ...Array.from({ length: 20 }, (_, index) => [String(yesterday - (index + 1) * 86_400_000), "40", "41", "39", "40", "1", "1", "1", "1"]),
   ];
-  assert.deepEqual(selectDailyCandles(rows, "2026-08-14"), { todayCandleTs: today, todayOpen: "100", yesterdayCandleTs: yesterday, yesterdayOpen: "100", yesterdayClose: "100" });
+  assert.deepEqual(selectDailyCandles(rows, "2026-08-14"), { todayCandleTs: today, todayOpen: "100", yesterdayCandleTs: yesterday, yesterdayOpen: "100", yesterdayClose: "100", ma20Closes: ["100", ...Array(19).fill("40")] });
   const clock = { nowMs: () => current }; const market = new MarketProjection({ clock });
   market.updateInstrument({ instId: "BTC-USDT", ts: 1, state: "live", tickSz: "0.1", lotSz: "0.001", minSz: "0.001", base: "BTC", version: "1" });
   market.updateTicker({ instId: "BTC-USDT", ts: current, last: "94.9", askPx: "94.9", bidPx: "94.8" });
@@ -39,6 +40,24 @@ test("P5 daily selection and production planner create a BUY only above the stri
   market.updateTicker({ instId: "BTC-USDT", ts: current, last: "94.7835", askPx: "94.7835", bidPx: "94.7" });
   assert.equal((await planner.observe({ type: "ticker", instId: "BTC-USDT" })).reason, "BREAKOUT_NOT_CONFIRMED");
   assert.ok(events.some((event) => event.reason === "BUY_QUEUED")); assert.ok(events.some((event) => event.reason === "BREAKOUT_NOT_CONFIRMED"));
+});
+
+test("P5 planner decides the 3x MA20 ceiling once per day and keeps it off the tick path", async () => {
+  const rows = [[String(today), "100", "105", "90", "94", "1", "1", "1", "0"], ...Array.from({ length: 20 }, (_, index) => [String(yesterday - index * 86_400_000), "30", "31", "29", "30", "1", "1", "1", "1"])];
+  const clock = { nowMs: () => current }; const market = new MarketProjection({ clock });
+  market.updateInstrument({ instId: "BTC-USDT", ts: 1, state: "live", tickSz: "0.1", lotSz: "0.001", minSz: "0.001", base: "BTC", version: "1" });
+  market.updateTicker({ instId: "BTC-USDT", ts: current, last: "94.9", askPx: "94.9", bidPx: "94.8" });
+  market.updateCandle({ instId: "BTC-USDT", ts: current - 180_000, open: "93", high: "94.5", low: "92", close: "94", confirm: true });
+  const stored = new Map(); const intents = []; const candleCalls = [];
+  const state = { findDaily: async (_tx, instId, day) => stored.get(`${instId}:${day}`), claimDaily: async (_tx, row) => { stored.set(`${row.instId}:${row.strategyDay}`, row); return row; }, listManagedFills: async () => [] };
+  const planner = new BuySignalPlanner({ accountId: "a", instIds: ["BTC-USDT"], strategyConfig: { contentHash: "a".repeat(64), rows: { "BTC-USDT": { bestLimit: "95", holdHours: "6" } } }, market, account: new AccountCapitalSnapshot({ clock }),
+    coordinator: { enqueue: (intent) => Boolean(intents.push(intent)) }, state, orders: { listBuyCycle: async () => ({ attempts: [], consumedUsd: "0" }) }, transaction: async (fn) => fn({}), rest: { clockSkewMs: 0, clockFresh: () => true, candles: async (_instId, options) => { candleCalls.push(options); return options.bar === "1D" ? rows : []; } }, readyGate: new ReadyGate(), clock,
+  });
+  await planner.prime();
+  assert.deepEqual(candleCalls, [{ bar: "1D", limit: 25 }]);
+  assert.equal(stored.get("BTC-USDT:2026-08-14").status, "SKIPPED_ABOVE_MA20"); assert.equal(stored.get("BTC-USDT:2026-08-14").ma20, "30");
+  for (let index = 0; index < 3; index += 1) assert.deepEqual(await planner.observe({ type: "ticker", instId: "BTC-USDT" }), { queued: false, reason: "SKIPPED_ABOVE_MA20" });
+  assert.equal(candleCalls.length, 1); assert.equal(intents.length, 0);
 });
 
 test("P5 private terminal order observation loads fills and closes the durable attempt", async () => {

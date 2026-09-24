@@ -58,6 +58,8 @@ daily_limit_price = roundToStep(raw_limit_price, tickSz, down)
 
 `skip_for_yesterday_gain=true` 时把当日 cache 明确写为 `SKIPPED_YESTERDAY_GAIN`，该 instId 当天不进入 BUY_WATCH、不创建 BUY attempt；严格大于 10% 才跳过，恰好 10% 不跳过，次日重新计算。
 
+MA20 上限：`ma20` 取当日之前最近 20 根 `confirm=1` 日 K 收盘价均值，日内不变。BUY 均以 `daily_limit_price` 限价成交，所以每日只比较一次：`daily_limit_price ≥ 3 × ma20` 时当日写 `SKIPPED_ABOVE_MA20`；不足 20 根已确认日 K 时写 `SKIPPED_MA20_UNAVAILABLE`。两者都整日零 BUY attempt，`ma20` 随 cache 持久化，tick 路径不做额外判断。
+
 `GET /api/v5/market/candles?instId=<instId>&bar=1D` 返回数组 `[ts,o,h,l,c,vol,volCcy,volCcyQuote,confirm]` 且通常按时间倒序。按时间戳选择新加坡当日 K 的 `o` 作为 `today_open`，该 K 在日内通常为 `confirm=0`；其前一交易日 K 必须 `confirm=1`，再读取 `o/c`。目标 o/c 必须是正数 Decimal；缺失、零或非法时重试并 BUY HALT，不能靠数组固定下标或沿用前一天 today_open。strategy_day 使用最近一次可信 OKX server-time offset 计算；校时过期、跳变超阈值或新日 cache 尚未生成时 BUY HALT，禁止沿用前一天 limit。`daily_limit_cache(inst_id, strategy_day)` 唯一且 first-writer-wins，同时保存输入 K 线时间、价格、best_limit、tickSz、配置版本、skip 状态和计算哈希；当天已存在的有效记录不得因配置变化或并发补算被覆盖。
 
 daily_limit_price 当天固定，不因 3m K 线、当前价格或 IOC 结果改变。

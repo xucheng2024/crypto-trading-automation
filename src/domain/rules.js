@@ -44,10 +44,22 @@ export function normalizeHoldHours(value, legacyUnit) {
   return unit === "D" ? multiplyDecimal(number, "24") : number;
 }
 
-export function dailyLimit({ todayOpen, yesterdayOpen, yesterdayClose, bestLimit, tickSz }) {
+export const MA20_PERIOD = 20;
+export const MA20_CEILING_MULTIPLIER = "3";
+
+// Every BUY is a limit order at the daily limit price, so comparing that price with the
+// closed-candle MA20 once per strategy day bounds every possible fill without per-tick checks.
+export function dailyLimit({ todayOpen, yesterdayOpen, yesterdayClose, bestLimit, tickSz, ma20Closes }) {
   if ([todayOpen, yesterdayOpen, yesterdayClose, bestLimit, tickSz].some((value) => compareDecimal(value, "0") <= 0)) throw new Error("daily limit inputs must be positive");
   if (compareDecimal(multiplyDecimal(yesterdayClose, "10"), multiplyDecimal(yesterdayOpen, "11")) > 0) return { skipped: true, reason: "SKIPPED_YESTERDAY_GAIN" };
-  return { skipped: false, price: roundToStep(divideDecimal(multiplyDecimal(todayOpen, bestLimit), "100"), tickSz, "down") };
+  if (!Array.isArray(ma20Closes) || ma20Closes.length < MA20_PERIOD) return { skipped: true, reason: "SKIPPED_MA20_UNAVAILABLE" };
+  const closes = ma20Closes.slice(0, MA20_PERIOD);
+  if (closes.some((value) => compareDecimal(value, "0") <= 0)) throw new Error("MA20 closes must be positive");
+  const sum = closes.reduce((total, value) => addDecimal(total, value), "0");
+  const ma20 = divideDecimal(sum, String(MA20_PERIOD));
+  const price = roundToStep(divideDecimal(multiplyDecimal(todayOpen, bestLimit), "100"), tickSz, "down");
+  if (compareDecimal(multiplyDecimal(price, String(MA20_PERIOD)), multiplyDecimal(sum, MA20_CEILING_MULTIPLIER)) >= 0) return { skipped: true, reason: "SKIPPED_ABOVE_MA20", ma20 };
+  return { skipped: false, price, ma20 };
 }
 
 export const BUY_BREAKOUT_MULTIPLIER = "1.003";

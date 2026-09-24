@@ -1,5 +1,5 @@
 import { compareDecimal, subtractDecimal } from "../decimal.js";
-import { buySignal, candleFreshness, dailyLimit, strategyDay } from "../domain/rules.js";
+import { MA20_PERIOD, buySignal, candleFreshness, dailyLimit, strategyDay } from "../domain/rules.js";
 import { CLOCK_SYNC_STALE_AFTER_MS } from "../infrastructure/okx/rest-client.js";
 import { createDecisionId, payloadHash } from "../domain/order.js";
 
@@ -19,7 +19,7 @@ function normalizeDaily(row) {
     todayCandleTs: Number(field(row, "today_candle_ts", "todayCandleTs")), todayOpen: field(row, "today_open", "todayOpen"),
     yesterdayCandleTs: Number(field(row, "yesterday_candle_ts", "yesterdayCandleTs")), yesterdayOpen: field(row, "yesterday_open", "yesterdayOpen"),
     yesterdayClose: field(row, "yesterday_close", "yesterdayClose"), bestLimit: field(row, "best_limit", "bestLimit"), tickSz: field(row, "tick_sz", "tickSz"),
-    strategyConfigHash: field(row, "strategy_config_hash", "strategyConfigHash"),
+    strategyConfigHash: field(row, "strategy_config_hash", "strategyConfigHash"), ma20: field(row, "ma20", "ma20"),
   };
 }
 
@@ -29,7 +29,8 @@ export function selectDailyCandles(rows, currentDay) {
   const yesterday = parsed.filter((item) => item.day < currentDay && item.confirm).sort((a, b) => b.ts - a.ts)[0];
   if (!today || !yesterday) throw new Error(`DAILY_CANDLES_INCOMPLETE:${currentDay}`);
   const value = (item, index) => String(item.row[index] ?? "");
-  return { todayCandleTs: today.ts, todayOpen: value(today, 1), yesterdayCandleTs: yesterday.ts, yesterdayOpen: value(yesterday, 1), yesterdayClose: value(yesterday, 4) };
+  const ma20Closes = parsed.filter((item) => item.day < currentDay && item.confirm).sort((a, b) => b.ts - a.ts).slice(0, MA20_PERIOD).map((item) => value(item, 4));
+  return { todayCandleTs: today.ts, todayOpen: value(today, 1), yesterdayCandleTs: yesterday.ts, yesterdayOpen: value(yesterday, 1), yesterdayClose: value(yesterday, 4), ma20Closes };
 }
 
 export function summarizeInstrumentPipelineCoverage({ instIds = [], market, strategyConfig, daily, currentDay, evaluatorSeen, decisions, exchangeNowMs = market?.clock?.nowMs?.(), quoteFreshMs = market?.quoteFreshMs ?? 1_500 }) {
@@ -99,13 +100,13 @@ export class BuySignalPlanner {
     if (existing) { const normalized = normalizeDaily(existing); this.daily.set(key, normalized); return normalized; }
     const instrument = this.market.instrument(instId); const config = this.strategyConfig.rows[instId];
     if (!instrument || !config) throw new Error(`DAILY_CONFIG_MISSING:${instId}`);
-    const candles = selectDailyCandles(await this.rest.candles(instId, { bar: "1D", limit: 4 }), day);
-    const calculated = dailyLimit({ ...candles, bestLimit: config.bestLimit, tickSz: instrument.tickSz });
-    const input = { instId, strategyDay: day, ...candles, bestLimit: config.bestLimit, tickSz: instrument.tickSz, strategyConfigHash: this.strategyConfig.contentHash };
+    const { ma20Closes, ...candles } = selectDailyCandles(await this.rest.candles(instId, { bar: "1D", limit: MA20_PERIOD + 5 }), day);
+    const calculated = dailyLimit({ ...candles, ma20Closes, bestLimit: config.bestLimit, tickSz: instrument.tickSz });
+    const input = { instId, strategyDay: day, ...candles, ma20: calculated.ma20 ?? null, bestLimit: config.bestLimit, tickSz: instrument.tickSz, strategyConfigHash: this.strategyConfig.contentHash };
     const inputHash = await payloadHash(input);
     const claimed = await this.transaction((tx) => this.state.claimDaily(tx, { ...input, status: calculated.skipped ? calculated.reason : "READY", dailyLimitPrice: calculated.price, inputHash }));
     const normalized = normalizeDaily(claimed); this.daily.set(key, normalized);
-    this.emitDecision(instId, { type: "trading_decision", side: "BUY", reason: normalized.status, strategyDay: day, dailyLimitPrice: normalized.dailyLimitPrice, todayOpen: normalized.todayOpen, yesterdayOpen: normalized.yesterdayOpen, yesterdayClose: normalized.yesterdayClose, configHash: normalized.strategyConfigHash }, true);
+    this.emitDecision(instId, { type: "trading_decision", side: "BUY", reason: normalized.status, strategyDay: day, dailyLimitPrice: normalized.dailyLimitPrice, todayOpen: normalized.todayOpen, yesterdayOpen: normalized.yesterdayOpen, yesterdayClose: normalized.yesterdayClose, ma20: normalized.ma20, configHash: normalized.strategyConfigHash }, true);
     return normalized;
   }
   async ensureThreeMinuteCandle(instId) {

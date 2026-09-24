@@ -204,7 +204,8 @@ export async function composeProductionRuntime(env, injected = {}) {
       EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='filled_orders' AND column_name='max_hold_hours') AS fill_max_hold,
       EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='filled_orders' AND column_name='force_sell_time') AS force_sell_time,
       EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='filled_orders' AND column_name='sell_trigger_reason') AS sell_trigger_reason,
-      EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='daily_limit_cache' AND column_name='today_open') AS daily_inputs`);
+      EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='daily_limit_cache' AND column_name='today_open') AS daily_inputs,
+      EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='daily_limit_cache' AND column_name='ma20') AS daily_ma20`);
     if (!result.rows?.[0] || Object.values(result.rows[0]).some((value) => value === null || value === false)) throw new Error("POSTGRES_MIGRATIONS_MISSING");
   });
   const reconcile = async () => {

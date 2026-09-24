@@ -61,7 +61,7 @@ test("P4 full runtime uses one PostgreSQL, fake OKX WS/REST, five-order Coordina
       accountInstruments: async (type) => ids.map((instId) => ({ instId, state: "live", tradeQuoteCcyList: type === "MARGIN" ? "USDT" : "" })),
       leverageInfo: async () => ids.map((instId) => ({ instId, lever: "3" })), balance: async () => [{ totalEq: "100", adjEq: "100", uTime: "1" }],
       maxAvailSize: async (joined) => joined.split(",").map((instId) => ({ instId, availBuy: "10", availSell: "100" })),
-      candles: async (_instId, options) => options.bar === "1D" ? [[String(dayStart), "100", "101", "90", "95", "1", "1", "1", "0"], [String(priorStart), "100", "101", "90", "100", "1", "1", "1", "1"]] : [[String(expectedClosedCandleTs(Date.now())), "94", "94.5", "93", "94.4", "1", "1", "1", "1"]],
+      candles: async (_instId, options) => options.bar === "1D" ? [[String(dayStart), "100", "101", "90", "95", "1", "1", "1", "0"], ...Array.from({ length: 20 }, (_, index) => [String(priorStart - index * 86_400_000), "100", "101", "90", "100", "1", "1", "1", "1"])] : [[String(expectedClosedCandleTs(Date.now())), "94", "94.5", "93", "94.4", "1", "1", "1", "1"]],
       submitBatchOrders: async (payloads) => { submitted.push(...payloads); return payloads.map((payload, index) => ({ clOrdId: payload.clOrdId, status: "SUBMITTED", ordId: `p4-${index}` })); },
     };
     const composed = await composeProductionRuntime({ TRADING_MODE: "FULL", OKX_INSTRUMENTS: ids.join(","), STRATEGY_CONFIG_JSON: JSON.stringify({ content_hash: "a".repeat(64), config: ids.map((inst_id) => ({ inst_id, best_limit: "95", hold_hours: "24" })) }), KEY_VAULT_URI: "https://vault.example", POSTGRES_URL: "postgresql://local/postgres" }, {

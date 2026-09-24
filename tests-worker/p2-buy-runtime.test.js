@@ -367,8 +367,9 @@ test("P2 ACCOUNT ledger preserves confirmed mode and derives spot/margin route b
 });
 
 test("P2 boundaries retain fee reservation, daily-gain edge, and tick changes", () => {
-  assert.deepEqual(dailyLimit({ todayOpen: "100", yesterdayOpen: "100", yesterdayClose: "110", bestLimit: "95", tickSz: "0.1" }), { skipped: false, price: "95" });
-  assert.equal(dailyLimit({ todayOpen: "100", yesterdayOpen: "100", yesterdayClose: "110.0001", bestLimit: "95", tickSz: "0.1" }).reason, "SKIPPED_YESTERDAY_GAIN");
+  const ma20Closes = Array(20).fill("100");
+  assert.deepEqual(dailyLimit({ todayOpen: "100", yesterdayOpen: "100", yesterdayClose: "110", bestLimit: "95", tickSz: "0.1", ma20Closes }), { skipped: false, price: "95", ma20: "100" });
+  assert.equal(dailyLimit({ todayOpen: "100", yesterdayOpen: "100", yesterdayClose: "110.0001", bestLimit: "95", tickSz: "0.1", ma20Closes }).reason, "SKIPPED_YESTERDAY_GAIN");
   const market = setupMarket(clock(0)); market.updateInstrument({ instId: "BTC-USDT", ts: 3, state: "live", tickSz: "0.3", lotSz: "0.001", minSz: "0.001", base: "BTC", version: 2 });
   assert.equal(market.instrument("BTC-USDT").tickSz, "0.3", "daily cache is not rewritten by the new rule");
 });

@@ -23,8 +23,14 @@ test("daily, duration, clock, buy, leverage and exit boundaries are pure", () =>
   assert.equal(normalizeHoldHours("2D"), "48");
   assert.equal(normalizeHoldHours("2", "H"), "2");
   assert.throws(() => normalizeHoldHours("2"));
-  assert.equal(dailyLimit({ todayOpen: "100", yesterdayOpen: "100", yesterdayClose: "110", bestLimit: "90", tickSz: "0.1" }).skipped, false);
-  assert.equal(dailyLimit({ todayOpen: "100", yesterdayOpen: "100", yesterdayClose: "110.01", bestLimit: "90", tickSz: "0.1" }).skipped, true);
+  const closes = Array(20).fill("30");
+  assert.equal(dailyLimit({ todayOpen: "100", yesterdayOpen: "100", yesterdayClose: "110", bestLimit: "90", tickSz: "0.1", ma20Closes: Array(20).fill("100") }).skipped, false);
+  assert.equal(dailyLimit({ todayOpen: "100", yesterdayOpen: "100", yesterdayClose: "110.01", bestLimit: "90", tickSz: "0.1", ma20Closes: closes }).skipped, true);
+  assert.deepEqual(dailyLimit({ todayOpen: "100", yesterdayOpen: "100", yesterdayClose: "100", bestLimit: "89.9", tickSz: "0.1", ma20Closes: closes }), { skipped: false, price: "89.9", ma20: "30" });
+  assert.deepEqual(dailyLimit({ todayOpen: "100", yesterdayOpen: "100", yesterdayClose: "100", bestLimit: "90", tickSz: "0.1", ma20Closes: closes }), { skipped: true, reason: "SKIPPED_ABOVE_MA20", ma20: "30" });
+  assert.equal(dailyLimit({ todayOpen: "100", yesterdayOpen: "100", yesterdayClose: "100", bestLimit: "90", tickSz: "0.1", ma20Closes: [...closes, "1000"] }).reason, "SKIPPED_ABOVE_MA20", "only the latest 20 closes count");
+  assert.equal(dailyLimit({ todayOpen: "100", yesterdayOpen: "100", yesterdayClose: "100", bestLimit: "90", tickSz: "0.1", ma20Closes: closes.slice(1) }).reason, "SKIPPED_MA20_UNAVAILABLE");
+  assert.equal(dailyLimit({ todayOpen: "100", yesterdayOpen: "100", yesterdayClose: "110.01", bestLimit: "90", tickSz: "0.1" }).reason, "SKIPPED_YESTERDAY_GAIN");
   assert.equal(buySignal({ last: "90", askPx: "90", limitPrice: "90", previousClosedHigh: "89" }).eligible, true);
   assert.deepEqual(buySignal({ last: "84", askPx: "84", limitPrice: "90", previousClosedHigh: "89" }), { eligible: true, reason: "ELIGIBLE", breakoutPrice: "89.267", dipPrice: "84.6", trigger: "DIP" });
   assert.equal(buySignal({ last: "84.6", askPx: "84.6", limitPrice: "90", previousClosedHigh: "89" }).trigger, "DIP");

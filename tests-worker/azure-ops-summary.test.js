@@ -197,6 +197,7 @@ test("Azure ops summary compacts workflow failures, approvals, and runner readin
 test("Azure ops summary separates waiting, policy, opportunity, and safety blocks", () => {
   assert.equal(classifyDecision("PRICE_OUTSIDE"), "waiting");
   assert.equal(classifyDecision("SKIPPED_YESTERDAY_GAIN"), "policy");
+  assert.equal(classifyDecision("SKIPPED_ABOVE_MA20"), "policy"); assert.equal(classifyDecision("SKIPPED_MA20_UNAVAILABLE"), "policy");
   assert.equal(classifyDecision("BUY_QUEUED"), "opportunity");
   assert.equal(classifyDecision("QUOTE_STALE"), "blocked");
   assert.equal(classifyBlock("QUOTE_STALE"), "LIKELY_RECOVERABLE"); assert.equal(classifyBlock("BREAKOUT_NOT_CONFIRMED"), "MARKET_MOVED"); assert.equal(classifyBlock("HARD_STOP"), "SAFETY_BOUNDARY");

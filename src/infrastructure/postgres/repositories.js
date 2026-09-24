@@ -16,11 +16,11 @@ export class TradingStateRepository {
   async claimDaily(tx, row) {
     await tx.query(`INSERT INTO daily_limit_cache(
       inst_id,strategy_day,status,daily_limit_price,input_hash,today_candle_ts,today_open,
-      yesterday_candle_ts,yesterday_open,yesterday_close,best_limit,tick_sz,strategy_config_hash
-    ) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) ON CONFLICT(inst_id,strategy_day) DO NOTHING`, [
+      yesterday_candle_ts,yesterday_open,yesterday_close,best_limit,tick_sz,strategy_config_hash,ma20
+    ) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) ON CONFLICT(inst_id,strategy_day) DO NOTHING`, [
       row.instId, row.strategyDay, row.status, row.dailyLimitPrice ?? null, row.inputHash,
       row.todayCandleTs, row.todayOpen, row.yesterdayCandleTs, row.yesterdayOpen,
-      row.yesterdayClose, row.bestLimit, row.tickSz, row.strategyConfigHash,
+      row.yesterdayClose, row.bestLimit, row.tickSz, row.strategyConfigHash, row.ma20 ?? null,
     ]);
     return this.findDaily(tx, row.instId, row.strategyDay);
   }
