@@ -12,4 +12,5 @@ export const postgresMigrations = [
   "0011_timeline_watermark_read.sql",
   "0012_daily_ma20.sql",
   "0013_panic_rebound.sql",
+  "0014_panic_runtime_grant.sql",
 ];

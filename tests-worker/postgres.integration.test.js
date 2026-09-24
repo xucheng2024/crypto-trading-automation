@@ -147,6 +147,18 @@ test("temporary PostgreSQL enforces P1-B invariants", { timeout: 60_000 }, async
       await assert.rejects(db.admin.query("UPDATE filled_orders SET execution_mode='isolated' WHERE trade_id='cash-fill'"), (error) => error.code === "23514");
     });
 
+    await t.test("panic daily state grants only Engine read and write privileges", async () => {
+      await db.admin.query('CREATE ROLE "p4-test-engine"');
+      await db.admin.query('CREATE ROLE "p4-test-maintenance"');
+      await db.admin.query('GRANT SELECT ON TABLE filled_orders TO "p4-test-engine"');
+      const grant = await readFile(new URL("../migrations/postgres/0014_panic_runtime_grant.sql", import.meta.url), "utf8");
+      await db.admin.query(grant); await db.admin.query(grant);
+      const allowed = async (role, privilege) => (await db.admin.query("SELECT has_table_privilege($1, 'panic_daily_instruments', $2) AS allowed", [role, privilege])).rows[0].allowed;
+      for (const privilege of ["SELECT", "INSERT", "UPDATE"]) assert.equal(await allowed("p4-test-engine", privilege), true);
+      assert.equal(await allowed("p4-test-engine", "DELETE"), false);
+      assert.equal(await allowed("p4-test-maintenance", "SELECT"), false);
+    });
+
     await t.test("two real transactions preserve independent durable BUY attempts", async () => {
       const left = await db.connect();
       const right = await db.connect();
