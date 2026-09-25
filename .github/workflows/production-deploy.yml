@@ -24,6 +24,10 @@ env:
   ACR_LOGIN_SERVER: ${{ vars.ACR_LOGIN_SERVER }}
   CONTAINER_APP_NAME: ${{ vars.CONTAINER_APP_NAME }}
   POSTGRES_MIGRATION_URL: ${{ vars.POSTGRES_MIGRATION_URL }}
+  # ~200 market-wide tickers saturate 0.25 vCPU and delay WebSocket ingest;
+  # keep in sync with modules/apps.bicep and production-recover-off.yml.
+  ENGINE_CPU: "0.5"
+  ENGINE_MEMORY: 1Gi
 
 jobs:
   validate:
@@ -155,7 +159,7 @@ jobs:
         run: |
           set -euo pipefail
           suffix="off-${GITHUB_SHA:0:7}-${GITHUB_RUN_NUMBER}"
-          revision="$(az containerapp update --name "$CONTAINER_APP_NAME" --resource-group "$RESOURCE_GROUP" --image "$IMAGE" --set-env-vars TRADING_MODE=OFF APPLICATIONINSIGHTS_CONNECTION_STRING=secretref:appinsights-connection-string --revision-suffix "$suffix" --query properties.latestRevisionName --output tsv)"
+          revision="$(az containerapp update --name "$CONTAINER_APP_NAME" --resource-group "$RESOURCE_GROUP" --image "$IMAGE" --cpu "$ENGINE_CPU" --memory "$ENGINE_MEMORY" --set-env-vars TRADING_MODE=OFF APPLICATIONINSIGHTS_CONNECTION_STRING=secretref:appinsights-connection-string --revision-suffix "$suffix" --query properties.latestRevisionName --output tsv)"
           echo "revision=$revision" >> "$GITHUB_OUTPUT"
       - name: Safely hand off and verify the OFF revision
         shell: bash

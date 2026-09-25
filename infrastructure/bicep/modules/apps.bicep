@@ -54,7 +54,7 @@ resource engine 'Microsoft.App/containerApps@2024-03-01' = {
         {
           name: 'trading-engine'
           image: image
-          resources: { cpu: json('0.25'), memory: '0.5Gi' }
+          resources: { cpu: json('0.5'), memory: '1Gi' }
           env: [
             { name: 'TRADING_MODE', value: 'OFF' }
             { name: 'KEY_VAULT_URI', value: keyVaultUri }
