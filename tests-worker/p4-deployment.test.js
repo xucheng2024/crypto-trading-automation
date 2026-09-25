@@ -11,7 +11,7 @@ import { promisify } from "node:util";
 import { pathToFileURL } from "node:url";
 import { resolve } from "node:path";
 import { AzureKeyVaultSecretPort } from "../src/infrastructure/azure/keyvault-port.js";
-import { composeProductionRuntime, createCancellableSleep, liveUsdtSpotUniverse, reconcileAndRestoreDatabase, refreshExecutionRoutes, runRestBaseline } from "../src/application/production-composition.js";
+import { composeProductionRuntime, createCancellableSleep, liquidUniverse, liveUsdtSpotUniverse, medianDailyQuoteVolume, reconcileAndRestoreDatabase, refreshExecutionRoutes, runRestBaseline } from "../src/application/production-composition.js";
 import { EntraPostgresPool, AZURE_POSTGRES_SCOPE } from "../src/infrastructure/postgres/entra-pool.js";
 import { createApplicationInsightsTelemetry, isImportantTelemetry } from "../src/infrastructure/azure/application-insights-telemetry.js";
 import { EngineRecurringWork } from "../src/application/engine-recurring-work.js";
@@ -43,6 +43,19 @@ test("P4 REST baseline validates server, account, leverage and configured instru
   await assert.rejects(runRestBaseline({ rest: { ...rest, systemStatus: async () => [{ state: "ongoing" }] }, instIds: ["BTC-USDT"], market: {}, account: {}, readyGate: {}, clock: { nowMs: () => 3 } }), /OKX_SERVICE_UNAVAILABLE/);
 });
 
+test("P5 universe keeps pairs whose 30-day median daily turnover is at least 100k USDT", async () => {
+  const bars = (values, open = true) => [...(open ? [["99", "1", "1", "1", "1", "1", "1", "1", "0"]] : []), ...values.map((value, index) => [String(index), "1", "1", "1", "1", "1", "1", String(value), "1"])];
+  assert.equal(medianDailyQuoteVolume(bars([5, 1, 3])), 3, "the in-progress bar is ignored");
+  assert.equal(medianDailyQuoteVolume(bars([4, 1, 3, 2])), 2.5);
+  assert.equal(medianDailyQuoteVolume(bars([...Array(30).fill(200_000), 1, 1, 1])), 200_000, "only the latest 30 completed days");
+  assert.equal(medianDailyQuoteVolume([]), null);
+  const candles = { "LIQ-USDT": bars(Array(30).fill(150_000)), "EDGE-USDT": bars(Array(30).fill(100_000)), "THIN-USDT": bars([...Array(16).fill(50_000), ...Array(14).fill(900_000)]) };
+  const rest = { candles: async (instId, { bar, limit }) => { assert.equal(bar, "1D"); assert.equal(limit, 31); if (!candles[instId]) throw new Error("down"); return candles[instId]; } };
+  assert.deepEqual(await liquidUniverse({ rest, instIds: ["LIQ-USDT", "EDGE-USDT", "THIN-USDT", "ERR-USDT"], fallback: new Set() }), { instIds: ["LIQ-USDT", "EDGE-USDT"], illiquid: 1, failed: 1 });
+  assert.deepEqual((await liquidUniverse({ rest, instIds: ["LIQ-USDT", "ERR-USDT"], fallback: new Set(["ERR-USDT"]) })).instIds, ["LIQ-USDT", "ERR-USDT"], "an unreadable pair keeps yesterday's decision");
+  await assert.rejects(liquidUniverse({ rest, instIds: ["LIQ-USDT", "ERR-USDT", "ERR2-USDT"] }), /OKX_LIQUIDITY_UNAVAILABLE/);
+});
+
 test("P5 REST baseline discovers every live USDT spot pair and counts untradable routes without buying them", async () => {
   const rows = [
     { instId: "BTC-USDT", state: "live", quoteCcy: "USDT" }, { instId: "NOACCT-USDT", state: "live", quoteCcy: "USDT" }, { instId: "ETH-BTC", state: "live", quoteCcy: "BTC" },
@@ -56,7 +69,8 @@ test("P5 REST baseline discovers every live USDT spot pair and counts untradable
   assert.deepEqual(liveUsdtSpotUniverse([...rows, ...extra], { nowMs: now }), ["AGED-USDT", "BTC-USDT", "NOACCT-USDT"], "only instCategory 1 crypto listed at least seven days");
   assert.ok(liveUsdtSpotUniverse(extra, { nowMs: now + 1 }).includes("NEW-USDT"), "a pair joins once it has been listed seven full days");
   const instruments = new Map();
-  const rest = { syncServerTime: async () => {}, systemStatus: async () => [], publicInstruments: async () => rows, tickers: async () => [], accountConfig: async () => [{ acctLv: "3", autoLoan: "true" }], accountInstruments: async (type) => type === "SPOT" ? rows.filter((row) => row.instId === "BTC-USDT") : [], leverageInfo: async () => [], balance: async () => [{ totalEq: "100", adjEq: "100" }] };
+  const rest = { syncServerTime: async () => {}, systemStatus: async () => [], publicInstruments: async () => rows, tickers: async () => [], accountConfig: async () => [{ acctLv: "3", autoLoan: "true" }], accountInstruments: async (type) => type === "SPOT" ? rows.filter((row) => row.instId === "BTC-USDT") : [], leverageInfo: async () => [], balance: async () => [{ totalEq: "100", adjEq: "100" }],
+    candles: async () => Array.from({ length: 30 }, (_, index) => [String(index), "1", "1", "1", "1", "1", "1", "200000", "1"]) };
   const result = await runRestBaseline({ rest, market: { updateInstrument: (row) => instruments.set(row.instId, row), updateTicker: () => {} }, account: { update: () => true }, readyGate: { set: () => {} }, clock: { nowMs: () => 3 } });
   assert.deepEqual(result.instIds, ["BTC-USDT", "NOACCT-USDT"], "the count universe includes pairs this account cannot trade");
   assert.deepEqual(result.unavailable, ["NOACCT-USDT"]); assert.equal(result.executionRoutes.has("NOACCT-USDT"), false, "no route means the Coordinator never buys it");

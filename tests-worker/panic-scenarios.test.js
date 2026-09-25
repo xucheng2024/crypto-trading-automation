@@ -80,6 +80,7 @@ class FakeOkx {
     });
   }
   async candles(instId, { bar }) {
+    if (bar === "1D") return Array.from({ length: 31 }, (_, index) => [String(index), "1", "1", "1", "1", "1", "1", String(this.dailyTurnover?.get(instId) ?? 1_000_000), index ? "1" : "0"]);
     assert.equal(bar, "5m");
     const buckets = new Map();
     for (const row of this.history.get(instId) ?? []) { const ts = Math.floor(row.ts / (5 * MINUTE)) * 5 * MINUTE; buckets.set(ts, Math.min(buckets.get(ts) ?? Infinity, row.price)); }
@@ -471,11 +472,13 @@ test("panic-rebound scenarios against a simulated OKX and real PostgreSQL", { ti
         s.ex.opens.set("I-USDT", 100); s.ex.setQuote("I-USDT", 100);
         s.ex.instruments.set("J-USDT", { instId: "J-USDT", state: "live", tickSz: "0.01", lotSz: "0.001", minSz: "0.001", baseCcy: "J", quoteCcy: "USDT", instCategory: "1", uTime: "2", listTime: String(at(0, 0, 0, next) - 86_400_000) });
         s.ex.instruments.set("XTSLA-USDT", { instId: "XTSLA-USDT", state: "live", tickSz: "0.01", lotSz: "0.001", minSz: "0.001", baseCcy: "XTSLA", quoteCcy: "USDT", uTime: "2", instCategory: "3" });
-        for (const instId of ["J-USDT", "XTSLA-USDT"]) { s.ex.opens.set(instId, 100); s.ex.setQuote(instId, 100); }
+        s.ex.instruments.set("K-USDT", { instId: "K-USDT", state: "live", tickSz: "0.01", lotSz: "0.001", minSz: "0.001", baseCcy: "K", quoteCcy: "USDT", instCategory: "1", uTime: "2" });
+        s.ex.dailyTurnover = new Map([["K-USDT", 99_999]]);
+        for (const instId of ["J-USDT", "XTSLA-USDT", "K-USDT"]) { s.ex.opens.set(instId, 100); s.ex.setQuote(instId, 100); }
         for (const instId of Object.keys(EIGHT)) s.ex.opens.set(instId, 100);
         await s.advanceTo(at(0, 1, 0, next));
         assert.ok(s.ex.sockets.public.sent.some((message) => message.op === "subscribe" && message.args.some((arg) => arg.channel === "tickers" && arg.instId === "I-USDT")), "the live socket must receive the new ticker subscription");
-        assert.deepEqual(["J-USDT", "XTSLA-USDT"].filter((instId) => s.composed.buyPlanner.instIds.includes(instId)), [], "a one-day-old listing and a tokenized stock never join the universe");
+        assert.deepEqual(["J-USDT", "XTSLA-USDT", "K-USDT"].filter((instId) => s.composed.buyPlanner.instIds.includes(instId)), [], "a one-day-old listing, a tokenized stock and a thinly traded pair never join the universe");
         await s.move("A-USDT", 81); await s.move("B-USDT", 81); await s.move("I-USDT", 71);
         assert.deepEqual(s.buys().map((row) => row.instId), ["I-USDT"]);
       } finally { await s.close(); }

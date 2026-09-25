@@ -62,7 +62,7 @@ test("P4 full runtime ranks 82% touches in PostgreSQL and submits one owned-USDT
       leverageInfo: async () => ids.map((instId) => ({ instId, lever: "3" })),
       balance: async (ccy) => ccy ? [{ details: [{ ccy, availBal: owned, cashBal: owned }] }] : [{ totalEq: "1000", adjEq: "1000", uTime: "1" }],
       maxAvailSize: async (joined) => joined.split(",").map((instId) => ({ instId, availBuy: "5000", availSell: "100" })),
-      candles: async () => [],
+      candles: async (_instId, { bar } = {}) => bar === "1D" ? Array.from({ length: 30 }, (_, index) => [String(index), "1", "1", "1", "1", "1", "1", "500000", "1"]) : [],
       submitBatchOrders: async (payloads) => { submitted.push(...payloads); owned = "5"; return payloads.map((payload, index) => ({ clOrdId: payload.clOrdId, status: "SUBMITTED", ordId: `p4-${index}` })); },
     };
     const composed = await composeProductionRuntime({ TRADING_MODE: "FULL", OKX_INSTRUMENTS: "LEGACY-USDT", KEY_VAULT_URI: "https://vault.example", POSTGRES_URL: "postgresql://local/postgres" }, {

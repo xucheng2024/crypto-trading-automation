@@ -82,15 +82,46 @@ export function liveUsdtSpotUniverse(publicRows, { nowMs = null } = {}) {
   }).map((row) => row.instId))].sort();
 }
 
+// A pair also needs a 30-day median daily turnover (completed UTC+8 1D bars,
+// quote volume) of at least 100k USDT.  One candle read per pair per day.
+export const PANIC_LIQUIDITY_DAYS = 30;
+export const PANIC_MIN_MEDIAN_QUOTE_VOLUME = 100_000;
+
+export function medianDailyQuoteVolume(candles) {
+  const values = (candles ?? []).filter((bar) => String(bar?.[8]) === "1").slice(0, PANIC_LIQUIDITY_DAYS)
+    .map((bar) => Number(bar?.[7] ?? bar?.[6])).filter(Number.isFinite).sort((a, b) => a - b);
+  if (!values.length) return null;
+  const middle = values.length >> 1;
+  return values.length % 2 ? values[middle] : (values[middle - 1] + values[middle]) / 2;
+}
+
+// Pairs whose candles cannot be read keep yesterday's decision (fallback), or
+// stay out when there is none; if most reads fail the refresh fails instead.
+export async function liquidUniverse({ rest, instIds, fallback = new Set() }) {
+  const kept = []; let illiquid = 0; let failed = 0;
+  for (const instId of instIds) {
+    let median = null;
+    try { median = medianDailyQuoteVolume(await rest.candles(instId, { bar: "1D", limit: PANIC_LIQUIDITY_DAYS + 1 })); } catch { median = null; }
+    if (median === null) { failed += 1; if (fallback.has(instId)) kept.push(instId); continue; }
+    if (median >= PANIC_MIN_MEDIAN_QUOTE_VOLUME) kept.push(instId); else illiquid += 1;
+  }
+  if (instIds.length && failed * 2 > instIds.length) throw new Error("OKX_LIQUIDITY_UNAVAILABLE");
+  return { instIds: kept, illiquid, failed };
+}
+
 export async function runRestBaseline({ rest, instIds = null, market, account, readyGate, clock, executionRoutes = new Map(), quoteCurrencies = new Map() }) {
   await rest.syncServerTime();
   const status = await rest.systemStatus();
   if (!serviceAvailable(status, clock.nowMs())) throw new Error("OKX_SERVICE_UNAVAILABLE");
-  const [publicRows, tickers, accountConfig, spotRows, marginRows, balances] = await Promise.all([
-    rest.publicInstruments("SPOT"), rest.tickers("SPOT"), rest.accountConfig(), rest.accountInstruments("SPOT"), rest.accountInstruments("MARGIN"), rest.balance(),
-  ]);
-  instIds ??= liveUsdtSpotUniverse(publicRows, { nowMs: clock.nowMs() });
+  const publicRows = await rest.publicInstruments("SPOT");
+  // The liquidity scan takes one candle read per pair; account and ticker
+  // baselines are read only after it so they are fresh when applied.
+  let liquidity = null;
+  if (!instIds) { liquidity = await liquidUniverse({ rest, instIds: liveUsdtSpotUniverse(publicRows, { nowMs: clock.nowMs() }) }); instIds = liquidity.instIds; }
   if (!instIds.length) throw new Error("OKX_UNIVERSE_EMPTY");
+  const [tickers, accountConfig, spotRows, marginRows, balances] = await Promise.all([
+    rest.tickers("SPOT"), rest.accountConfig(), rest.accountInstruments("SPOT"), rest.accountInstruments("MARGIN"), rest.balance(),
+  ]);
   // Pairs the account cannot trade still count toward the panic tally; they
   // are left without an execution route and are therefore never bought.
   const profile = validateAccountProfile({ config: accountConfig, spotInstruments: spotRows, marginInstruments: marginRows, enabledInstIds: instIds, allowUnavailable: true });
@@ -108,7 +139,7 @@ export async function runRestBaseline({ rest, instIds = null, market, account, r
   if (firstMargin && !Array.isArray(leverage)) throw new Error("OKX_BASELINE_LEVERAGE");
   if (!account.update(balances[0] ?? {})) throw new Error("OKX_BASELINE_ACCOUNT");
   readyGate.set("account", true); readyGate.set("instruments", true);
-  return { instIds, quoteCurrency: profile.quoteCurrency, executionRoutes: profile.executionRoutes, unavailable: profile.unavailable, status, leverage };
+  return { instIds, quoteCurrency: profile.quoteCurrency, executionRoutes: profile.executionRoutes, unavailable: profile.unavailable, status, leverage, illiquid: liquidity?.illiquid ?? 0, liquidityFailed: liquidity?.failed ?? 0 };
 }
 
 export async function reconcileAndRestoreDatabase({ transaction, orders, reconciliation, accountId, readyGate, ownerGuard, telemetry = noop }) {
@@ -167,7 +198,7 @@ export async function composeProductionRuntime(env, injected = {}) {
   const refreshUniverse = async () => {
     if (fixedUniverse) return { instruments: instIds.length };
     const rows = await rest.publicInstruments("SPOT");
-    const next = liveUsdtSpotUniverse(rows, { nowMs: runtime.clock.nowMs() });
+    const { instIds: next, illiquid, failed } = await liquidUniverse({ rest, instIds: liveUsdtSpotUniverse(rows, { nowMs: runtime.clock.nowMs() }), fallback: new Set(instIds) });
     if (!next.length) throw new Error("OKX_UNIVERSE_EMPTY");
     const byId = new Map(rows.map((row) => [row.instId, row]));
     for (const instId of next) {
@@ -178,8 +209,8 @@ export async function composeProductionRuntime(env, injected = {}) {
     await refreshExecutionRoutes({ rest, instIds: next, executionRoutes, quoteCurrencies });
     const previous = new Set(instIds); const added = next.filter((instId) => !previous.has(instId)).length;
     setUniverse(next);
-    try { Promise.resolve(telemetry({ type: "strategy_baseline", reason: "UNIVERSE_REFRESHED", instruments: next.length, added })).catch(() => {}); } catch {}
-    return { instruments: next.length, added };
+    try { Promise.resolve(telemetry({ type: "strategy_baseline", reason: "UNIVERSE_REFRESHED", instruments: next.length, added, illiquid, liquidityFailed: failed })).catch(() => {}); } catch {}
+    return { instruments: next.length, added, illiquid, liquidityFailed: failed };
   };
   let clockSyncPromise = null;
   const clockSync = () => {
