@@ -58,19 +58,26 @@ export async function refreshExecutionRoutes({ rest, instIds, executionRoutes, q
 }
 
 // Pairs listed less than this long ago are left out of the universe.
-export const PANIC_MIN_LISTED_MS = 4 * 86_400_000;
-// OKX instCategory "3" marks tokenized stocks (e.g. XAAPL-USDT).
-const EXCLUDED_INST_CATEGORIES = new Set(["3"]);
+export const PANIC_MIN_LISTED_MS = 7 * 86_400_000;
+// OKX instCategory "1" is crypto; stocks (3), commodities (4) etc. are out.
+const CRYPTO_INST_CATEGORY = "1";
+// USD and other fiat-pegged stablecoins never panic like the rest of the market.
+export const FIAT_STABLECOIN_BASES = new Set([
+  "USDC", "USDG", "USD1", "USDS", "PYUSD", "RLUSD", "FDUSD", "TUSD", "USDP", "GUSD", "BUSD", "DAI", "USDE", "USDD", "LUSD", "FRAX", "GHO", "USDB", "USDQ", "USDR",
+  "EURC", "EURI", "EURT", "EURS", "AEUR", "AUDM", "AUDF", "AUDD", "BRL1", "BRZ", "XSGD", "GYEN", "TRYB", "BIDR", "IDRT", "CNHT", "GBPT",
+]);
 
-// The strategy universe is every normally trading OKX USDT spot pair except
-// tokenized stocks and pairs listed less than four days before nowMs; the
-// count sees protected symbols too (they are only excluded from buying).
+// The strategy universe is every normally trading OKX USDT spot crypto pair
+// (instCategory 1), except fiat stablecoins, pairs with an announced expiry
+// (expTime) and pairs listed less than seven days before nowMs.  Blacklisted
+// and delisting pairs are removed from the count by the planner.
 export function liveUsdtSpotUniverse(publicRows, { nowMs = null } = {}) {
   return [...new Set((publicRows ?? []).filter((row) => {
     const instId = String(row?.instId ?? "");
+    const base = String(row?.baseCcy ?? instId.split("-")[0]).toUpperCase();
     const listTime = Number(row?.listTime);
     return /^[A-Z0-9]+-USDT$/.test(instId) && (row.quoteCcy ?? instId.split("-")[1]) === "USDT" && (!row.state || row.state === "live") && (!row.ruleType || row.ruleType === "normal")
-      && !EXCLUDED_INST_CATEGORIES.has(String(row.instCategory ?? ""))
+      && String(row.instCategory ?? "") === CRYPTO_INST_CATEGORY && !FIAT_STABLECOIN_BASES.has(base) && !row.expTime
       && (nowMs == null || !(listTime > 0) || nowMs - listTime >= PANIC_MIN_LISTED_MS);
   }).map((row) => row.instId))].sort();
 }
@@ -186,7 +193,7 @@ export async function composeProductionRuntime(env, injected = {}) {
     engine?.enqueueSellEvents?.(sellService.resumeTriggered?.(active) ?? []);
   }
   const delist = injected.delist ?? new DelistOrchestrator({ transaction, state, orders, coordinator, accountId: config.accountId, market, telemetry }).bind();
-  const protection = injected.protection ?? new InstrumentProtectionService({ state, transaction, telemetry, onProtect: (p) => { delistingInstIds.add(p.instId); buyPlanner?.protected?.add(p.instId); }, onExit: (p) => delist.drive(p.instId) });
+  const protection = injected.protection ?? new InstrumentProtectionService({ state, transaction, telemetry, onProtect: (p) => { delistingInstIds.add(p.instId); buyPlanner?.protect?.(p.instId); }, onExit: (p) => delist.drive(p.instId) });
   buyPlanner = injected.buyPlanner ?? new PanicReboundPlanner({ accountId: config.accountId, instIds, market, coordinator, state, orders, transaction, rest, readyGate, clock: runtime.clock, quoteFreshMs: config.quote_max_age_ms, telemetry, slo, refreshUniverse });
   const startupWait = injected.startupWait ?? createCancellableSleep(injected.timers ?? globalThis);
   const reconciliation = injected.reconciliation ?? new ReconciliationService({ orders, state, transport: rest, ownerGuard, readyGate, clock: runtime.clock, safetyWaitMs: config.owner_safety_wait_ms, sleep: startupWait.sleep, aborted: () => startupWait.cancelled, transaction, telemetry,

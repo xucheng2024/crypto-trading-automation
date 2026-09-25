@@ -47,7 +47,7 @@ class FakeOkx {
     this.instruments = new Map(); this.quotes = new Map(); this.opens = new Map(); this.history = new Map(); this.depth = new Map();
     this.sockets = { public: null, private: null }; this.submitFaults = []; this.submissions = [];
     for (const [instId, open] of Object.entries(instruments)) {
-      this.instruments.set(instId, { instId, state: "live", tickSz: "0.01", lotSz: "0.001", minSz: "0.001", baseCcy: instId.split("-")[0], quoteCcy: "USDT", uTime: "1" });
+      this.instruments.set(instId, { instId, state: "live", tickSz: "0.01", lotSz: "0.001", minSz: "0.001", baseCcy: instId.split("-")[0], quoteCcy: "USDT", instCategory: "1", uTime: "1" });
       this.opens.set(instId, open); this.setQuote(instId, open);
     }
   }
@@ -269,16 +269,16 @@ test("panic-rebound scenarios against a simulated OKX and real PostgreSQL", { ti
       } finally { await s.close(); }
     });
 
-    await t.test("blacklisted symbols count toward the tally but are never bought", async () => {
-      const s = await scenario(cluster, "blacklist", { instruments: EIGHT, blacklist: ["C-USDT"] });
+    await t.test("blacklisted symbols are left out of the count and never bought", async () => {
+      const s = await scenario(cluster, "blacklist", { instruments: EIGHT, blacklist: ["A-USDT"] });
       try {
         await s.advanceTo(at(11));
-        await s.move("A-USDT", 81); await s.move("B-USDT", 81);
-        await s.move("C-USDT", 65);
-        assert.equal(s.buys().length, 0, "C is the 3rd touch but blacklisted");
-        assert.equal(s.decisions("C-USDT").at(-1), "INSTRUMENT_PROTECTED");
+        await s.move("A-USDT", 65);
+        assert.equal(s.decisions("A-USDT").at(-1), "INSTRUMENT_PROTECTED");
+        await s.move("B-USDT", 81); await s.move("C-USDT", 71);
+        assert.equal(s.buys().length, 0, "C is only the 2nd counted touch because the blacklisted A is out of the count");
         await s.move("D-USDT", 71.5);
-        assert.deepEqual(s.buys().map((row) => row.instId), ["D-USDT"], "D is the 4th touch because the blacklisted C counted");
+        assert.deepEqual(s.buys().map((row) => row.instId), ["D-USDT"], "D is the 3rd counted touch");
       } finally { await s.close(); }
     });
 
@@ -467,9 +467,9 @@ test("panic-rebound scenarios against a simulated OKX and real PostgreSQL", { ti
       const s = await scenario(cluster, "newpair", { instruments: EIGHT, startAt: at(23, 50) });
       try {
         const next = "2026-09-25";
-        s.ex.instruments.set("I-USDT", { instId: "I-USDT", state: "live", tickSz: "0.01", lotSz: "0.001", minSz: "0.001", baseCcy: "I", quoteCcy: "USDT", uTime: "2" });
+        s.ex.instruments.set("I-USDT", { instId: "I-USDT", state: "live", tickSz: "0.01", lotSz: "0.001", minSz: "0.001", baseCcy: "I", quoteCcy: "USDT", instCategory: "1", uTime: "2" });
         s.ex.opens.set("I-USDT", 100); s.ex.setQuote("I-USDT", 100);
-        s.ex.instruments.set("J-USDT", { instId: "J-USDT", state: "live", tickSz: "0.01", lotSz: "0.001", minSz: "0.001", baseCcy: "J", quoteCcy: "USDT", uTime: "2", listTime: String(at(0, 0, 0, next) - 86_400_000) });
+        s.ex.instruments.set("J-USDT", { instId: "J-USDT", state: "live", tickSz: "0.01", lotSz: "0.001", minSz: "0.001", baseCcy: "J", quoteCcy: "USDT", instCategory: "1", uTime: "2", listTime: String(at(0, 0, 0, next) - 86_400_000) });
         s.ex.instruments.set("XTSLA-USDT", { instId: "XTSLA-USDT", state: "live", tickSz: "0.01", lotSz: "0.001", minSz: "0.001", baseCcy: "XTSLA", quoteCcy: "USDT", uTime: "2", instCategory: "3" });
         for (const instId of ["J-USDT", "XTSLA-USDT"]) { s.ex.opens.set(instId, 100); s.ex.setQuote(instId, 100); }
         for (const instId of Object.keys(EIGHT)) s.ex.opens.set(instId, 100);

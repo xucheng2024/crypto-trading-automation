@@ -57,17 +57,17 @@ test("P5 panic planner counts every 82% touch, skips the first two forever, and 
   // Planner events can be processed out of exchange order; ranks use touch time.
   assert.equal(await h.observe("D-USDT"), "SKIPPED_FIRST_TWO", "with only D recorded its provisional rank is 1: conservative until earlier touches land");
   for (const instId of ["C-USDT", "A-USDT", "F-USDT", "B-USDT"]) await h.observe(instId);
-  assert.deepEqual(["A-USDT", "B-USDT", "F-USDT", "C-USDT", "D-USDT"].map((instId) => h.planner.rank(instId)), [1, 2, 3, 4, 5]);
+  assert.deepEqual(["A-USDT", "B-USDT", "F-USDT", "C-USDT", "D-USDT"].map((instId) => h.planner.rank(instId)), [1, 2, null, 3, 4], "the blacklisted F is out of the count");
   assert.equal(await h.observe("A-USDT"), "SKIPPED_FIRST_TWO"); assert.equal(await h.observe("B-USDT"), "SKIPPED_FIRST_TWO");
-  assert.equal(await h.observe("F-USDT"), "ABOVE_BUY_PRICE", "a blacklisted symbol still counts toward the tally");
+  assert.equal(await h.observe("F-USDT"), "INSTRUMENT_PROTECTED", "a blacklisted symbol is neither counted nor bought");
   assert.equal(await h.observe("C-USDT"), "ABOVE_BUY_PRICE");
   assert.equal(await h.observe("D-USDT"), "BUY_QUEUED");
-  assert.deepEqual([h.intents[0].instId, h.intents[0].limitPrice, h.intents[0].countRank, h.intents[0].generation, h.intents[0].holdHours, h.intents[0].triggerAt, h.intents[0].strategyDay], ["D-USDT", "72", 5, 0, "3", t + 5, DAY]);
+  assert.deepEqual([h.intents[0].instId, h.intents[0].limitPrice, h.intents[0].countRank, h.intents[0].generation, h.intents[0].holdHours, h.intents[0].triggerAt, h.intents[0].strategyDay], ["D-USDT", "72", 4, 0, "3", t + 5, DAY]);
   assert.equal(h.intents[0].anchor.ts, DAY_START); assert.match(h.intents[0].decisionId, /^D[A-Z2-7]{26}$/);
   h.tick("A-USDT", "60", "60", t + 6);
   assert.equal(await h.observe("A-USDT"), "SKIPPED_FIRST_TWO", "the first two are never bought even far below 72%");
   h.tick("F-USDT", "70", "70", t + 7);
-  assert.equal(await h.observe("F-USDT"), "INSTRUMENT_PROTECTED", "counted but never bought");
+  assert.equal(await h.observe("F-USDT"), "INSTRUMENT_PROTECTED", "still out of the count below 72%");
   h.tick("C-USDT", "71.5", "72.01", t + 8);
   assert.equal(await h.observe("C-USDT"), "ASK_ABOVE_LIMIT", "an IOC at 72% cannot fill against a higher ask");
   h.tick("C-USDT", "71.5", "71.99", t + 9);
@@ -75,6 +75,8 @@ test("P5 panic planner counts every 82% touch, skips the first two forever, and 
   assert.equal(h.state.rows.get(`${DAY}:D-USDT`).count_hit_source, "LIVE"); assert.equal(h.state.rows.get(`${DAY}:D-USDT`).buy_hit_at, String(t + 5));
   assert.ok(h.events.some((event) => event.reason === "COUNT_HIT_RECORDED" && event.instId === "D-USDT"));
   assert.ok(h.events.some((event) => event.reason === "BUY_PRICE_REACHED" && event.instId === "D-USDT"));
+  h.planner.protect("A-USDT");
+  assert.deepEqual(["A-USDT", "B-USDT", "C-USDT", "D-USDT"].map((instId) => h.planner.rank(instId)), [null, 1, 2, 3], "a mid-day delisting leaves the count and only lowers later ranks");
 });
 
 test("P5 panic planner records a coalesced wick and keeps retrying the same symbol with new generations", async () => {

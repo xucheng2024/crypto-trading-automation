@@ -55,7 +55,7 @@ test("P4 full runtime ranks 82% touches in PostgreSQL and submits one owned-USDT
     const day = strategyDay(Date.now()); const dayStart = strategyDayStartMs(day); const baselineTs = Math.max(dayStart, Date.now() - 5_000);
     let owned = "1000"; const submitted = []; const rest = {
       clockSkewMs: 0, clockFresh: () => true, syncServerTime: async () => 1, systemStatus: async () => [],
-      publicInstruments: async () => [...ids, "Q0-BTC"].map((instId) => ({ instId, state: "live", tickSz: "0.1", lotSz: "0.001", minSz: "0.001", baseCcy: instId.split("-")[0], quoteCcy: instId.split("-")[1], uTime: "1" })),
+      publicInstruments: async () => [...ids, "Q0-BTC"].map((instId) => ({ instId, state: "live", tickSz: "0.1", lotSz: "0.001", minSz: "0.001", baseCcy: instId.split("-")[0], quoteCcy: instId.split("-")[1], instCategory: "1", uTime: "1" })),
       tickers: async () => ids.map((instId) => ({ instId, ts: String(baselineTs), last: "100", askPx: "101", bidPx: "99", sodUtc8: "100", low24h: "99" })),
       accountConfig: async () => [{ acctLv: "3", autoLoan: "true" }],
       accountInstruments: async (type) => ids.map((instId) => ({ instId, state: "live", tradeQuoteCcyList: type === "MARGIN" ? "USDT" : "" })),

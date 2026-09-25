@@ -198,7 +198,7 @@ test("Azure ops summary separates waiting, policy, opportunity, and safety block
   for (const reason of ["ABOVE_COUNT_PRICE", "ABOVE_BUY_PRICE", "ASK_ABOVE_LIMIT", "DAILY_OPEN_PENDING"]) assert.equal(classifyDecision(reason), "waiting", reason);
   for (const reason of ["SKIPPED_FIRST_TWO", "PRIOR_POSITION_OPEN", "CAPITAL_EXHAUSTED", "ACTIVE_BUY_ATTEMPT"]) assert.equal(classifyDecision(reason), "policy", reason);
   assert.equal(classifyDecision("BUY_QUEUED"), "opportunity"); assert.equal(classifyDecision("BUY_PRICE_REACHED"), "opportunity");
-  assert.equal(classifyDecision("QUOTE_STALE"), "blocked"); assert.equal(classifyDecision("INSTRUMENT_PROTECTED"), "blocked");
+  assert.equal(classifyDecision("QUOTE_STALE"), "blocked"); assert.equal(classifyDecision("INSTRUMENT_PROTECTED"), "policy");
   assert.equal(classifyBlock("QUOTE_STALE"), "LIKELY_RECOVERABLE"); assert.equal(classifyBlock("ABOVE_BUY_PRICE"), "MARKET_MOVED"); assert.equal(classifyBlock("HARD_STOP"), "SAFETY_BOUNDARY");
   const decisions = traceEvents([
     { timestamp: "2", message: "trading_decision QUOTE_STALE", customDimensions: JSON.stringify({ instId: "BTC-USDT", reason: "QUOTE_STALE", last: "1", breakoutPrice: "0.9" }) },

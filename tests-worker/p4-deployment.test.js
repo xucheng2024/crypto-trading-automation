@@ -47,13 +47,14 @@ test("P5 REST baseline discovers every live USDT spot pair and counts untradable
   const rows = [
     { instId: "BTC-USDT", state: "live", quoteCcy: "USDT" }, { instId: "NOACCT-USDT", state: "live", quoteCcy: "USDT" }, { instId: "ETH-BTC", state: "live", quoteCcy: "BTC" },
     { instId: "HALT-USDT", state: "suspend", quoteCcy: "USDT" }, { instId: "PRE-USDT", state: "live", quoteCcy: "USDT", ruleType: "pre_market" },
-  ].map((row) => ({ tickSz: "0.1", lotSz: "0.001", minSz: "0.001", baseCcy: row.instId.split("-")[0], uTime: "1", ...row }));
-  assert.deepEqual(liveUsdtSpotUniverse(rows), ["BTC-USDT", "NOACCT-USDT"]);
+    { instId: "USDC-USDT", state: "live", quoteCcy: "USDT" }, { instId: "AUDF-USDT", state: "live", quoteCcy: "USDT" }, { instId: "EXP-USDT", state: "live", quoteCcy: "USDT", expTime: "1791014400000" },
+  ].map((row) => ({ tickSz: "0.1", lotSz: "0.001", minSz: "0.001", baseCcy: row.instId.split("-")[0], uTime: "1", instCategory: "1", ...row }));
+  assert.deepEqual(liveUsdtSpotUniverse(rows), ["BTC-USDT", "NOACCT-USDT"], "fiat stablecoins and pairs with an announced expiry are left out");
   const DAY = 86_400_000; const now = 10 * DAY;
-  const extra = [{ instId: "XAAPL-USDT", state: "live", quoteCcy: "USDT", instCategory: "3" }, { instId: "PAXG-USDT", state: "live", quoteCcy: "USDT", instCategory: "4" },
-    { instId: "NEW-USDT", state: "live", quoteCcy: "USDT", instCategory: "1", listTime: String(now - 4 * DAY + 1) }, { instId: "AGED-USDT", state: "live", quoteCcy: "USDT", instCategory: "1", listTime: String(now - 4 * DAY) }];
-  assert.deepEqual(liveUsdtSpotUniverse([...rows, ...extra], { nowMs: now }), ["AGED-USDT", "BTC-USDT", "NOACCT-USDT", "PAXG-USDT"], "tokenized stocks and pairs listed under four days are left out");
-  assert.ok(liveUsdtSpotUniverse(extra, { nowMs: now + 1 }).includes("NEW-USDT"), "a pair joins once it has been listed four full days");
+  const extra = [{ instId: "XAAPL-USDT", state: "live", quoteCcy: "USDT", instCategory: "3" }, { instId: "PAXG-USDT", state: "live", quoteCcy: "USDT", instCategory: "4" }, { instId: "NOCAT-USDT", state: "live", quoteCcy: "USDT" },
+    { instId: "NEW-USDT", state: "live", quoteCcy: "USDT", instCategory: "1", listTime: String(now - 7 * DAY + 1) }, { instId: "AGED-USDT", state: "live", quoteCcy: "USDT", instCategory: "1", listTime: String(now - 7 * DAY) }];
+  assert.deepEqual(liveUsdtSpotUniverse([...rows, ...extra], { nowMs: now }), ["AGED-USDT", "BTC-USDT", "NOACCT-USDT"], "only instCategory 1 crypto listed at least seven days");
+  assert.ok(liveUsdtSpotUniverse(extra, { nowMs: now + 1 }).includes("NEW-USDT"), "a pair joins once it has been listed seven full days");
   const instruments = new Map();
   const rest = { syncServerTime: async () => {}, systemStatus: async () => [], publicInstruments: async () => rows, tickers: async () => [], accountConfig: async () => [{ acctLv: "3", autoLoan: "true" }], accountInstruments: async (type) => type === "SPOT" ? rows.filter((row) => row.instId === "BTC-USDT") : [], leverageInfo: async () => [], balance: async () => [{ totalEq: "100", adjEq: "100" }] };
   const result = await runRestBaseline({ rest, market: { updateInstrument: (row) => instruments.set(row.instId, row), updateTicker: () => {} }, account: { update: () => true }, readyGate: { set: () => {} }, clock: { nowMs: () => 3 } });

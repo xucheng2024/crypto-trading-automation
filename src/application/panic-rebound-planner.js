@@ -85,8 +85,12 @@ export class PanicReboundPlanner {
   _emit(event) { try { Promise.resolve(this.telemetry(event)).catch(() => {}); } catch { /* observability only */ } }
   restore({ protection = [], ledger = [] } = {}) {
     this.protected = new Set(protection.filter((row) => ["BLACKLISTED", "EXITING", "EXITED", "DELIST_DUST"].includes(row.state)).map((row) => field(row, "inst_id", "instId")));
-    this.ledger = ledger.map((row) => ({ ...row }));
+    this.ranks = null; this.ledger = ledger.map((row) => ({ ...row }));
   }
+  // Blacklisted and delisting pairs leave the count as well as buying.  A
+  // mid-day removal can only lower later ranks, so it never creates a buy.
+  protect(instId) { this.protected.add(instId); this.ranks = null; }
+  rankedRows() { return [...this.rows.values()].filter((row) => !this.protected.has(row.instId)); }
   async reloadLedger() { this.ledger = await this.transaction((tx) => this.state.listManagedFills(tx, this.accountId)); return this.ledger; }
   // Capital from an earlier day is still committed until that position is
   // sold; today's own fills never block further buys with leftover USDT.
@@ -106,7 +110,7 @@ export class PanicReboundPlanner {
     });
   }
   rank(instId) {
-    this.ranks ??= rankCountHits([...this.rows.values()]);
+    this.ranks ??= rankCountHits(this.rankedRows());
     return this.ranks.get(instId) ?? null;
   }
   _applyRows(day, rows) {
@@ -236,6 +240,7 @@ export class PanicReboundPlanner {
     const base = { type: "trading_decision", side: "BUY", strategyDay: day, last: quote?.last, askPx: quote?.askPx, quoteTs: quote?.ts, quoteAgeMs: quoteStatus.sourceAgeMs, quoteReceiptAgeMs: quoteStatus.receiptAgeMs, quoteFreshness: quoteStatus.reason, openPrice: row?.openPrice, countPrice: row?.countPrice, buyPrice: row?.buyPrice, configHash: PANIC_STRATEGY_HASH };
     const decide = (reason, extra = {}, force = false) => { this.emitDecision(instId, { ...base, ...extra, reason }, force); return { queued: false, reason }; };
     if (!row) { this._scheduleRefill(); return decide("DAILY_OPEN_PENDING"); }
+    if (this.protected.has(instId)) return decide("INSTRUMENT_PROTECTED");
     if (row.countHitAt == null) {
       const touch = this.market.panicTouch?.(instId, day)?.count;
       if (!touch) return decide("ABOVE_COUNT_PRICE");
@@ -251,8 +256,7 @@ export class PanicReboundPlanner {
     Object.assign(base, { buyHitAt: row.buyHitAt });
     const instrument = this.market.instrument(instId);
     let reason;
-    if (this.protected.has(instId)) reason = "INSTRUMENT_PROTECTED";
-    else if (!instrument || instrument.state !== "live") reason = "INSTRUMENT_NOT_TRADABLE";
+    if (!instrument || instrument.state !== "live") reason = "INSTRUMENT_NOT_TRADABLE";
     else if (!quote.askPx || compareDecimal(quote.askPx, row.buyPrice) > 0) reason = "ASK_ABOVE_LIMIT";
     else if (!this.rest.clockFresh(CLOCK_SYNC_STALE_AFTER_MS)) reason = "CLOCK_SYNC_STALE";
     else if (exchangeNowMs >= strategyDayCloseSellMs(day)) reason = "DAY_CLOSED";
@@ -276,7 +280,7 @@ export class PanicReboundPlanner {
     return { queued, reason: queued ? "BUY_QUEUED" : "BUY_QUEUE_REJECTED" };
   }
   pipelineCoverage() {
-    return summarizePanicPipelineCoverage({ instIds: this.instIds, market: this.market, rows: this.rows, day: this.currentDay, exchangeNowMs: this.exchangeNowMs(), quoteFreshMs: this.quoteFreshMs, evaluatorSeen: this.evaluatorSeen, ranks: this.ranks ?? rankCountHits([...this.rows.values()]) });
+    return summarizePanicPipelineCoverage({ instIds: this.instIds, market: this.market, rows: this.rows, day: this.currentDay, exchangeNowMs: this.exchangeNowMs(), quoteFreshMs: this.quoteFreshMs, evaluatorSeen: this.evaluatorSeen, ranks: this.ranks ?? rankCountHits(this.rankedRows()) });
   }
   health() {
     const now = this.clock.nowMs(); const ages = this.instIds.map((instId) => this.lastEvaluationAt.get(instId)).filter((observedAt) => Number.isFinite(observedAt)).map((observedAt) => Math.max(0, now - observedAt));
