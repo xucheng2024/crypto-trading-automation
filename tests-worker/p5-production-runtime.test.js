@@ -201,6 +201,22 @@ test("P5 panic planner pipeline coverage counts stages without listing names", a
   assert.deepEqual(h.planner.health(), { decision_missing_instruments: 2, decision_oldest_age_ms: 0 });
 });
 
+test("P5 panic planner re-reads manual blacklists at each new strategy day", async () => {
+  const state = memoryState(); const protection = [];
+  state.listProtection = async () => protection.map((row) => ({ ...row }));
+  const h = harness({ instIds: ["A-USDT", "B-USDT"], state });
+  await h.planner.prime();
+  assert.equal(h.planner.protected.has("A-USDT"), false);
+  protection.push({ inst_id: "A-USDT", state: "BLACKLISTED" });
+  await h.planner.prime();
+  assert.equal(h.planner.protected.has("A-USDT"), false, "the same day does not re-read the table");
+  h.clock.value += 24 * HOUR;
+  await h.planner.prime();
+  assert.equal(h.planner.protected.has("A-USDT"), true, "a blacklist written while running applies from the next day");
+  h.tick("A-USDT", "81", "81", h.clock.value + 1);
+  assert.equal(await h.observe("A-USDT"), "INSTRUMENT_PROTECTED");
+});
+
 test("P5 panic ranking ignores persisted touches of pairs outside the configured universe", async () => {
   const state = memoryState();
   // A wider earlier revision recorded two outside touches before A's today.

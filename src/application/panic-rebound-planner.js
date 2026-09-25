@@ -9,6 +9,7 @@ const BACKFILL_BAR = "5m";
 const BACKFILL_LIMIT = 300;
 
 function field(row, snake, camel) { return row?.[snake] ?? row?.[camel]; }
+function protectedInstIds(rows) { return new Set((rows ?? []).filter((row) => ["BLACKLISTED", "EXITING", "EXITED", "DELIST_DUST"].includes(row.state)).map((row) => field(row, "inst_id", "instId"))); }
 function optionalNumber(value) { return value === null || value === undefined ? null : Number(value); }
 
 export function normalizePanicDayRow(row) {
@@ -84,8 +85,17 @@ export class PanicReboundPlanner {
   exchangeNowMs() { return this.clock.nowMs() + Number(this.rest.clockSkewMs ?? 0); }
   _emit(event) { try { Promise.resolve(this.telemetry(event)).catch(() => {}); } catch { /* observability only */ } }
   restore({ protection = [], ledger = [] } = {}) {
-    this.protected = new Set(protection.filter((row) => ["BLACKLISTED", "EXITING", "EXITED", "DELIST_DUST"].includes(row.state)).map((row) => field(row, "inst_id", "instId")));
+    this.protected = protectedInstIds(protection);
     this.ranks = null; this.ledger = ledger.map((row) => ({ ...row }));
+  }
+  // Each new day re-reads the protection table so a manual blacklist takes
+  // effect without a restart.  It only ever adds: removals need a restart.
+  async reloadProtection(day) {
+    if (!this.state.listProtection) return;
+    try {
+      for (const instId of protectedInstIds(await this.transaction((tx) => this.state.listProtection(tx)))) this.protected.add(instId);
+      this.ranks = null;
+    } catch (error) { this._emit({ type: "strategy_baseline", reason: "PROTECTION_RELOAD_FAILED", strategyDay: day, error: error?.message }); }
   }
   // Blacklisted and delisting pairs leave the count as well as buying.  A
   // mid-day removal can only lower later ranks, so it never creates a buy.
@@ -169,7 +179,8 @@ export class PanicReboundPlanner {
         // The startup baseline already built today's universe; each later day
         // re-reads live USDT spot pairs so new listings join the count.
         if (!this.universeDay) this.universeDay = day;
-        else if (this.universeDay !== day && this.refreshUniverse) {
+        else if (this.universeDay !== day) await this.reloadProtection(day);
+        if (this.universeDay !== day && this.refreshUniverse) {
           try { await this.refreshUniverse(); this.universeDay = day; }
           catch (error) { this._emit({ type: "strategy_baseline", reason: "UNIVERSE_REFRESH_FAILED", strategyDay: day, error: error?.message }); }
         }
