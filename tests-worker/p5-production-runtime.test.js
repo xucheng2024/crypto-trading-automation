@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { PanicReboundPlanner, firstBackfillTouch, openRowsFromTickers } from "../src/application/panic-rebound-planner.js";
+import { PanicReboundPlanner, firstBackfillTouch, openRowsFromTickers, summarizePanicPipelineCoverage } from "../src/application/panic-rebound-planner.js";
 import { ReconciliationService } from "../src/application/reconciliation-service.js";
 import { MarketProjection, ReadyGate } from "../src/application/trading-engine.js";
 import { strategyDayStartMs } from "../src/domain/rules.js";
@@ -194,9 +194,26 @@ test("P5 panic planner pipeline coverage counts stages without listing names", a
   await h.planner.prime();
   h.tick("A-USDT", "70", "70"); await h.observe("A-USDT");
   const coverage = h.planner.pipelineCoverage();
-  assert.deepEqual(coverage, { type: "instrument_pipeline_coverage", reason: "PIPELINE_COVERAGE", runtime: 3, strategyDay: DAY, quote_ready: 3, open_ready: 3, count_hit: 1, candidate: 0, buy_hit: 0, evaluator_seen: 1, no_market_data: 0, open_missing: 0 });
+  assert.deepEqual(coverage, { type: "instrument_pipeline_coverage", reason: "PIPELINE_COVERAGE", runtime: 3, strategyDay: DAY, quote_ready: 3, quote_stale: 0, open_ready: 3, count_hit: 1, candidate: 0, buy_hit: 0, evaluator_seen: 1, no_market_data: 0, open_missing: 0 });
   assert.equal(JSON.stringify(coverage).includes("A-USDT"), false);
   assert.deepEqual(h.planner.health(), { decision_missing_instruments: 2, decision_oldest_age_ms: 0 });
+});
+
+test("P5 panic ranking ignores persisted touches of pairs outside the configured universe", async () => {
+  const state = memoryState();
+  // A wider earlier revision recorded two outside touches before A's today.
+  for (const [instId, at] of [["WIDE1-USDT", DAY_START + HOUR], ["WIDE2-USDT", DAY_START + 2 * HOUR]]) state.rows.set(`${DAY}:${instId}`, { strategy_day: DAY, inst_id: instId, open_price: "100", open_ts: String(DAY_START), open_source: "TICKER_SOD_UTC8", tick_sz: "0.01", count_price: "82", buy_price: "72", count_hit_at: String(at), count_hit_price: "81", count_hit_source: "LIVE", buy_hit_at: null, buy_hit_price: null });
+  const h = harness({ instIds: ["A-USDT", "B-USDT", "C-USDT"], state });
+  await h.planner.prime();
+  assert.equal(h.planner.rows.has("WIDE1-USDT"), false);
+  h.tick("A-USDT", "81", "81", DAY_START + 10 * HOUR + 1); await h.observe("A-USDT");
+  assert.equal(h.planner.rank("A-USDT"), 1, "only configured pairs count toward the first-two skip");
+});
+
+test("P5 panic pipeline coverage separates stale quotes from missing market data", () => {
+  const statuses = { "A-USDT": { fresh: true, quote: {} }, "B-USDT": { fresh: false, reason: "SOURCE_STALE", quote: {} }, "C-USDT": { fresh: false, reason: "MISSING", quote: null } };
+  const coverage = summarizePanicPipelineCoverage({ instIds: Object.keys(statuses), market: { quoteStatus: (instId) => statuses[instId] }, rows: new Map(), day: DAY, exchangeNowMs: 0 });
+  assert.equal(coverage.quote_ready, 1); assert.equal(coverage.quote_stale, 1); assert.equal(coverage.no_market_data, 1);
 });
 
 test("P5 private terminal order observation loads fills and closes the durable attempt", async () => {

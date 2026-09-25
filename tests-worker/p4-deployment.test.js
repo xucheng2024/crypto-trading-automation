@@ -43,19 +43,22 @@ test("P4 REST baseline validates server, account, leverage and configured instru
   await assert.rejects(runRestBaseline({ rest: { ...rest, systemStatus: async () => [{ state: "ongoing" }] }, instIds: ["BTC-USDT"], market: {}, account: {}, readyGate: {}, clock: { nowMs: () => 3 } }), /OKX_SERVICE_UNAVAILABLE/);
 });
 
-test("P5 REST baseline discovers every live USDT spot pair and counts untradable routes without buying them", async () => {
+test("P5 REST baseline narrows OKX_INSTRUMENTS to live USDT spot pairs and counts untradable routes without buying them", async () => {
   const rows = [
     { instId: "BTC-USDT", state: "live", quoteCcy: "USDT" }, { instId: "NOACCT-USDT", state: "live", quoteCcy: "USDT" }, { instId: "ETH-BTC", state: "live", quoteCcy: "BTC" },
     { instId: "HALT-USDT", state: "suspend", quoteCcy: "USDT" }, { instId: "PRE-USDT", state: "live", quoteCcy: "USDT", ruleType: "pre_market" },
   ].map((row) => ({ tickSz: "0.1", lotSz: "0.001", minSz: "0.001", baseCcy: row.instId.split("-")[0], uTime: "1", ...row }));
   assert.deepEqual(liveUsdtSpotUniverse(rows), ["BTC-USDT", "NOACCT-USDT"]);
+  const allowlist = ["BTC-USDT", "NOACCT-USDT", "HALT-USDT", "GONE-USDT"];
+  assert.deepEqual(liveUsdtSpotUniverse([...rows, { instId: "EXTRA-USDT", state: "live", quoteCcy: "USDT" }], allowlist), ["BTC-USDT", "NOACCT-USDT"], "unlisted pairs are never added; suspended or missing configured pairs drop out");
   const instruments = new Map();
   const rest = { syncServerTime: async () => {}, systemStatus: async () => [], publicInstruments: async () => rows, tickers: async () => [], accountConfig: async () => [{ acctLv: "3", autoLoan: "true" }], accountInstruments: async (type) => type === "SPOT" ? rows.filter((row) => row.instId === "BTC-USDT") : [], leverageInfo: async () => [], balance: async () => [{ totalEq: "100", adjEq: "100" }] };
-  const result = await runRestBaseline({ rest, market: { updateInstrument: (row) => instruments.set(row.instId, row), updateTicker: () => {} }, account: { update: () => true }, readyGate: { set: () => {} }, clock: { nowMs: () => 3 } });
+  const result = await runRestBaseline({ rest, allowlist, market: { updateInstrument: (row) => instruments.set(row.instId, row), updateTicker: () => {} }, account: { update: () => true }, readyGate: { set: () => {} }, clock: { nowMs: () => 3 } });
   assert.deepEqual(result.instIds, ["BTC-USDT", "NOACCT-USDT"], "the count universe includes pairs this account cannot trade");
   assert.deepEqual(result.unavailable, ["NOACCT-USDT"]); assert.equal(result.executionRoutes.has("NOACCT-USDT"), false, "no route means the Coordinator never buys it");
   assert.ok(instruments.has("NOACCT-USDT"));
-  await assert.rejects(runRestBaseline({ rest: { ...rest, publicInstruments: async () => rows.filter((row) => row.quoteCcy !== "USDT") }, market: {}, account: {}, readyGate: {}, clock: { nowMs: () => 3 } }), /OKX_UNIVERSE_EMPTY/);
+  await assert.rejects(runRestBaseline({ rest: { ...rest, publicInstruments: async () => rows.filter((row) => row.quoteCcy !== "USDT") }, allowlist, market: {}, account: {}, readyGate: {}, clock: { nowMs: () => 3 } }), /OKX_UNIVERSE_EMPTY/);
+  await assert.rejects(runRestBaseline({ rest, market: {}, account: {}, readyGate: {}, clock: { nowMs: () => 3 } }), /OKX_INSTRUMENTS_REQUIRED/, "an empty allowlist never widens to the whole market");
 });
 
 test("P5 route refresh atomically changes only future routing and removes unavailable instruments", async () => {
@@ -697,11 +700,11 @@ test("P4 production composition routes fake WS baselines into projections and ke
   } finally { await composed.closeWebSockets(); await composed.stopTimers(); await composed.releaseOwner(); }
 });
 
-test("P4 default composition takes its universe from the REST baseline, not OKX_INSTRUMENTS", async () => {
+test("P4 default composition waits for the REST baseline before adopting its OKX_INSTRUMENTS universe", async () => {
   const composed = await composeProductionRuntime({ TRADING_MODE: 'OFF', OKX_INSTRUMENTS: 'LEGACY-USDT', KEY_VAULT_URI: 'https://vault.example', POSTGRES_URL: 'postgresql://host/db' }, {
     keyVault: { readOkxCredentials: async () => ({ apiKey: 'a', secretKey: 'b', passphrase: 'c' }) }, pool: { transaction: async (fn) => fn({}), end: async () => {} }, ownerClient: {}, ownerGuard: { onLost: () => () => {} },
   });
-  assert.deepEqual(composed.buyPlanner.instIds, [], 'the legacy configured list no longer drives trading');
+  assert.deepEqual(composed.buyPlanner.instIds, [], 'the configured list is only adopted after the baseline confirms it is live');
   assert.equal(composed.ws.business, undefined);
 });
 

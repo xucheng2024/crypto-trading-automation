@@ -57,24 +57,31 @@ export async function refreshExecutionRoutes({ rest, instIds, executionRoutes, q
   return { margin: [...executionRoutes.values()].filter((route) => route === "margin").length, spot: [...executionRoutes.values()].filter((route) => route === "spot").length, unavailable: profile.unavailable.length };
 }
 
-// The strategy universe is every live USDT spot pair OKX lists today; the
-// count must see the whole market, including protected symbols (which are
-// only excluded from buying).
-export function liveUsdtSpotUniverse(publicRows) {
+// The strategy universe is the configured OKX_INSTRUMENTS list, narrowed to
+// the pairs OKX lists as live USDT spot today; the count sees every configured
+// pair, including protected symbols (which are only excluded from buying).
+export function liveUsdtSpotUniverse(publicRows, allowlist = null) {
+  const allowed = allowlist ? new Set(allowlist) : null;
   return [...new Set((publicRows ?? []).filter((row) => {
     const instId = String(row?.instId ?? "");
-    return /^[A-Z0-9]+-USDT$/.test(instId) && (row.quoteCcy ?? instId.split("-")[1]) === "USDT" && (!row.state || row.state === "live") && (!row.ruleType || row.ruleType === "normal");
+    return /^[A-Z0-9]+-USDT$/.test(instId) && (row.quoteCcy ?? instId.split("-")[1]) === "USDT" && (!row.state || row.state === "live") && (!row.ruleType || row.ruleType === "normal") && (!allowed || allowed.has(instId));
   }).map((row) => row.instId))].sort();
 }
 
-export async function runRestBaseline({ rest, instIds = null, market, account, readyGate, clock, executionRoutes = new Map(), quoteCurrencies = new Map() }) {
+// An empty OKX_INSTRUMENTS must never silently widen trading to the whole market.
+function requireAllowlist(allowlist) {
+  if (!allowlist?.length) throw new Error("OKX_INSTRUMENTS_REQUIRED");
+  return allowlist;
+}
+
+export async function runRestBaseline({ rest, instIds = null, allowlist = null, market, account, readyGate, clock, executionRoutes = new Map(), quoteCurrencies = new Map() }) {
   await rest.syncServerTime();
   const status = await rest.systemStatus();
   if (!serviceAvailable(status, clock.nowMs())) throw new Error("OKX_SERVICE_UNAVAILABLE");
   const [publicRows, tickers, accountConfig, spotRows, marginRows, balances] = await Promise.all([
     rest.publicInstruments("SPOT"), rest.tickers("SPOT"), rest.accountConfig(), rest.accountInstruments("SPOT"), rest.accountInstruments("MARGIN"), rest.balance(),
   ]);
-  instIds ??= liveUsdtSpotUniverse(publicRows);
+  instIds ??= liveUsdtSpotUniverse(publicRows, requireAllowlist(allowlist));
   if (!instIds.length) throw new Error("OKX_UNIVERSE_EMPTY");
   // Pairs the account cannot trade still count toward the panic tally; they
   // are left without an execution route and are therefore never bought.
@@ -129,8 +136,8 @@ export async function composeProductionRuntime(env, injected = {}) {
   const orders = injected.orders ?? new OrderRepository(); const state = injected.state ?? new TradingStateRepository();
   const slo = injected.slo ?? new VirtualSloMetrics(runtime.clock);
   const transaction = injected.transaction ?? asTransaction(pool); const profile = OKX_PROFILES[config.entityProfile]; const rest = injected.rest ?? new OkxRestClient({ credentials, profile, clock: runtime.clock, timeoutMs: config.http_timeout_ms, requestGapMs: injected.requestGapMs ?? 60, slo });
-  // The trading universe is discovered from OKX at baseline (every live USDT
-  // spot pair) and refreshed each strategy day; tests may pin it.  This array
+  // The trading universe is OKX_INSTRUMENTS narrowed at baseline to live USDT
+  // spot pairs and refreshed each strategy day; tests may pin it.  This array
   // is shared by reference, so it is only ever replaced in place.
   const fixedUniverse = injected.instIds ?? null;
   const instIds = [...(fixedUniverse ?? [])];
@@ -152,7 +159,7 @@ export async function composeProductionRuntime(env, injected = {}) {
   const refreshUniverse = async () => {
     if (fixedUniverse) return { instruments: instIds.length };
     const rows = await rest.publicInstruments("SPOT");
-    const next = liveUsdtSpotUniverse(rows);
+    const next = liveUsdtSpotUniverse(rows, requireAllowlist(config.instrumentIds));
     if (!next.length) throw new Error("OKX_UNIVERSE_EMPTY");
     const byId = new Map(rows.map((row) => [row.instId, row]));
     for (const instId of next) {
@@ -248,7 +255,7 @@ export async function composeProductionRuntime(env, injected = {}) {
     return reconcileAndRestoreDatabase({ transaction, orders, reconciliation, accountId: config.accountId, readyGate, ownerGuard, telemetry });
   };
   const baseline = injected.baseline ?? (async () => {
-    const result = await runRestBaseline({ rest, instIds: fixedUniverse, market, account, readyGate, clock: runtime.clock, executionRoutes, quoteCurrencies });
+    const result = await runRestBaseline({ rest, instIds: fixedUniverse, allowlist: config.instrumentIds, market, account, readyGate, clock: runtime.clock, executionRoutes, quoteCurrencies });
     setUniverse(result.instIds);
     return result;
   });

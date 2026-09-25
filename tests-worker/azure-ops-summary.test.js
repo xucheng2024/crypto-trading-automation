@@ -278,6 +278,7 @@ test("Azure ops summary prints pipeline coverage counts without instrument names
   });
   assert.equal(formatPipelineCoverageLine(row), "Pipeline coverage: runtime=3 quote_ready=2 open_ready=3 count_hit=2 candidate=0 buy_hit=0 evaluator_seen=1 | missing no_market_data=1 open_missing=0");
   assert.equal(formatPipelineCoverageLine(row).includes("BTC"), false);
+  assert.equal(formatPipelineCoverageLine(parsePipelineCoverageRow({ runtime: "3", quote_ready: "1", quote_stale: "2", open_ready: "3", count_hit: "0", candidate: "0", buy_hit: "0", evaluator_seen: "3", no_market_data: "0", open_missing: "0" })), "Pipeline coverage: runtime=3 quote_ready=1 quote_stale=2 open_ready=3 count_hit=0 candidate=0 buy_hit=0 evaluator_seen=3 | missing no_market_data=0 open_missing=0");
 });
 
 test("Azure ops summary labels decision telemetry against runtime and repo-enabled counts", () => {
@@ -338,4 +339,8 @@ test("Azure ops summary fails closed on unsafe runtime state", () => {
   assert.equal(assessRuntime({ ...base, metric: { ready: 1, exitReady: 0, exitBacklog: 0 } }).status, "UNHEALTHY");
   assert.equal(assessRuntime({ ...base, metric: { ready: 1, exitReady: 1, exitBacklog: 1 } }).status, "UNHEALTHY");
   assert.equal(assessRuntime({ ...base, active: [...base.active, base.active[0]] }).status, "UNHEALTHY");
+  const lagging = assessRuntime({ ...base, metric: { ...base.metric, sourceLagP50: 30_000 } });
+  assert.equal(lagging.healthy, true);
+  assert.deepEqual(lagging.warnings, ["MARKET_DATA_LAGGING"]);
+  assert.equal(assessRuntime({ ...base, metric: { ...base.metric, sourceLagP50: 120 } }).status, "HEALTHY");
 });

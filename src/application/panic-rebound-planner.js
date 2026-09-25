@@ -47,11 +47,15 @@ export function firstBackfillTouch({ candles = [], dayStart, countPrice }) {
 }
 
 export function summarizePanicPipelineCoverage({ instIds = [], market, rows, day, exchangeNowMs, quoteFreshMs = 1_500, evaluatorSeen, ranks }) {
-  let quoteReady = 0, openReady = 0, countHit = 0, candidate = 0, buyHit = 0, seen = 0, noMarket = 0, openMissing = 0;
+  let quoteReady = 0, quoteStale = 0, openReady = 0, countHit = 0, candidate = 0, buyHit = 0, seen = 0, noMarket = 0, openMissing = 0;
   for (const instId of instIds) {
-    const hasQuote = market?.quoteStatus?.(instId, quoteFreshMs, exchangeNowMs)?.fresh === true;
+    // A quote that exists but is older than the freshness bound is stale, not
+    // missing: quiet pairs and ingest lag must not read as absent market data.
+    const status = market?.quoteStatus?.(instId, quoteFreshMs, exchangeNowMs);
     const row = day ? rows?.get(instId) : null;
-    if (hasQuote) quoteReady += 1; else noMarket += 1;
+    if (status?.fresh === true) quoteReady += 1;
+    else if (status?.quote) quoteStale += 1;
+    else noMarket += 1;
     if (row) openReady += 1; else openMissing += 1;
     if (row?.countHitAt != null) countHit += 1;
     if ((ranks?.get(instId) ?? 0) > PANIC_SKIP_COUNT) candidate += 1;
@@ -60,7 +64,7 @@ export function summarizePanicPipelineCoverage({ instIds = [], market, rows, day
   }
   return {
     type: "instrument_pipeline_coverage", reason: "PIPELINE_COVERAGE", runtime: instIds.length, strategyDay: day ?? undefined,
-    quote_ready: quoteReady, open_ready: openReady, count_hit: countHit, candidate, buy_hit: buyHit, evaluator_seen: seen,
+    quote_ready: quoteReady, quote_stale: quoteStale, open_ready: openReady, count_hit: countHit, candidate, buy_hit: buyHit, evaluator_seen: seen,
     no_market_data: noMarket, open_missing: openMissing,
   };
 }
@@ -110,7 +114,9 @@ export class PanicReboundPlanner {
     const next = new Map();
     for (const raw of rows) {
       const row = normalizePanicDayRow(raw);
-      if (!row || row.strategyDay !== day) continue;
+      // Rows persisted for pairs outside today's universe (e.g. by an earlier
+      // revision with a wider list) must never enter the count ranking.
+      if (!row || row.strategyDay !== day || !this.universe.has(row.instId)) continue;
       next.set(row.instId, row);
       this.market.setPanicLevels?.(row.instId, { day, countPrice: row.countPrice, buyPrice: row.buyPrice });
     }

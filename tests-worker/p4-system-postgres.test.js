@@ -55,7 +55,7 @@ test("P4 full runtime ranks 82% touches in PostgreSQL and submits one owned-USDT
     const day = strategyDay(Date.now()); const dayStart = strategyDayStartMs(day); const baselineTs = Math.max(dayStart, Date.now() - 5_000);
     let owned = "1000"; const submitted = []; const rest = {
       clockSkewMs: 0, clockFresh: () => true, syncServerTime: async () => 1, systemStatus: async () => [],
-      publicInstruments: async () => [...ids, "Q0-BTC"].map((instId) => ({ instId, state: "live", tickSz: "0.1", lotSz: "0.001", minSz: "0.001", baseCcy: instId.split("-")[0], quoteCcy: instId.split("-")[1], uTime: "1" })),
+      publicInstruments: async () => [...ids, "Q0-BTC", "UNLISTED-USDT"].map((instId) => ({ instId, state: "live", tickSz: "0.1", lotSz: "0.001", minSz: "0.001", baseCcy: instId.split("-")[0], quoteCcy: instId.split("-")[1], uTime: "1" })),
       tickers: async () => ids.map((instId) => ({ instId, ts: String(baselineTs), last: "100", askPx: "101", bidPx: "99", sodUtc8: "100", low24h: "99" })),
       accountConfig: async () => [{ acctLv: "3", autoLoan: "true" }],
       accountInstruments: async (type) => ids.map((instId) => ({ instId, state: "live", tradeQuoteCcyList: type === "MARGIN" ? "USDT" : "" })),
@@ -65,7 +65,7 @@ test("P4 full runtime ranks 82% touches in PostgreSQL and submits one owned-USDT
       candles: async () => [],
       submitBatchOrders: async (payloads) => { submitted.push(...payloads); owned = "5"; return payloads.map((payload, index) => ({ clOrdId: payload.clOrdId, status: "SUBMITTED", ordId: `p4-${index}` })); },
     };
-    const composed = await composeProductionRuntime({ TRADING_MODE: "FULL", OKX_INSTRUMENTS: "LEGACY-USDT", KEY_VAULT_URI: "https://vault.example", POSTGRES_URL: "postgresql://local/postgres" }, {
+    const composed = await composeProductionRuntime({ TRADING_MODE: "FULL", OKX_INSTRUMENTS: [...ids, "GONE-USDT"].join(","), KEY_VAULT_URI: "https://vault.example", POSTGRES_URL: "postgresql://local/postgres" }, {
       socketFactory, ownerGuard: owner, ownerClient: client,
       keyVault: { readOkxCredentials: async () => ({ apiKey: "a", secretKey: "b", passphrase: "c" }) },
       pool: { query: (...args) => client.query(...args), transaction: (fn) => transaction(client, fn), end: async () => {} },
@@ -74,7 +74,7 @@ test("P4 full runtime ranks 82% touches in PostgreSQL and submits one owned-USDT
     try {
       await composed.start(); sockets.forEach((socket) => socket.emit("open")); await new Promise((resolve) => setImmediate(resolve));
       assert.equal(sockets.length, 2, "public and private only; no candle socket");
-      assert.deepEqual(composed.buyPlanner.instIds, [...ids].sort(), "the universe is every live USDT spot pair from OKX, not OKX_INSTRUMENTS");
+      assert.deepEqual(composed.buyPlanner.instIds, [...ids].sort(), "the universe is OKX_INSTRUMENTS narrowed to live USDT spot pairs; unlisted pairs are ignored");
       for (const arg of [...ids.map((instId) => ({ channel: "tickers", instId })), { channel: "instruments", instType: "SPOT" }, { channel: "status" }]) sockets[0].emit("message", { event: "subscribe", code: "0", arg });
       sockets[1].emit("message", { event: "login", code: "0" }); for (const arg of [{ channel: "account" }, { channel: "balance_and_position" }, { channel: "orders", instType: "ANY" }]) sockets[1].emit("message", { event: "subscribe", code: "0", arg });
       sockets[1].emit("message", { arg: { channel: "account" }, data: [{ totalEq: "1000", adjEq: "1000", uTime: "1" }] });

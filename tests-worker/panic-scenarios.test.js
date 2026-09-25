@@ -150,7 +150,7 @@ async function transaction(pool, fn) {
 
 const settle = async (count = 5) => { for (let index = 0; index < count; index += 1) await new Promise((resolve) => setImmediate(resolve)); };
 
-async function scenario(cluster, name, { instruments, usdt = 1000, startAt = at(8), blacklist = [], beforeStart = () => {} }) {
+async function scenario(cluster, name, { instruments, configured = Object.keys(instruments), usdt = 1000, startAt = at(8), blacklist = [], beforeStart = () => {} }) {
   await cluster.admin.query(`CREATE DATABASE ${name}`);
   const connection = { host: "127.0.0.1", port: cluster.port, user: process.env.USER, database: name };
   const setup = new pg.Client(connection); await setup.connect();
@@ -162,7 +162,7 @@ async function scenario(cluster, name, { instruments, usdt = 1000, startAt = at(
   beforeStart(ex, clock);
   const pool = new pg.Pool({ ...connection, max: 4 }); const ownerClient = new pg.Client(connection); await ownerClient.connect();
   const timers = fakeTimers(clock); const events = [];
-  const composed = await composeProductionRuntime({ TRADING_MODE: "FULL", KEY_VAULT_URI: "https://vault.example", POSTGRES_URL: "postgresql://local/scenario" }, {
+  const composed = await composeProductionRuntime({ TRADING_MODE: "FULL", OKX_INSTRUMENTS: configured.join(","), KEY_VAULT_URI: "https://vault.example", POSTGRES_URL: "postgresql://local/scenario" }, {
     runtime: { clock }, timers, socketFactory: ex.socketFactory, rest: ex, ownerClient, ownerGuard: new PostgresOwnerGuard(ownerClient, `scenario-${name}`),
     keyVault: { readOkxCredentials: async () => ({ apiKey: "a", secretKey: "b", passphrase: "c" }) },
     pool: { query: (...args) => pool.query(...args), transaction: (fn) => transaction(pool, fn), end: () => pool.end() },
@@ -463,15 +463,18 @@ test("panic-rebound scenarios against a simulated OKX and real PostgreSQL", { ti
       } finally { await s.close(); }
     });
 
-    await t.test("a pair added at the new day is subscribed and can enter the count", async () => {
-      const s = await scenario(cluster, "newpair", { instruments: EIGHT, startAt: at(23, 50) });
+    await t.test("a configured pair listed at the new day is subscribed and can enter the count; an unconfigured one is ignored", async () => {
+      const s = await scenario(cluster, "newpair", { instruments: EIGHT, configured: [...Object.keys(EIGHT), "I-USDT"], startAt: at(23, 50) });
       try {
         const next = "2026-09-25";
         s.ex.instruments.set("I-USDT", { instId: "I-USDT", state: "live", tickSz: "0.01", lotSz: "0.001", minSz: "0.001", baseCcy: "I", quoteCcy: "USDT", uTime: "2" });
         s.ex.opens.set("I-USDT", 100); s.ex.setQuote("I-USDT", 100);
+        s.ex.instruments.set("J-USDT", { instId: "J-USDT", state: "live", tickSz: "0.01", lotSz: "0.001", minSz: "0.001", baseCcy: "J", quoteCcy: "USDT", uTime: "2" });
+        s.ex.opens.set("J-USDT", 100); s.ex.setQuote("J-USDT", 100);
         for (const instId of Object.keys(EIGHT)) s.ex.opens.set(instId, 100);
         await s.advanceTo(at(0, 1, 0, next));
         assert.ok(s.ex.sockets.public.sent.some((message) => message.op === "subscribe" && message.args.some((arg) => arg.channel === "tickers" && arg.instId === "I-USDT")), "the live socket must receive the new ticker subscription");
+        assert.equal(s.composed.buyPlanner.instIds.includes("J-USDT"), false, "a live pair outside OKX_INSTRUMENTS never joins the universe");
         await s.move("A-USDT", 81); await s.move("B-USDT", 81); await s.move("I-USDT", 71);
         assert.deepEqual(s.buys().map((row) => row.instId), ["I-USDT"]);
       } finally { await s.close(); }
