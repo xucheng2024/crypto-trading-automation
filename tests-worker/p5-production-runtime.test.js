@@ -4,7 +4,7 @@ import test from "node:test";
 import { PanicReboundPlanner, firstBackfillTouch, openRowsFromTickers, summarizePanicPipelineCoverage } from "../src/application/panic-rebound-planner.js";
 import { ReconciliationService } from "../src/application/reconciliation-service.js";
 import { MarketProjection, ReadyGate } from "../src/application/trading-engine.js";
-import { strategyDayStartMs } from "../src/domain/rules.js";
+import { dayHighFromCandles, strategyDayStartMs } from "../src/domain/rules.js";
 
 const DAY = "2026-09-24";
 const DAY_START = strategyDayStartMs(DAY);
@@ -26,7 +26,7 @@ function memoryState(fills = []) {
   };
 }
 
-function harness({ instIds = ["A-USDT", "B-USDT", "C-USDT", "D-USDT", "E-USDT", "F-USDT"], now = DAY_START + 10 * HOUR, state = memoryState(), tickers = null, candles = async () => [], capitalBlocked = () => false, cycles = new Map() } = {}) {
+function harness({ instIds = ["A-USDT", "B-USDT", "C-USDT", "D-USDT", "E-USDT", "F-USDT"], now = DAY_START + 10 * HOUR, state = memoryState(), tickers = null, candles = async (_instId, { bar } = {}) => (bar === "5m" ? [[String(now), "100", "100", "100", "100"], [String(DAY_START), "100", "100", "100", "100"]] : []), capitalBlocked = () => false, cycles = new Map() } = {}) {
   const clock = { value: now, nowMs() { return this.value; } };
   const market = new MarketProjection({ clock });
   for (const instId of instIds) {
@@ -100,6 +100,46 @@ test("P5 panic planner records a coalesced wick and keeps retrying the same symb
   assert.equal(h.intents.at(-1).generation, 1);
 });
 
+test("P5 panic surge guard skips a candidate whose pre-buy day high reached 1.15x open, for the rest of the day, without changing the count", async () => {
+  const t = DAY_START + 12 * HOUR;
+  const highs = { "C-USDT": "118", "D-USDT": "108" };
+  const h = harness({ instIds: ["A-USDT", "B-USDT", "C-USDT", "D-USDT", "E-USDT"], now: t, candles: async (instId) => [[String(t - 300_000), "90", highs[instId] ?? "100", "80", "85"], [String(DAY_START), "100", "101", "99", "100"]] });
+  await h.planner.prime();
+  for (const [index, instId] of ["A-USDT", "B-USDT", "C-USDT", "D-USDT"].entries()) h.tick(instId, "72", "72", t + index);
+  for (const instId of ["A-USDT", "B-USDT"]) assert.equal(await h.observe(instId), "SKIPPED_FIRST_TWO");
+  assert.equal(await h.observe("C-USDT"), "SURGE_BLOCKED", "open 100, high 118 before the 72 touch");
+  assert.equal(await h.observe("D-USDT"), "BUY_QUEUED", "a high of 108 stays buyable");
+  assert.equal(h.planner.rank("D-USDT"), 4, "the surged C still counts");
+  h.tick("C-USDT", "70", "70", t + 10);
+  assert.equal(await h.observe("C-USDT"), "SURGE_BLOCKED", "blocked for the rest of the day");
+  assert.equal(h.events.find((event) => event.reason === "SURGE_BLOCKED")?.dayHigh, "118");
+  assert.equal(h.candleCalls.filter(([instId]) => instId === "C-USDT").length, 1, "the candle high is read once per day");
+  // A live surge after the candle read also blocks a later dip.
+  h.tick("E-USDT", "80", "80", t + 11); await h.observe("E-USDT");
+  h.tick("E-USDT", "71", "71", t + 12); assert.equal(await h.observe("E-USDT"), "BUY_QUEUED");
+  h.tick("E-USDT", "115", "115", t + 13); h.tick("E-USDT", "71", "71", t + 14);
+  assert.equal(await h.observe("E-USDT"), "SURGE_BLOCKED");
+});
+
+test("P5 panic surge guard waits when candles cannot prove coverage back to the open", async () => {
+  let candles = async () => { throw new Error("candles unavailable"); };
+  const h = harness({ instIds: ["A-USDT", "B-USDT", "C-USDT"], candles: (...args) => candles(...args) });
+  await h.planner.prime();
+  const t = DAY_START + 12 * HOUR;
+  for (const [index, instId] of ["A-USDT", "B-USDT", "C-USDT"].entries()) h.tick(instId, "70", "70", t + index);
+  for (const instId of ["A-USDT", "B-USDT"]) await h.observe(instId);
+  assert.equal(await h.observe("C-USDT"), "SURGE_CHECK_UNAVAILABLE");
+  candles = async () => [[String(t), "70", "90", "70", "70"], [String(DAY_START), "100", "100", "100", "100"]];
+  assert.equal(await h.observe("C-USDT"), "SURGE_CHECK_UNAVAILABLE", "a failed read is retried after a short delay");
+  h.tick("C-USDT", "70", "70", t + 10_000);
+  assert.equal(await h.observe("C-USDT"), "BUY_QUEUED");
+  const full = Array.from({ length: 300 }, (_, index) => [String(t - index * 300_000), "1", "1", "1", "1"]).filter(([ts]) => Number(ts) > DAY_START);
+  assert.equal(dayHighFromCandles({ candles: full.concat(Array.from({ length: 300 - full.length }, () => [String(t), "1", "1", "1", "1"])), dayStart: DAY_START, limit: 300 }), null, "a full page that ends after the open is not proof");
+  assert.equal(dayHighFromCandles({ candles: [], dayStart: DAY_START, limit: 300 }), null);
+  assert.equal(dayHighFromCandles({ candles: [[String(t), "1", "2", "1", "1"]], dayStart: DAY_START, limit: 300 }), "2", "a short page is the pair's full history");
+  assert.equal(dayHighFromCandles({ candles: [[String(t), "1", "2", "1", "1"], [String(DAY_START - 300_000), "1", "9", "1", "1"]], dayStart: DAY_START, limit: 300 }), "2", "yesterday's bars are ignored");
+});
+
 test("P5 panic planner blocks on an earlier day's open position and spent capital, but not on today's fills", async () => {
   const fills = [];
   let blocked = false;
@@ -127,7 +167,7 @@ test("P5 panic planner restart backfills missed first touches before ranking and
   // Restart: A and B touched 82% while the process was down.
   const bars = { "A-USDT": [[String(t + 300_000), "90", "91", "81", "85"], [String(t), "95", "96", "90", "91"], [String(DAY_START - 300_000), "80", "80", "10", "80"]], "B-USDT": [[String(t + 600_000), "90", "91", "81.9", "85"]] };
   const restarted = harness({ instIds: ["A-USDT", "B-USDT", "C-USDT"], state, now: t + 20 * 60_000,
-    tickers: ["A-USDT", "B-USDT", "C-USDT"].map((instId) => ({ instId, ts: String(t + 20 * 60_000), sodUtc8: "999", low24h: instId === "C-USDT" ? "80" : "81" })), candles: async (instId) => bars[instId] ?? [] });
+    tickers: ["A-USDT", "B-USDT", "C-USDT"].map((instId) => ({ instId, ts: String(t + 20 * 60_000), sodUtc8: "999", low24h: instId === "C-USDT" ? "80" : "81" })), candles: async (instId) => bars[instId] ?? [[String(DAY_START), "100", "100", "100", "100"]] });
   await restarted.planner.prime();
   assert.deepEqual(restarted.candleCalls.map(([instId, options]) => [instId, options.bar]), [["A-USDT", "5m"], ["B-USDT", "5m"]], "only unranked symbols whose 24h low reached the count price are read");
   assert.equal(state.rows.get(`${DAY}:A-USDT`).open_price, "100", "a later ticker never overwrites the day's open");

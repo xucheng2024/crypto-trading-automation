@@ -1,5 +1,5 @@
 import { compareDecimal, multiplyDecimal, subtractDecimal } from "../decimal.js";
-import { PANIC_MIN_HOLD_HOURS, PANIC_MIN_ORDER_USDT, PANIC_SKIP_COUNT, PANIC_STRATEGY_HASH, panicPrices, rankCountHits, strategyDay, strategyDayCloseSellMs, strategyDayStartMs } from "../domain/rules.js";
+import { PANIC_MIN_HOLD_HOURS, PANIC_MIN_ORDER_USDT, PANIC_SKIP_COUNT, PANIC_STRATEGY_HASH, dayHighFromCandles, panicPrices, panicSurgePrice, rankCountHits, strategyDay, strategyDayCloseSellMs, strategyDayStartMs } from "../domain/rules.js";
 import { CLOCK_SYNC_STALE_AFTER_MS } from "../infrastructure/okx/rest-client.js";
 import { createDecisionId, payloadHash } from "../domain/order.js";
 
@@ -78,7 +78,7 @@ export class PanicReboundPlanner {
   constructor({ accountId, instIds = [], market, coordinator, state, orders, transaction, rest, readyGate, clock, quoteFreshMs = 1_500, telemetry = () => {}, slo = null, refreshUniverse = null }) {
     Object.assign(this, { accountId, market, coordinator, state, orders, transaction, rest, readyGate, clock, quoteFreshMs, telemetry, slo, refreshUniverse });
     this.setUniverse(instIds);
-    this.rows = new Map(); this.ranks = null; this.protected = new Set(); this.ledger = []; this.decisions = new Map(); this.evaluatorSeen = new Set(); this.lastEvaluationAt = new Map();
+    this.rows = new Map(); this.ranks = null; this.protected = new Set(); this.ledger = []; this.decisions = new Map(); this.evaluatorSeen = new Set(); this.lastEvaluationAt = new Map(); this.dayHighs = new Map(); this.dayHighRetryAt = new Map();
     this.currentDay = null; this.universeDay = null; this.primePromise = null; this.primeNotBefore = 0; this.refillPromise = null; this.lastRefillAt = 0; this.anchorHashes = new Map();
   }
   setUniverse(instIds) { this.instIds = [...new Set(instIds)]; this.universe = new Set(this.instIds); }
@@ -229,6 +229,22 @@ export class PanicReboundPlanner {
     if (result?.rowCount) this.emitDecision(row.instId, { type: "trading_decision", side: "BUY", reason: "BUY_PRICE_REACHED", strategyDay: row.strategyDay, buyHitAt: touch.ts, buyHitPrice: touch.price, countRank: this.rank(row.instId), openPrice: row.openPrice, buyPrice: row.buyPrice }, true);
     return current ?? row;
   }
+  // The day high before the buy: 5m candles cover the open up to the first
+  // check, live ticks tracked since the day was primed cover the rest.  A
+  // high only rises, so a blocked pair stays blocked for the whole day.
+  async _dayHigh(row, day) {
+    const key = `${day}:${row.instId}`;
+    let high = this.dayHighs.get(key);
+    if (high === undefined) {
+      if (this.clock.nowMs() < (this.dayHighRetryAt.get(key) ?? 0)) return null;
+      try { high = dayHighFromCandles({ candles: await this.rest.candles(row.instId, { bar: BACKFILL_BAR, limit: BACKFILL_LIMIT }), dayStart: strategyDayStartMs(day), limit: BACKFILL_LIMIT }); } catch { high = null; }
+      if (high === null) { this.dayHighRetryAt.set(key, this.clock.nowMs() + PRIME_RETRY_MS); return null; }
+      if (this.dayHighs.size >= 2_000) this.dayHighs.clear();
+      this.dayHighs.set(key, high); this.dayHighRetryAt.delete(key);
+    }
+    const live = this.market.panicTouch?.(row.instId, day)?.high;
+    return live && compareDecimal(live, high) > 0 ? String(live) : high;
+  }
   async _anchorHash(row) {
     const key = `${row.strategyDay}:${row.instId}`;
     if (!this.anchorHashes.has(key)) {
@@ -263,6 +279,10 @@ export class PanicReboundPlanner {
     if (!countRank || countRank <= PANIC_SKIP_COUNT) return decide("SKIPPED_FIRST_TWO");
     if (!quoteStatus.fresh) return decide("QUOTE_STALE");
     if (compareDecimal(quote.last, row.buyPrice) > 0) return decide("ABOVE_BUY_PRICE");
+    const surgePrice = panicSurgePrice(row.openPrice); const dayHigh = await this._dayHigh(row, day);
+    Object.assign(base, { surgePrice, dayHigh: dayHigh ?? undefined });
+    if (dayHigh === null) return decide("SURGE_CHECK_UNAVAILABLE");
+    if (compareDecimal(dayHigh, surgePrice) >= 0) return decide("SURGE_BLOCKED");
     if (row.buyHitAt == null) row = await this._recordBuyHit(row, this.market.panicTouch?.(instId, day)?.buy ?? { ts: Number(quote.ts), price: quote.last });
     Object.assign(base, { buyHitAt: row.buyHitAt });
     const instrument = this.market.instrument(instId);

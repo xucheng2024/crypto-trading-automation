@@ -20,16 +20,19 @@ export function normalizeHoldHours(value, legacyUnit) {
 // last trade reaches open*0.82 is counted in exchange-time order.  The first
 // PANIC_SKIP_COUNT counted pairs are never bought; any later counted pair whose
 // last trade reaches open*0.72 is bought with owned USDT at exactly that limit.
-// Each fill is market-sold at the day close, or after the minimum hold.
+// A candidate whose day high before the buy reached open*1.15 is not bought
+// that day, but still counts.  Each fill is market-sold at the day close, or
+// after the minimum hold.
 export const PANIC_COUNT_RATIO = "0.82";
 export const PANIC_BUY_RATIO = "0.72";
+export const PANIC_SURGE_RATIO = "1.15";
 export const PANIC_SKIP_COUNT = 2;
 export const PANIC_MIN_HOLD_HOURS = "3";
 export const PANIC_MIN_HOLD_MS = 3 * 3_600_000;
 export const PANIC_CLOSE_SELL_LEAD_MS = 60_000;
 export const PANIC_MIN_ORDER_USDT = "10";
 export const PANIC_BACKFILL_BAR_MS = 5 * 60_000;
-export const PANIC_STRATEGY_HASH = "panic-rebound-v1:count=0.82:buy=0.72:skip=2:hold=3h:close=23:59";
+export const PANIC_STRATEGY_HASH = "panic-rebound-v1:count=0.82:buy=0.72:skip=2:hold=3h:close=23:59:surge=1.15";
 
 const DAY_MS = 86_400_000;
 const UTC8_OFFSET_MS = 8 * 3_600_000;
@@ -67,6 +70,18 @@ export function panicPrices({ open, tickSz }) {
   const buyPrice = roundToStep(multiplyDecimal(open, PANIC_BUY_RATIO), tickSz, "down");
   if (compareDecimal(buyPrice, "0") <= 0) throw new Error("panic buy price rounds to zero");
   return { countPrice: multiplyDecimal(open, PANIC_COUNT_RATIO), buyPrice };
+}
+
+export function panicSurgePrice(open) { return multiplyDecimal(open, PANIC_SURGE_RATIO); }
+
+// The highest candle high since the day open, or null when the candles cannot
+// prove they reach back to the open (a short list is the pair's full history).
+export function dayHighFromCandles({ candles = [], dayStart, limit }) {
+  const bars = candles.map((row) => ({ ts: Number(row?.[0]), high: row?.[2] })).filter((bar) => Number.isFinite(bar.ts) && bar.high);
+  if (!bars.length || (bars.length >= limit && !bars.some((bar) => bar.ts <= dayStart))) return null;
+  let high = "0";
+  for (const bar of bars) if (bar.ts >= dayStart && compareDecimal(bar.high, high) > 0) high = String(bar.high);
+  return high;
 }
 
 // A backfilled 5m candle locates a first touch only within that candle. Rank

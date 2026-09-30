@@ -224,7 +224,7 @@ export async function composeProductionRuntime(env, injected = {}) {
     engine?.enqueueSellEvents?.(sellService.resumeTriggered?.(active) ?? []);
   }
   const delist = injected.delist ?? new DelistOrchestrator({ transaction, state, orders, coordinator, accountId: config.accountId, market, telemetry }).bind();
-  const protection = injected.protection ?? new InstrumentProtectionService({ state, transaction, telemetry, onProtect: (p) => { delistingInstIds.add(p.instId); buyPlanner?.protect?.(p.instId); }, onExit: (p) => delist.drive(p.instId) });
+  const protection = injected.protection ?? new InstrumentProtectionService({ state, transaction, telemetry, nowMs: () => runtime.clock.nowMs(), onProtect: (p) => { delistingInstIds.add(p.instId); buyPlanner?.protect?.(p.instId); }, onExit: (p) => delist.drive(p.instId) });
   buyPlanner = injected.buyPlanner ?? new PanicReboundPlanner({ accountId: config.accountId, instIds, market, coordinator, state, orders, transaction, rest, readyGate, clock: runtime.clock, quoteFreshMs: config.quote_max_age_ms, telemetry, slo, refreshUniverse });
   const startupWait = injected.startupWait ?? createCancellableSleep(injected.timers ?? globalThis);
   const reconciliation = injected.reconciliation ?? new ReconciliationService({ orders, state, transport: rest, ownerGuard, readyGate, clock: runtime.clock, safetyWaitMs: config.owner_safety_wait_ms, sleep: startupWait.sleep, aborted: () => startupWait.cancelled, transaction, telemetry,

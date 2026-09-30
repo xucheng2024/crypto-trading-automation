@@ -17,10 +17,11 @@ export class MarketProjection {
   }
   // The consumer queue coalesces tickers per instrument, so a brief wick can
   // be overwritten before the planner reads it.  First touches are therefore
-  // recorded here, synchronously on every accepted ticker, in exchange time.
+  // recorded here, synchronously on every accepted ticker, in exchange time,
+  // together with the highest trade seen today for the surge guard.
   setPanicLevels(instId, { day, countPrice, buyPrice }) {
     const current = this.panicTouches.get(instId);
-    if (current?.day !== day) this.panicTouches.set(instId, { day, count: null, buy: null });
+    if (current?.day !== day) this.panicTouches.set(instId, { day, count: null, buy: null, high: null });
     this.panicLevels.set(instId, { day, countPrice, buyPrice });
     const quote = this.ticker(instId);
     if (quote) this.#observePanicLevels(quote);
@@ -31,6 +32,7 @@ export class MarketProjection {
     if (!levels || !row.last || !Number.isFinite(ts) || strategyDay(ts) !== levels.day) return;
     const touch = this.panicTouches.get(row.instId);
     if (!touch || touch.day !== levels.day) return;
+    if (!touch.high || compareDecimal(row.last, touch.high) > 0) touch.high = String(row.last);
     if (!touch.count && compareDecimal(row.last, levels.countPrice) <= 0) touch.count = { ts, price: row.last };
     if (!touch.buy && touch.count && compareDecimal(row.last, levels.buyPrice) <= 0) touch.buy = { ts, price: row.last };
   }
