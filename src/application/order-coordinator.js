@@ -9,6 +9,10 @@ const PRIORITY = { DELIST: 3, SELL: 2, BUY: 1 };
 // symbols cannot turn every tick into two authenticated REST reads.
 const CAPITAL_RECHECK_MS = 30_000;
 const BUY_CAPACITY_RETRY_MS = 1_000;
+// OKX rejects a BUY priced above its price band (buyLmt), which in a fast crash
+// can sit below the 72% limit.  The band only lowers the price, so an
+// unavailable band read falls back to the frozen limit instead of blocking.
+const PRICE_LIMIT_WAIT_MS = 1_000;
 const terminal = new Set(["NOT_CREATED", "SETTLED"]);
 
 function min(...values) { return values.reduce((lowest, value) => compareDecimal(value, lowest) < 0 ? value : lowest); }
@@ -129,8 +133,8 @@ export class OrderCoordinator {
     const capacityCcy = tradeQuoteCcy ?? intent.instId.split("-").at(-1);
     const evidenceIntent = { ...intent, executionMode, executionRoute };
     const started = this.clock.nowMs();
-    let avail; let balances;
-    try { [avail, balances] = await Promise.all([this.transport.maxAvailSize(intent.instId, { tdMode: executionMode, ccy: capacityCcy }), this.transport.balance(capacityCcy)]); }
+    let avail; let balances; let band;
+    try { [avail, balances, band] = await Promise.all([this.transport.maxAvailSize(intent.instId, { tdMode: executionMode, ccy: capacityCcy }), this.transport.balance(capacityCcy), this._priceBand(intent.instId)]); }
     catch (error) {
       this.buyNotBefore = this.clock.nowMs() + BUY_CAPACITY_RETRY_MS;
       this._emitBuyBlock(evidenceIntent, "AVAILABILITY", "MAX_AVAIL_FAILED", availabilityFailure(error));
@@ -140,16 +144,30 @@ export class OrderCoordinator {
     const ownedQuote = ownedQuoteBalance(balances, capacityCcy);
     const notional = min(compareDecimal(availBuy, "0") > 0 ? availBuy : "0", ownedQuote);
     const { instrument, quote } = guard;
-    const executionPrice = roundToStep(intent.limitPrice, instrument.tickSz, "down");
+    const frozenPrice = roundToStep(intent.limitPrice, instrument.tickSz, "down");
+    const bandPrice = band.buyLmt ? roundToStep(band.buyLmt, instrument.tickSz, "down") : null;
+    const banded = bandPrice !== null && compareDecimal(bandPrice, frozenPrice) < 0;
+    const executionPrice = banded ? bandPrice : frozenPrice;
     const feeMultiplier = add("1", TRADE_FEE_RATE);
     const size = compareDecimal(executionPrice, "0") > 0 ? roundToStep(divideDecimal(notional, multiplyDecimal(executionPrice, feeMultiplier)), instrument.lotSz, "down") : "0";
-    if (compareDecimal(quote.askPx, executionPrice) > 0) { this._emitBuyBlock(evidenceIntent, "SIZING", "ASK_ABOVE_LIMIT", { askPx: quote.askPx, limitPrice: executionPrice }); this._dropBuy(intent); return { dropped: true }; }
+    if (compareDecimal(quote.askPx, executionPrice) > 0) { this._emitBuyBlock(evidenceIntent, "SIZING", banded ? "ASK_ABOVE_PRICE_BAND" : "ASK_ABOVE_LIMIT", { askPx: quote.askPx, limitPrice: executionPrice, frozenLimitPrice: frozenPrice, buyLmt: band.buyLmt, priceBand: band.status }); this._dropBuy(intent); return { dropped: true }; }
     if (compareDecimal(notional, PANIC_MIN_ORDER_USDT) < 0 || compareDecimal(size, instrument.minSz) < 0) {
       this.capitalBlock = { version: this.account.value?.version ?? 0, at: this.clock.nowMs() };
       this._emitBuyBlock(evidenceIntent, "SIZING", "CAPITAL_EXHAUSTED", { availBuy, ownedQuote, notional, minimumNotional: PANIC_MIN_ORDER_USDT, plannedSize: size, minSize: instrument.minSz, limitPrice: executionPrice });
       return { reason: "CAPITAL_EXHAUSTED" };
     }
-    return { intent: { ...intent, queued: intent, availBuy, ownedQuote, notional, executionPrice, plannedSize: size, capacityCcy, executionMode, executionRoute, tradeQuoteCcy } };
+    return { intent: { ...intent, queued: intent, availBuy, ownedQuote, notional, executionPrice, plannedSize: size, capacityCcy, executionMode, executionRoute, tradeQuoteCcy, buyLmt: band.buyLmt, priceBand: banded ? "CLAMPED" : band.status } };
+  }
+  // Resolves to { status, buyLmt? } and never rejects: APPLIED (enabled band
+  // read), DISABLED, or UNAVAILABLE (error, timeout or no transport support).
+  async _priceBand(instId) {
+    if (typeof this.transport.priceLimit !== "function") return { status: "UNAVAILABLE" };
+    let timer;
+    const timeout = new Promise((resolve) => { timer = setTimeout(() => resolve({ status: "UNAVAILABLE" }), PRICE_LIMIT_WAIT_MS); });
+    const read = Promise.resolve().then(() => this.transport.priceLimit(instId))
+      .then((row) => row?.enabled === false ? { status: "DISABLED" } : row?.buyLmt && compareDecimal(row.buyLmt, "0") > 0 ? { status: "APPLIED", buyLmt: row.buyLmt } : { status: "UNAVAILABLE" })
+      .catch(() => ({ status: "UNAVAILABLE" }));
+    try { return await Promise.race([read, timeout]); } finally { clearTimeout(timer); }
   }
   async submitBuy(intent) {
     const started = this.clock.nowMs();
@@ -160,7 +178,7 @@ export class OrderCoordinator {
         const guard = this._buyGuard(intent);
         if (!guard.allowed) { this._emitBuyBlock(intent, "PREPARATION_GUARD", guard.reason, guard.evidence); return null; }
         const { instrument, quote } = guard;
-        if (compareDecimal(quote.askPx, intent.executionPrice) > 0) { this._emitBuyBlock(intent, "SIZING", "ASK_ABOVE_LIMIT", { askPx: quote.askPx, limitPrice: intent.executionPrice }); return null; }
+        if (compareDecimal(quote.askPx, intent.executionPrice) > 0) { this._emitBuyBlock(intent, "SIZING", intent.priceBand === "CLAMPED" ? "ASK_ABOVE_PRICE_BAND" : "ASK_ABOVE_LIMIT", { askPx: quote.askPx, limitPrice: intent.executionPrice, buyLmt: intent.buyLmt, priceBand: intent.priceBand }); return null; }
         const feeMultiplier = add("1", TRADE_FEE_RATE);
         const payload = { instId: intent.instId, tdMode: intent.executionMode, side: "buy", ordType: "ioc", px: intent.executionPrice, sz: intent.plannedSize, tag: this.config.strategyTag, ...(intent.executionRoute === "margin" && intent.tradeQuoteCcy ? { tradeQuoteCcy: intent.tradeQuoteCcy } : {}) };
         const tuple = { instId: intent.instId, strategyDay: intent.strategyDay, generation: intent.generation };
@@ -206,7 +224,7 @@ export class OrderCoordinator {
     } finally { this.slo?.record("buy_reservation_tx", reservationStarted); }
     if (!prepared) { this._dropBuy(intent); return { submitted: false, reason: "RESERVATION_DENIED" }; }
     const { attempt, payload } = prepared;
-    this._emit({ type: "order_lifecycle", reason: "BUY_PREPARED", intent: "BUY", decisionId: prepared.intent.decisionId, instId: intent.instId, clOrdId: attempt.clOrdId, generation: intent.generation, executionMode: attempt.executionMode, executionRoute: attempt.executionRoute, limitPrice: attempt.executionLimitPrice, plannedSize: attempt.plannedSize, notional: intent.notional, ownedQuote: intent.ownedQuote, availBuy: intent.availBuy, triggerPrice: attempt.decisionTriggerPrice, referencePrice: attempt.decisionReferencePrice, countRank: intent.countRank });
+    this._emit({ type: "order_lifecycle", reason: "BUY_PREPARED", intent: "BUY", decisionId: prepared.intent.decisionId, instId: intent.instId, clOrdId: attempt.clOrdId, generation: intent.generation, executionMode: attempt.executionMode, executionRoute: attempt.executionRoute, limitPrice: attempt.executionLimitPrice, plannedSize: attempt.plannedSize, notional: intent.notional, ownedQuote: intent.ownedQuote, availBuy: intent.availBuy, triggerPrice: attempt.decisionTriggerPrice, referencePrice: attempt.decisionReferencePrice, countRank: intent.countRank, buyLmt: intent.buyLmt, priceBand: intent.priceBand });
     const guard = this._buyGuard(prepared.intent);
     if (!guard.allowed) {
       this._emitBuyBlock(prepared.intent, "FINAL_GUARD", guard.reason, guard.evidence);

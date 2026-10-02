@@ -291,6 +291,21 @@ export class OkxRestClient {
       throw error;
     }
   }
+  // Single attempt outside the private-request pacing (a public endpoint with
+  // its own IP limit): the band only ever lowers a BUY price, so a slow or
+  // failed read must not delay the order it was meant to help.
+  async priceLimit(instId) {
+    const endpoint = "/api/v5/public/price-limit";
+    const startedAt = this.clock.nowMs();
+    try {
+      const row = assertOkxResponse(await this.request("GET", endpoint, { params: { instId }, authenticated: false, retryReads: 0, skipWait: true }), { requireData: true })[0];
+      if (!row || row.instId !== instId || typeof row.buyLmt !== "string" || typeof row.enabled !== "boolean") throw invalidOkxResponse("INVALID_PRICE_LIMIT_ITEM");
+      return row;
+    } catch (error) {
+      error.diagnostic ??= safeOkxFailure(error, { endpoint, durationMs: this.clock.nowMs() - startedAt, attempts: 1 });
+      throw error;
+    }
+  }
   async order({ instId, ordId, clOrdId }) { return (await this.read("/api/v5/trade/order", { instId, ordId, clOrdId }))[0] ?? { state: "NOT_FOUND", instId, ordId, clOrdId }; }
   ordersPending(instType, params = {}) { return this.read("/api/v5/trade/orders-pending", { ...params, instType }); }
   ordersHistory(instType, params = {}) { return this.read("/api/v5/trade/orders-history", { ...params, instType }); }

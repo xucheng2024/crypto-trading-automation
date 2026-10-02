@@ -247,6 +247,31 @@ test("P5 BUY queue drops symbols that bounced above the limit and continues with
   assert.equal(coordinator.pending.BUY.size, 0, "dropped symbols wait for their next qualifying tick");
 });
 
+test("P5 BUY price is lowered to the OKX buy price band and falls back to the frozen limit when the band is unusable", async () => {
+  async function run(priceLimit, { ask = "95" } = {}) {
+    const now = clock(NOON); const market = setupMarket(now, { "BTC-USDT": ask }); const events = []; const payloads = []; const orders = memoryOrders();
+    const coordinator = panicCoordinator({ now, market, orders, telemetry: (event) => events.push(event), transport: {
+      maxAvailSize: async (instId) => [{ instId, availBuy: "500" }], balance: async () => usdt("500"), ...(priceLimit ? { priceLimit } : {}),
+      submitBatchOrders: async (payload) => { payloads.push(...payload); return payload.map((item) => ({ clOrdId: item.clOrdId, status: "SUBMITTED", ordId: "1" })); },
+    } });
+    coordinator.enqueue(buyIntent("BTC-USDT"));
+    await coordinator.drainOnce();
+    const prepared = events.find((event) => event.reason === "BUY_PREPARED");
+    return { px: payloads[0]?.px, attempt: [...orders.attempts.values()][0], band: prepared?.priceBand, blocks: events.filter((event) => event.type === "block_evidence").map((event) => event.reason) };
+  }
+  const band = (buyLmt, enabled = true) => async (instId) => ({ instId, buyLmt, sellLmt: "1", enabled });
+  const clamped = await run(band("98.04"));
+  assert.deepEqual([clamped.px, clamped.band, clamped.attempt.executionLimitPrice, clamped.attempt.decisionReferencePrice], ["98", "CLAMPED", "98", "100"], "a band below the 72% limit lowers the IOC to the band, rounded down to the tick, while the frozen limit stays the decision reference");
+  assert.equal(clamped.attempt.plannedSize, "5.099", "the lower price is sized from the same owned USDT");
+  const unreachable = await run(band("94"));
+  assert.deepEqual([unreachable.px, unreachable.blocks], [undefined, ["ASK_ABOVE_PRICE_BAND"]], "an ask above the banded price cannot fill an IOC, so nothing is sent");
+  assert.deepEqual([(await run(band("105"))).px, (await run(band("105"))).band], ["100", "APPLIED"], "a band above the limit never raises the price");
+  assert.deepEqual([(await run(band("90", false))).px, (await run(band("90", false))).band], ["100", "DISABLED"]);
+  assert.deepEqual([(await run(async () => { throw new Error("temporary unavailable"); })).px, (await run(null)).band], ["100", "UNAVAILABLE"], "a failed or missing band read keeps the frozen limit");
+  const started = Date.now(); const slow = await run(() => new Promise(() => {}));
+  assert.deepEqual([slow.px, slow.band], ["100", "UNAVAILABLE"]); assert.ok(Date.now() - started < 3_000, "a hung band read is abandoned after its short wait");
+});
+
 test("P5 BUY UNKNOWN blocks only its own symbol and is chased immediately while the queue moves on", async () => {
   const now = clock(NOON); const market = setupMarket(now, { "BTC-USDT": "95", "ETH-USDT": "95" }); const orders = memoryOrders(); const chased = [];
   const results = ["UNKNOWN", "SUBMITTED"];

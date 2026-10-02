@@ -52,6 +52,22 @@ test("P1 REST transport signs, syncs server time, uses expTime, retries only GET
   now = 1_111; assert.equal(client.clockFresh(10), false);
 });
 
+test("P5 price-limit read is public, single-attempt and validated against the instrument", async () => {
+  const seen = [];
+  const delays = [];
+  const client = new OkxRestClient({ requestGapMs: 60, sleep: async (ms) => delays.push(ms), fetcher: async (url, init) => { seen.push([new URL(url).pathname, new URL(url).searchParams.get("instId"), init.headers["OK-ACCESS-KEY"]]); return ok([{ instId: "ONE-USDT", instType: "SPOT", buyLmt: "0.004566", sellLmt: "0.004400", enabled: true }]); } });
+  client.nextRequestAt = Date.now() + 60_000;
+  assert.deepEqual(await client.priceLimit("ONE-USDT"), { instId: "ONE-USDT", instType: "SPOT", buyLmt: "0.004566", sellLmt: "0.004400", enabled: true });
+  assert.deepEqual(seen, [["/api/v5/public/price-limit", "ONE-USDT", undefined]], "no credentials are needed or sent");
+  assert.deepEqual(delays, [], "the read skips the private-request pacing queue");
+  let calls = 0;
+  const failing = new OkxRestClient({ sleep: async () => {}, fetcher: async () => { calls += 1; throw new Error("connection reset"); } });
+  await assert.rejects(failing.priceLimit("ONE-USDT"), (error) => { assert.equal(error.diagnostic.endpoint, "/api/v5/public/price-limit"); return true; });
+  assert.equal(calls, 1, "a band read never retries, so it cannot hold up a BUY");
+  const wrong = new OkxRestClient({ fetcher: async () => ok([{ instId: "BTC-USDT", buyLmt: "1", enabled: true }]) });
+  await assert.rejects(wrong.priceLimit("ONE-USDT"), (error) => error.responseClass === "INVALID_PRICE_LIMIT_ITEM");
+});
+
 test("P1 mutation transport makes one send attempt then returns UNKNOWN, while batch items stay independent", async () => {
   let calls = 0;
   const client = new OkxRestClient({ credentials, fetcher: async () => { calls += 1; throw new Error("connection reset"); } });
