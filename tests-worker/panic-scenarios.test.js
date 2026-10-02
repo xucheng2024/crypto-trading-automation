@@ -165,7 +165,9 @@ async function scenario(cluster, name, { instruments, usdt = 1000, startAt = at(
   const timers = fakeTimers(clock); const events = [];
   const composed = await composeProductionRuntime({ TRADING_MODE: "FULL", KEY_VAULT_URI: "https://vault.example", POSTGRES_URL: "postgresql://local/scenario" }, {
     runtime: { clock }, timers, socketFactory: ex.socketFactory, rest: ex, ownerClient, ownerGuard: new PostgresOwnerGuard(ownerClient, `scenario-${name}`),
-    keyVault: { readOkxCredentials: async () => ({ apiKey: "a", secretKey: "b", passphrase: "c" }) },
+    // A synchronous signer: WebCrypto HMAC runs off the event loop, so the
+    // private login could otherwise outlast the settle() ticks on a slow runner.
+    keyVault: { readOkxCredentials: async () => ({ apiKey: "a", secretKey: "b", passphrase: "c", sign: () => "scenario-signature" }) },
     pool: { query: (...args) => pool.query(...args), transaction: (fn) => transaction(pool, fn), end: () => pool.end() },
     telemetry: (event) => events.push(event), workLoop: { start() {}, stop() {} },
   });
