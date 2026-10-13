@@ -228,7 +228,9 @@ jobs:
           runner="${CONTAINER_APP_NAME%-engine}-github-runner"
           if revision="$(az containerapp show --resource-group "$RESOURCE_GROUP" --name "$runner" --query properties.latestReadyRevisionName --output tsv 2>/dev/null)"; then
             runner_status="$(az containerapp show --resource-group "$RESOURCE_GROUP" --name "$runner" --query properties.runningStatus --output tsv)"
-            az containerapp revision activate --resource-group "$RESOURCE_GROUP" --name "$runner" --revision "$revision" --output none
+            if [ -n "$(az containerapp revision list --resource-group "$RESOURCE_GROUP" --name "$runner" --query "[?name=='$revision' && !properties.active].name" --output tsv)" ]; then
+              az containerapp revision activate --resource-group "$RESOURCE_GROUP" --name "$runner" --revision "$revision" --output none
+            fi
             if [ "$runner_status" = 'Stopped' ]; then
               runner_id="$(az containerapp show --resource-group "$RESOURCE_GROUP" --name "$runner" --query id --output tsv)"
               az rest --method post --url "https://management.azure.com${runner_id}/start?api-version=2025-07-01" --output none
@@ -342,7 +344,9 @@ jobs:
           set -euo pipefail
           runner="${CONTAINER_APP_NAME%-engine}-github-runner"
           if revision="$(az containerapp show --resource-group "$RESOURCE_GROUP" --name "$runner" --query properties.latestReadyRevisionName --output tsv 2>/dev/null)"; then
-            az containerapp revision deactivate --resource-group "$RESOURCE_GROUP" --name "$runner" --revision "$revision" --output none
+            if [ -n "$(az containerapp revision list --resource-group "$RESOURCE_GROUP" --name "$runner" --query "[?name=='$revision' && properties.active].name" --output tsv)" ]; then
+              az containerapp revision deactivate --resource-group "$RESOURCE_GROUP" --name "$runner" --revision "$revision" --output none
+            fi
           else
             prefix="${CONTAINER_APP_NAME%-cae-engine}"
             az vm run-command invoke --resource-group "$RESOURCE_GROUP" --name "$prefix-observe-vm" --command-id RunShellScript --scripts 'docker stop crypto-migration-runner >/dev/null' --output none
@@ -407,7 +411,9 @@ jobs:
           runner="${CONTAINER_APP_NAME%-engine}-github-runner"
           prefix="${CONTAINER_APP_NAME%-cae-engine}"
           if revision="$(az containerapp show --resource-group "$RESOURCE_GROUP" --name "$runner" --query properties.latestReadyRevisionName --output tsv 2>/dev/null)"; then
-            az containerapp revision deactivate --resource-group "$RESOURCE_GROUP" --name "$runner" --revision "$revision" --output none
+            if [ -n "$(az containerapp revision list --resource-group "$RESOURCE_GROUP" --name "$runner" --query "[?name=='$revision' && properties.active].name" --output tsv)" ]; then
+              az containerapp revision deactivate --resource-group "$RESOURCE_GROUP" --name "$runner" --revision "$revision" --output none
+            fi
           elif az vm show --resource-group "$RESOURCE_GROUP" --name "$prefix-observe-vm" --output none 2>/dev/null; then
             az vm run-command invoke --resource-group "$RESOURCE_GROUP" --name "$prefix-observe-vm" --command-id RunShellScript --scripts 'docker stop crypto-migration-runner >/dev/null 2>&1 || true' --output none
           fi
