@@ -20,6 +20,7 @@ import { importOfflineProtection } from "../src/infrastructure/postgres/offline-
 import { convertD1Export } from "../tools/convert-d1-export.mjs";
 import { postgresMigrations } from "../scripts/postgres-migration-manifest.mjs";
 import { PANIC_STRATEGY_HASH, panicPrices, panicSellTime, strategyDayStartMs } from "../src/domain/rules.js";
+import { normalizeObservations, saveObservations, LATEST_OBSERVATIONS_SQL } from "../src/entrypoints/azure/market-observer.js";
 
 const run = promisify(execFile);
 
@@ -122,6 +123,28 @@ function exitAttempt(id, { accountId = "a", intent = "SELL", instId = "BTC-USDT"
     sourceBuyTradeId: source, generation, plannedSize: "1", reservedBaseSize: "1",
   };
 }
+
+test("public-market observations persist exact prices, deduplicate and expire after seven days", { timeout: 60_000 }, async () => {
+  const db = await startPostgres();
+  try {
+    const sql = await readFile(new URL("../migrations/observation/0001_market_observations.sql", import.meta.url), "utf8");
+    await db.admin.query(sql); await db.admin.query(sql);
+    const now = Date.now();
+    const quote = { instId: "BTC-USDT", ts: String(now), last: "0.00000125", open24h: "0.000001" };
+    const { rows } = normalizeObservations([quote], ["BTC-USDT"], now);
+    assert.equal(await saveObservations(db.admin, rows), 1);
+    assert.equal(await saveObservations(db.admin, rows), 0);
+    assert.equal(await saveObservations(db.admin, []), 0);
+    const latest = (await db.admin.query(LATEST_OBSERVATIONS_SQL)).rows[0];
+    assert.equal(latest.price, "0.00000125");
+    assert.equal(Number(latest.change_pct), 25);
+    const old = { ...rows[0], sampledAt: new Date(now - 8 * 86_400_000).toISOString() };
+    await saveObservations(db.admin, [old]);
+    assert.equal((await db.admin.query("DELETE FROM market_observations WHERE sampled_at < now() - interval '7 days'")).rowCount, 1);
+    assert.equal((await db.admin.query(LATEST_OBSERVATIONS_SQL)).rows.length, 1);
+    await assert.rejects(saveObservations(db.admin, [{ ...rows[0], instId: "INVALID-USDT", price: "0" }]), (error) => error.code === "23514");
+  } finally { await db.stop(); }
+});
 
 test("temporary PostgreSQL enforces P1-B invariants", { timeout: 60_000 }, async (t) => {
   const db = await startPostgres();

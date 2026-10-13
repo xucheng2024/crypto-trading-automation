@@ -3,6 +3,11 @@ name: Production deploy
 on:
   workflow_dispatch:
     inputs:
+      standalone_observation:
+        description: Deploy the low-cost public-market observer with no trading account access
+        required: false
+        default: false
+        type: boolean
       emergency_handoff:
         description: Allow OFF handoff away from an unhealthy active revision
         required: false
@@ -42,6 +47,7 @@ jobs:
           [ "$count" -gt 0 ] || { echo "No successful CI run found for ${GITHUB_SHA}; wait for CI and rerun this workflow." >&2; exit 1; }
 
   build:
+    if: ${{ !inputs.standalone_observation }}
     needs: validate
     runs-on: ubuntu-latest
     outputs:
@@ -79,6 +85,7 @@ jobs:
 
   migrate:
     needs: build
+    if: ${{ !inputs.standalone_observation }}
     runs-on: [self-hosted, linux, x64, crypto-remote-migration]
     environment: production
     steps:
@@ -124,6 +131,7 @@ jobs:
 
   deploy_off:
     needs: [build, migrate]
+    if: ${{ !inputs.standalone_observation }}
     runs-on: ubuntu-latest
     environment: production
     outputs:
@@ -193,10 +201,176 @@ jobs:
           timeline_job="${CONTAINER_APP_NAME%-engine}-timeline-read"
           az containerapp job update --name "$timeline_job" --resource-group "$RESOURCE_GROUP" --image "$IMAGE" --output none
 
+  prepare_observation:
+    needs: validate
+    if: ${{ inputs.standalone_observation }}
+    runs-on: ubuntu-latest
+    environment: production
+    outputs:
+      postgres_host: ${{ steps.observation.outputs.postgres_host }}
+      deployment_name: ${{ steps.observation.outputs.deployment_name }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_DEPLOY_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      - name: Resume the existing VNet migration runner
+        env:
+          GH_RUNNER_PAT: ${{ secrets.GH_RUNNER_PAT }}
+        run: |
+          set -euo pipefail
+          if az containerapp show --resource-group "$RESOURCE_GROUP" --name "$CONTAINER_APP_NAME" --output none 2>/dev/null; then
+            revisions="$(az containerapp revision list --resource-group "$RESOURCE_GROUP" --name "$CONTAINER_APP_NAME" --query '[?properties.active].name' --output tsv)"
+            while IFS= read -r revision; do [ -z "$revision" ] || az containerapp revision deactivate --resource-group "$RESOURCE_GROUP" --name "$CONTAINER_APP_NAME" --revision "$revision" --output none; done <<< "$revisions"
+          fi
+          runner="${CONTAINER_APP_NAME%-engine}-github-runner"
+          if revision="$(az containerapp show --resource-group "$RESOURCE_GROUP" --name "$runner" --query properties.latestReadyRevisionName --output tsv 2>/dev/null)"; then
+            runner_status="$(az containerapp show --resource-group "$RESOURCE_GROUP" --name "$runner" --query properties.runningStatus --output tsv)"
+            az containerapp revision activate --resource-group "$RESOURCE_GROUP" --name "$runner" --revision "$revision" --output none
+            if [ "$runner_status" = 'Stopped' ]; then
+              runner_id="$(az containerapp show --resource-group "$RESOURCE_GROUP" --name "$runner" --query id --output tsv)"
+              az rest --method post --url "https://management.azure.com${runner_id}/start?api-version=2025-07-01" --output none
+            else
+              az containerapp revision restart --resource-group "$RESOURCE_GROUP" --name "$runner" --revision "$revision" --output none
+            fi
+          else
+            prefix="${CONTAINER_APP_NAME%-cae-engine}"
+            az vm run-command invoke --resource-group "$RESOURCE_GROUP" --name "$prefix-observe-vm" --command-id RunShellScript --scripts 'docker start crypto-migration-runner >/dev/null' --output none
+          fi
+          for attempt in {1..36}; do
+            online="$(GH_TOKEN="$GH_RUNNER_PAT" gh api "repos/${GITHUB_REPOSITORY}/actions/runners?per_page=100" --jq '[.runners[] | select(.status == "online" and any(.labels[]; .name == "crypto-remote-migration"))] | length')"
+            [ "$online" -ge 1 ] && exit 0
+            sleep 5
+          done
+          echo 'VNet migration runner did not become online' >&2; exit 1
+      - uses: docker/setup-buildx-action@v3
+      - run: az acr login --name "$ACR_NAME"
+      - name: Build the immutable observer image
+        run: docker buildx build --platform linux/amd64 --push --cache-from type=gha --cache-to type=gha,mode=max --tag "$ACR_LOGIN_SERVER/trading-engine:${GITHUB_SHA}" .
+      - name: Prepare the fixed-price observer infrastructure
+        id: observation
+        env:
+          OBSERVATION_POSTGRES_PASSWORD: ${{ secrets.OBSERVATION_POSTGRES_PASSWORD }}
+        run: |
+          set -euo pipefail
+          test -n "$OBSERVATION_POSTGRES_PASSWORD"
+          prefix="${CONTAINER_APP_NAME%-cae-engine}"
+          digest="$(az acr repository show --name "$ACR_NAME" --image "trading-engine:${GITHUB_SHA}" --query digest --output tsv)"
+          export OBSERVATION_IMAGE="$ACR_LOGIN_SERVER/trading-engine@$digest"
+          runner="${CONTAINER_APP_NAME%-engine}-github-runner"
+          if runner_image="$(az containerapp show --resource-group "$RESOURCE_GROUP" --name "$runner" --query properties.template.containers[0].image --output tsv 2>/dev/null)"; then
+            export OBSERVATION_RUNNER_IMAGE="$runner_image"
+          else
+            export OBSERVATION_RUNNER_IMAGE="$(az vm show --resource-group "$RESOURCE_GROUP" --name "$prefix-observe-vm" --query tags.runnerImage --output tsv)"
+          fi
+          umask 077
+          ssh-keygen -q -t ed25519 -N '' -f "$RUNNER_TEMP/observation-bootstrap-key"
+          python3 - <<'PY'
+          import json, os, pathlib
+          temp = pathlib.Path(os.environ['RUNNER_TEMP'])
+          params = {'prefix': os.environ['CONTAINER_APP_NAME'].removesuffix('-cae-engine'), 'imageDigest': os.environ['OBSERVATION_IMAGE'], 'runnerImageDigest': os.environ['OBSERVATION_RUNNER_IMAGE'], 'githubRepository': os.environ['GITHUB_REPOSITORY'], 'sshPublicKey': (temp/'observation-bootstrap-key.pub').read_text().strip(), 'postgresPassword': os.environ['OBSERVATION_POSTGRES_PASSWORD']}
+          (temp/'observation-parameters.json').write_text(json.dumps({'parameters': {key: {'value': value} for key, value in params.items()}}))
+          PY
+          rm -f "$RUNNER_TEMP/observation-bootstrap-key"
+          az deployment group create --resource-group "$RESOURCE_GROUP" --name "observation-${GITHUB_RUN_ID}" --template-file infrastructure/bicep/observation.bicep --parameters "@$RUNNER_TEMP/observation-parameters.json" --output json > "$RUNNER_TEMP/observation-deployment.json"
+          echo "postgres_host=$(jq -r '.properties.outputs.postgresHost.value' "$RUNNER_TEMP/observation-deployment.json")" >> "$GITHUB_OUTPUT"
+          echo "deployment_name=observation-${GITHUB_RUN_ID}" >> "$GITHUB_OUTPUT"
+
+  initialize_observation:
+    needs: prepare_observation
+    if: ${{ inputs.standalone_observation }}
+    runs-on: [self-hosted, linux, x64, crypto-remote-migration]
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --omit=dev
+      - name: Initialize only the new observer database through the VNet
+        env:
+          OBSERVATION_POSTGRES_HOST: ${{ needs.prepare_observation.outputs.postgres_host }}
+          OBSERVATION_POSTGRES_PASSWORD: ${{ secrets.OBSERVATION_POSTGRES_PASSWORD }}
+        run: node scripts/initialize-market-observer.mjs
+
+  launch_observation:
+    needs: [prepare_observation, initialize_observation]
+    if: ${{ inputs.standalone_observation }}
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_DEPLOY_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      - name: Start the observer with protected parameters and verify real market data
+        env:
+          OBSERVATION_DEPLOYMENT: ${{ needs.prepare_observation.outputs.deployment_name }}
+          OBSERVATION_POSTGRES_PASSWORD: ${{ secrets.OBSERVATION_POSTGRES_PASSWORD }}
+          GH_RUNNER_PAT: ${{ secrets.GH_RUNNER_PAT }}
+        run: |
+          set -euo pipefail
+          umask 077
+          prefix="${CONTAINER_APP_NAME%-cae-engine}"
+          az deployment group show --resource-group "$RESOURCE_GROUP" --name "$OBSERVATION_DEPLOYMENT" --output json > "$RUNNER_TEMP/observation-deployment.json"
+          connection_string="$(az monitor app-insights component show --resource-group "$RESOURCE_GROUP" --app "$prefix-ai" --query connectionString --output tsv)"
+          echo "::add-mask::$connection_string"
+          export INSIGHTS_CONNECTION_STRING="$connection_string"
+          node scripts/observation-run-command.mjs "$RUNNER_TEMP/observation-deployment.json" "$RUNNER_TEMP/observation-run-command.json"
+          vm_id="$(az vm show --resource-group "$RESOURCE_GROUP" --name "$prefix-observe-vm" --query id --output tsv)"
+          az rest --method put --url "https://management.azure.com${vm_id}/runCommands/start-observation?api-version=2024-07-01" --body "@$RUNNER_TEMP/observation-run-command.json" --output none
+          url="$(jq -r '.properties.outputs.apiUrl.value' "$RUNNER_TEMP/observation-deployment.json")"
+          for attempt in {1..90}; do
+            if curl --fail --silent --show-error "${url}api/status" > "$RUNNER_TEMP/observation-health.json" && node --input-type=module -e 'import fs from "node:fs"; const s=JSON.parse(fs.readFileSync(process.argv[1])); process.exit(s.ready && s.mode === "OBSERVE" && s.orderExecutionEnabled === false && s.observations.length === 10 ? 0 : 1)' "$RUNNER_TEMP/observation-health.json"; then
+              echo 'Observer healthy: public market data persisted; order transport absent'
+              exit 0
+            fi
+            sleep 10
+          done
+          echo 'Observer did not reach healthy data collection' >&2; exit 1
+      - name: Stop the idle migration runner
+        if: ${{ always() }}
+        run: |
+          set -euo pipefail
+          runner="${CONTAINER_APP_NAME%-engine}-github-runner"
+          if revision="$(az containerapp show --resource-group "$RESOURCE_GROUP" --name "$runner" --query properties.latestReadyRevisionName --output tsv 2>/dev/null)"; then
+            az containerapp revision deactivate --resource-group "$RESOURCE_GROUP" --name "$runner" --revision "$revision" --output none
+          else
+            prefix="${CONTAINER_APP_NAME%-cae-engine}"
+            az vm run-command invoke --resource-group "$RESOURCE_GROUP" --name "$prefix-observe-vm" --command-id RunShellScript --scripts 'docker stop crypto-migration-runner >/dev/null' --output none
+          fi
+      - name: Retire the superseded trading deployment after observer health passes
+        if: ${{ success() }}
+        run: |
+          set -euo pipefail
+          prefix="${CONTAINER_APP_NAME%-cae-engine}"
+          for name in "$prefix-cae-maintenance" "$prefix-cae-positions-read" "$prefix-cae-timeline-read"; do
+            if az containerapp job show --resource-group "$RESOURCE_GROUP" --name "$name" --output none 2>/dev/null; then az containerapp job delete --resource-group "$RESOURCE_GROUP" --name "$name" --yes --output none; fi
+          done
+          for name in "$CONTAINER_APP_NAME" "$prefix-cae-github-runner"; do
+            if az containerapp show --resource-group "$RESOURCE_GROUP" --name "$name" --output none 2>/dev/null; then az containerapp delete --resource-group "$RESOURCE_GROUP" --name "$name" --yes --output none; fi
+          done
+          if az containerapp env show --resource-group "$RESOURCE_GROUP" --name "$prefix-cae" --output none 2>/dev/null; then az containerapp env delete --resource-group "$RESOURCE_GROUP" --name "$prefix-cae" --yes --output none; fi
+          if az postgres flexible-server show --resource-group "$RESOURCE_GROUP" --name "$prefix-pg" --output none 2>/dev/null; then az postgres flexible-server delete --resource-group "$RESOURCE_GROUP" --name "$prefix-pg" --yes --output none; fi
+          old_rules="$(az monitor scheduled-query list --resource-group "$RESOURCE_GROUP" --query "[?starts_with(name, '$prefix-') && !starts_with(name, '$prefix-observe-')].name" --output tsv)"
+          while IFS= read -r name; do [ -z "$name" ] || az monitor scheduled-query delete --resource-group "$RESOURCE_GROUP" --name "$name" --yes --output none; done <<< "$old_rules"
+          old_metrics="$(az monitor metrics alert list --resource-group "$RESOURCE_GROUP" --query "[?starts_with(name, '$prefix-')].name" --output tsv)"
+          while IFS= read -r name; do [ -z "$name" ] || az monitor metrics alert delete --resource-group "$RESOURCE_GROUP" --name "$name" --output none; done <<< "$old_metrics"
+          if az keyvault show --resource-group "$RESOURCE_GROUP" --name "$prefix-kv" --output none 2>/dev/null; then az keyvault delete --resource-group "$RESOURCE_GROUP" --name "$prefix-kv" --output none; fi
+
   diagnose_failure:
-    needs: [validate, build, migrate, deploy_off]
+    needs: [validate, build, migrate, deploy_off, prepare_observation, initialize_observation, launch_observation]
     if: ${{ always() && failure() }}
     runs-on: ubuntu-latest
+    environment: production
     steps:
       - name: Publish redacted failed-job and step summary
         env:
@@ -220,3 +394,20 @@ jobs:
             echo "$summary"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+      - if: ${{ inputs.standalone_observation }}
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_DEPLOY_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      - name: Stop the migration runner after a failed observer deployment
+        if: ${{ inputs.standalone_observation }}
+        run: |
+          set -euo pipefail
+          runner="${CONTAINER_APP_NAME%-engine}-github-runner"
+          prefix="${CONTAINER_APP_NAME%-cae-engine}"
+          if revision="$(az containerapp show --resource-group "$RESOURCE_GROUP" --name "$runner" --query properties.latestReadyRevisionName --output tsv 2>/dev/null)"; then
+            az containerapp revision deactivate --resource-group "$RESOURCE_GROUP" --name "$runner" --revision "$revision" --output none
+          elif az vm show --resource-group "$RESOURCE_GROUP" --name "$prefix-observe-vm" --output none 2>/dev/null; then
+            az vm run-command invoke --resource-group "$RESOURCE_GROUP" --name "$prefix-observe-vm" --command-id RunShellScript --scripts 'docker stop crypto-migration-runner >/dev/null 2>&1 || true' --output none
+          fi

@@ -143,7 +143,7 @@ test("P4 production deployment ends at OFF while FULL promotion and OFF recovery
   assert.match(workflow, /name: Safely hand off and verify the OFF revision/);
   assert.match(workflow, /name: Update read-only jobs/);
   assert.doesNotMatch(workflow, /  promote_full:/);
-  assert.match(workflow, /  diagnose_failure:\n    needs: \[validate, build, migrate, deploy_off\]\n    if: \$\{\{ always\(\) && failure\(\) \}\}/);
+  assert.match(workflow, /  diagnose_failure:\n    needs: \[validate, build, migrate, deploy_off, prepare_observation, initialize_observation, launch_observation\]\n    if: \$\{\{ always\(\) && failure\(\) \}\}/);
   assert.match(workflow, /Publish redacted failed-job and step summary/);
   assert.equal([...workflow.matchAll(/node scripts\/production-revision-handoff\.mjs/g)].length, 1);
   assert.match(workflow, /--expect-mode OFF --execute/);
