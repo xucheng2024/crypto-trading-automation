@@ -140,7 +140,7 @@ resource vm 'Microsoft.Compute/virtualMachines@2024-07-01' = {
   tags: union(tags, { runnerImage: runnerImageDigest })
   identity: { type: 'UserAssigned', userAssignedIdentities: { '${pullIdentity.id}': {} } }
   properties: {
-    hardwareProfile: { vmSize: 'Standard_B2ls_v2' }
+    hardwareProfile: { vmSize: 'Standard_B2als_v2' }
     storageProfile: {
       imageReference: { publisher: 'Canonical', offer: 'ubuntu-24_04-lts', sku: 'server', version: 'latest' }
       osDisk: { createOption: 'FromImage', diskSizeGB: 32, managedDisk: { storageAccountType: 'StandardSSD_LRS' } }
